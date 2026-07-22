@@ -1,6 +1,6 @@
 # crossword-filler
 
-A high-performance crossword grid autofill engine, written in C++20.
+A high-performance crossword grid autofill engine, written in C++.
 
 Crossword filling is modeled as a constraint satisfaction problem
 (across/down slots as variables, dictionary words as domains, crossing
@@ -10,7 +10,7 @@ for the architecture and roadmap.
 
 ## Status
 
-🚧 Early scaffold — core data structures and interfaces are in place;
+Early scaffold — core data structures and interfaces are in place;
 the actual propagation/search logic is being built out incrementally,
 with each optimization benchmarked before/after rather than assumed.
 
