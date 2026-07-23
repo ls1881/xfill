@@ -31,12 +31,24 @@ class Grid {
  public:
   Grid(int width, int height);
 
-  // Load a grid layout from a text spec: '.' = open cell, '#' = block.
+  // Loads a grid layout from a text spec: '.' = open cell, '#' = block.
   static Grid FromSpec(const std::vector<std::string>& rows);
+
+  // Reads a grid spec from a file, one row per line (trailing blank
+  // lines are ignored; '\r' is stripped for files with CRLF endings).
+  static Grid FromFile(const std::string& path);
 
   int width() const { return width_; }
   int height() const { return height_; }
+  bool IsBlocked(int row, int col) const {
+    return blocked_[static_cast<size_t>(row) * static_cast<size_t>(width_) +
+                     static_cast<size_t>(col)];
+  }
+
   const std::vector<Slot>& slots() const { return slots_; }
+  const Slot& SlotById(int id) const {
+    return slots_[static_cast<size_t>(id)];
+  }
   const std::vector<Crossing>& crossings() const { return crossings_; }
 
  private:
@@ -46,8 +58,17 @@ class Grid {
   int width_;
   int height_;
   std::vector<bool> blocked_;  // size width_ * height_
+
   std::vector<Slot> slots_;
   std::vector<Crossing> crossings_;
+
+  // Per-cell lookup of which slot (if any) covers it in each direction and
+  // the offset within that slot. Built by ComputeSlots and consumed by
+  // ComputeCrossings.
+  std::vector<int> cell_across_slot_;
+  std::vector<int> cell_across_offset_;
+  std::vector<int> cell_down_slot_;
+  std::vector<int> cell_down_offset_;
 };
 
 }  // namespace xfill

@@ -25,15 +25,29 @@ The solver aims to either find a valid fill or prove none exists
 
 ## Roadmap
 
-1. **Correctness baseline** — implement `Grid::ComputeSlots` /
-   `ComputeCrossings`, `Dictionary::LetterMask`, and a naive
-   backtracking `Solver::Solve` (no propagation yet). Get tests passing
-   end-to-end on the sample wordlist.
-2. **Add AC-3 propagation** — filter crossing slot domains after every
-   assignment, not just at leaf nodes.
-3. **Benchmark harness** — wire up `benchmarks/run_benchmarks.sh` against
-   real grid files, capture nodes/backtracks/time.
-4. **Performance passes** (see benchmarking data before committing to
+1. ✅ **Correctness baseline** — `Grid::ComputeSlots` / `ComputeCrossings`,
+   `Dictionary::LetterMask`, and a `Solver::Solve` that runs full AC-3
+   style propagation to a fixpoint after every guess, with MRV branching
+   and full-copy backtracking. No performance optimizations yet by
+   design — this is the number every later change gets benchmarked
+   against.
+
+   Verified against a real ~280k-entry `WORD;SCORE` dictionary:
+   - Small/medium grids (5x5 open, 7x7 with a typical block pattern):
+     solves in well under a second.
+   - A block-patterned 15x15 did **not** finish within 120s. This
+     matches expectations, not a bug — naive backtracking with only
+     MRV and no conflict-directed backjumping, cell-level branching,
+     or delta-undo is exactly the baseline that specialized solvers
+     like Orca are 5-100x faster than (see the "How Orca Works"
+     writeup this project's roadmap is informed by). Getting a full
+     15x15 solving quickly is the point of steps 2-4 below.
+
+2. **Benchmark harness** — wire up `benchmarks/run_benchmarks.sh` against
+   the grids in `benchmarks/grids/` (generated with
+   `benchmarks/generate_grid.py`), capturing nodes/backtracks/time so
+   every later change has a before/after number.
+3. **Performance passes** (see benchmarking data before committing to
    any of these):
    - Delta-undo / trail-based backtracking instead of full domain copies.
    - Cell-level branching with a SoCDP-style heuristic instead of
