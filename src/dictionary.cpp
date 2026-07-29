@@ -26,6 +26,10 @@ void WordBitset::Clear(size_t index) {
   words_[index / 64] &= ~(uint64_t{1} << (index % 64));
 }
 
+void WordBitset::ClearAll() {
+  std::fill(words_.begin(), words_.end(), uint64_t{0});
+}
+
 bool WordBitset::Test(size_t index) const {
   return (words_[index / 64] >> (index % 64)) & 1;
 }
@@ -47,8 +51,13 @@ bool WordBitset::Any() const {
 
 std::vector<size_t> WordBitset::SetBits() const {
   std::vector<size_t> out;
-  for (size_t i = 0; i < num_words_; ++i) {
-    if (Test(i)) out.push_back(i);
+  for (size_t i = 0; i < words_.size(); ++i) {
+    uint64_t w = words_[i];
+    while (w != 0) {
+      int bit = __builtin_ctzll(w);
+      out.push_back(i * 64 + static_cast<size_t>(bit));
+      w &= w - 1;  // clear the lowest set bit
+    }
   }
   return out;
 }

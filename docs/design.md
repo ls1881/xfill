@@ -82,21 +82,81 @@ The solver aims to either find a valid fill or prove none exists
    `ingrid_core` (word-choice randomization and "adaptive branching
    stickiness" were both deliberately left out) and why.
 
-5. **Not yet implemented** (see bibliography for why each is a
+   **Tried and reverted:** Meehan & Gray's grid-seeding idea (place one
+   random word in a high-degree slot before each restart, since a
+   deterministic search otherwise repeats the identical fill attempt). It
+   was implemented, then backed out after benchmarking exposed a real
+   soundness bug: a seeded attempt that exhausts naturally only proves
+   *that seed word* doesn't lead anywhere, not that the grid is
+   unsatisfiable, but `Solve()`'s restart loop was treating any non-
+   budget-aborted exhaustion as definitive. See `docs/bibliography.md`'s
+   Meehan & Gray entry for the concrete false-negative this produced.
+
+5. ✅ **Real-world benchmark set + profiling-driven propagation speedups.**
+   `benchmarks/grids/scraped_15x15/` holds 500 real 15x15 grid layouts
+   (block patterns only) scraped from crosswordgrids.com via
+   `benchmarks/scrape_crosswordgrids.py`, and
+   `benchmarks/bench_subset.py` runs a reproducible random sample of
+   them (fixed seed) with a per-grid timeout, for measuring real
+   before/after effect rather than tuning against the small hand-picked
+   set in `benchmarks/grids/` alone. A 20-grid sample (seed 42) mostly
+   *didn't* solve at all under `min_score=50` with a 20s cap (5/20
+   solved) -- real newspaper-style 15x15s are considerably denser and
+   harder than this project's synthetic grids, which is exactly why they
+   were worth benchmarking against.
+
+   `sample`-profiling one of the timeouts (`grid_013.txt`) showed ~97% of
+   samples inside `Propagate`'s letter-viability check
+   (`WordBitset::Intersects`, `Dictionary::LetterMask`,
+   `WordBitset::operator|=`) -- i.e. the search wasn't spending time on
+   backtracking bookkeeping at all, it was propagation-bound. Two fixes
+   followed directly from that profile, both purely mechanical (no new
+   algorithm, no behavior change -- every fix below produces byte-identical
+   node/backtrack counts on `benchmarks/grids/`, just faster):
+   - `WordBitset::SetBits()` rewritten to skip zero chunks and extract set
+     bits via `ctz` + clear-lowest-bit, instead of testing every index
+     one at a time -- it was an accidental O(size()) bit-by-bit scan
+     where it should have been an O(chunks + popcount) one.
+   - `Propagate`'s "which letters are viable at this crossing" check gets
+     a direct-lookup fast path for domains below `kDirectLookupThreshold`
+     candidates (tuned to 1000 by rerunning `bench_subset.py` at several
+     values): read the actual surviving words' letters via the now-fast
+     `SetBits()` instead of testing all 26 `LetterMask`s against the full
+     bitset, since an `Intersects()` call's cost depends on where the
+     surviving words fall in the array, not on how few of them remain.
+   - The per-crossing `filter` bitset is now a reused per-length scratch
+     buffer (`filter_scratch_by_length_`) instead of a fresh heap
+     allocation every crossing, once `sample` showed malloc/free churn
+     as a real (~15%) cost too.
+
+   Net effect on the same 20-grid sample: every grid that solved before
+   is 2.3-4.8x faster (e.g. `grid_112.txt`: 0.100s → 0.021s), one former
+   20s timeout (`grid_126.txt`) now solves in ~7s, and the existing
+   curated grids sped up similarly with *identical* nodes/backtracks
+   (e.g. `sample_9x9.txt`: 0.22s → 0.05s, still 1449 nodes/202
+   backtracks) -- confirming these are pure constant-factor wins, not
+   search-order changes.
+
+6. **Not yet implemented** (see bibliography for why each is a
    reasonable next step, and what it would cost):
    - Cell-level branching with a SoCDP-style heuristic instead of
      slot-level MRV (Orca's headline architectural difference -- a
      bigger rewrite than the above, since it changes the search
      variable from "which word" to "which letter").
    - Nogood learning via constraint-graph clustering (Anbulagan & Botea's
-     COMBUS) -- would help most on the genuinely hard, dense grids
-     (`sample_13x13/15x15/21x21.txt`); randomized restarts (step 4) help
-     with heavy-tailed *bad luck* in the search order, but a hard-region
-     instance in Anbulagan & Botea's sense is expensive for *every*
-     search order, which only nogood learning (not restarts) can address.
-     Per their own phase-transition data, "hard region" instances can take
-     >24h even for a dedicated solver, so some ceiling here is real, not a
-     bug in this codebase.
+     COMBUS) -- confirmed still needed: `sample_13x13.txt` and the
+     original `sample_15x15.txt` (fully-open interior, not
+     `sample_15x15_interlock.txt`) were re-tested with restarts in place
+     and still didn't finish within a 5-minute cap at `min_score=50`.
+     Randomized restarts (step 4) help with heavy-tailed *bad luck* in the
+     search order, but a hard-region instance in Anbulagan & Botea's sense
+     is expensive for *every* search order, which only nogood learning
+     (not restarts) can address. Per their own phase-transition data,
+     "hard region" instances can take >24h even for a dedicated solver, so
+     some ceiling here is real, not a bug in this codebase.
+     (`sample_21x21.txt` is not actually in this category -- see the
+     README's "Known limits" section: it's proven unsatisfiable in
+     microseconds by domain size alone, not a hard search.)
    - Two-stage overestimation search / partial-state warm-starting
      (Botea & Bulitko) -- built for score-*optimization* crosswords, so
      porting it to our plain feasibility solver isn't a direct fit, but

@@ -41,7 +41,18 @@ reasoning and citations behind each piece, see
    fixed rescan of every crossing), and it skips a narrowing step
    entirely when either every letter is still viable at that position, or
    the neighbor's domain is already a subset of the incoming filter.
-   (Source: `rainjacket/orca-solver`.)
+   (Source: `rainjacket/orca-solver`.) Checking "which letters are viable
+   at this crossing" takes one of two paths depending on how narrow the
+   slot's domain already is: a domain below `kDirectLookupThreshold`
+   candidates reads their actual letters directly (cheap once
+   `WordBitset::SetBits()` skips zero chunks via `ctz` instead of testing
+   every index one at a time); a wider domain tests all 26 `LetterMask`s
+   against it instead, since materializing every surviving candidate
+   isn't worth it when there are thousands of them. This split -- and the
+   `SetBits()` fix, and reusing one scratch bitset per length instead of
+   heap-allocating a fresh one per crossing -- came directly out of
+   `sample`-profiling a real (scraped, not synthetic) 15x15 that was
+   timing out: see `docs/design.md`'s roadmap for the numbers.
 
 3. **Branching.** `SelectBranchSlot` picks which slot to guess next using
    `dom/wdeg`: (masked domain size) ÷ (summed weight of this slot's
@@ -87,14 +98,18 @@ reasoning and citations behind each piece, see
 
 `benchmarks/grids/sample_13x13.txt` and `sample_15x15.txt` (the original,
 fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
-which does solve) remain intractable at `min_score=50` even with the
-above. Per Anbulagan & Botea's phase-transition study of crossword CSPs,
-some "hard region" instances stay expensive for *any* search order — that
-needs nogood learning, not a better search order, to fix (see
-`docs/design.md`'s roadmap). `sample_21x21.txt` is different: it's proven
-unsatisfiable in microseconds, because it has a fully-open 21-cell row and
-the real dictionary has no words that long at `min_score=50` (max length
-15) — not a search problem at all.
+which does solve) still don't finish within a 5-minute cap at
+`min_score=50`, even with randomized restarts. That's an expected result,
+not a bug: per Anbulagan & Botea's phase-transition study of crossword
+CSPs, some "hard region" instances stay expensive for *any* search order,
+because the underlying instance itself is hard, not just this solver's
+choices leading up to it -- restarts fix a search that got *unlucky*, but
+can't turn a genuinely hard instance easy. Fixing this needs nogood
+learning (recording "this partial assignment can't work, don't retry it"),
+not a better search order -- see `docs/design.md`'s roadmap. `sample_21x21.txt`
+is different: it's proven unsatisfiable in microseconds, because it has a
+fully-open 21-cell row and the real dictionary has no words that long at
+`min_score=50` (max length 15) -- not a search problem at all.
 
 ## Dictionary format
 
@@ -153,6 +168,19 @@ Grids in `benchmarks/grids/` were generated with:
 
 ```bash
 python3 benchmarks/generate_grid.py --size 15 --block-pairs 18 > benchmarks/grids/sample_15x15.txt
+```
+
+`benchmarks/grids/scraped_15x15/` holds 500 real 15x15 grid layouts
+(block patterns only, via `benchmarks/scrape_crosswordgrids.py`) —
+a much harder, more realistic benchmark set than the small curated one
+above. `benchmarks/bench_subset.py` runs a reproducible random sample of
+them against `xfill_cli`, with a per-grid timeout, and can diff two runs
+against each other:
+
+```bash
+python3 benchmarks/bench_subset.py --n 20 --seed 42 --save before.csv
+# ...make a change...
+python3 benchmarks/bench_subset.py --n 20 --seed 42 --compare before.csv
 ```
 
 ## License

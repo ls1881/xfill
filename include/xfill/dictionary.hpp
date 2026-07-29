@@ -18,13 +18,18 @@ class WordBitset {
 
   void Set(size_t index);
   void Clear(size_t index);
+  // Zeros every word without changing size() or reallocating -- lets a
+  // caller reuse one WordBitset as scratch space across many iterations
+  // of a hot loop instead of constructing (and heap-allocating) a fresh
+  // one each time.
+  void ClearAll();
   bool Test(size_t index) const;
   size_t Count() const;
   bool Any() const;
   size_t size() const { return num_words_; }
 
-  // Indices of every set bit. Simple O(n) scan -- correctness-first;
-  // revisit only if profiling on real grids says it's worth it.
+  // Indices of every set bit, via ctz + clear-lowest-bit so cost tracks
+  // the number of *chunks touched and bits actually set*, not size().
   std::vector<size_t> SetBits() const;
 
   // Index of the first (lowest) set bit. Caller must ensure Any() is true.

@@ -232,6 +232,12 @@ class Solver {
   // crossings_by_slot_[slot_id] -- every other slot it crosses, and the
   // offset within each side of the crossing cell.
   std::vector<std::vector<SlotCrossing>> crossings_by_slot_;
+  // One scratch WordBitset per word length, reused as Propagate's `filter`
+  // instead of heap-allocating a fresh one on every crossing check --
+  // profiling showed WordBitset construction/destruction was a real cost
+  // in this hot loop. Sized once in the constructor; ClearAll() resets
+  // without reallocating. Mutable for the same reason as `rng_`.
+  mutable std::unordered_map<int, WordBitset> filter_scratch_by_length_;
 
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this

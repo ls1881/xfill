@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <iostream>
 #include <utility>
 
 namespace xfill {
@@ -27,6 +29,9 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
     : grid_(grid), dict_(dict), crossings_by_slot_(grid_.slots().size()) {
   for (const Slot& slot : grid_.slots()) {
     slots_by_length_[slot.length].push_back(slot.id);
+  }
+  for (const auto& [length, ids] : slots_by_length_) {
+    filter_scratch_by_length_[length] = WordBitset(dict_.NumWordsOfLength(length), false);
   }
   const std::vector<Crossing>& crossings = grid_.crossings();
   for (size_t i = 0; i < crossings.size(); ++i) {
@@ -110,6 +115,11 @@ std::optional<Solution> Solver::Solve() {
     if (!aborted_) return std::nullopt;
 
     stats_.restarts++;
+    if (std::getenv("XFILL_DEBUG_RESTARTS")) {
+      std::cerr << "restart " << stats_.restarts
+                << " total_backtracks=" << stats_.backtracks
+                << " next_limit=" << attempt_backtrack_limit_ << "\n";
+    }
     attempt_backtrack_limit_ = std::max<uint64_t>(
         attempt_backtrack_limit_ + 1,
         static_cast<uint64_t>(static_cast<float>(attempt_backtrack_limit_) *
@@ -161,14 +171,43 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
     int length = grid_.SlotById(slot).length;
     const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
 
+    // For a domain narrowed below this many candidates, it's cheaper to
+    // read their actual letters directly than to ask "is any word with
+    // letter C at this position still in the domain?" 26 times -- each
+    // such Intersects() call walks the underlying bitset's full chunk
+    // array regardless of how few bits are set (it can only early-exit on
+    // finding an overlap, not on running out of set bits), so 26 of them
+    // cost roughly 26x one chunk-array pass, while direct lookup costs
+    // one chunk-array pass (via SetBits()) plus a handful of O(1) string
+    // reads. `best_count` is already known from the queue-selection step
+    // above, so checking it here costs nothing extra. 1000 was picked by
+    // re-running benchmarks/bench_subset.py against several values (16,
+    // 200, 1000) on the same 20-grid sample and taking the plateau --
+    // not derived analytically, per this project's benchmarking
+    // philosophy (see docs/design.md).
+    constexpr size_t kDirectLookupThreshold = 1000;
+    std::vector<size_t> slot_candidates;
+    const std::vector<std::string>* slot_words = nullptr;
+    if (best_count <= kDirectLookupThreshold) {
+      slot_candidates = slot_domain.SetBits();
+      slot_words = &dict_.WordsOfLength(length);
+    }
+
     for (const SlotCrossing& sc : crossings_by_slot_[static_cast<size_t>(slot)]) {
       // Which letters are still viable at this crossing position, given
       // the slot's current domain?
       uint32_t possible = 0;
-      for (int c = 0; c < 26; ++c) {
-        if (slot_domain.Intersects(dict_.LetterMask(length, sc.my_offset,
-                                                      static_cast<char>('A' + c)))) {
-          possible |= (1u << c);
+      if (slot_words != nullptr) {
+        for (size_t idx : slot_candidates) {
+          char ch = (*slot_words)[idx][static_cast<size_t>(sc.my_offset)];
+          possible |= (1u << (ch - 'A'));
+        }
+      } else {
+        for (int c = 0; c < 26 && possible != kAllLettersMask; ++c) {
+          if (slot_domain.Intersects(dict_.LetterMask(length, sc.my_offset,
+                                                        static_cast<char>('A' + c)))) {
+            possible |= (1u << c);
+          }
         }
       }
       if (possible == kAllLettersMask) continue;  // no constraint to apply
@@ -176,7 +215,8 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       int neighbor_length = grid_.SlotById(sc.neighbor).length;
       WordBitset& neighbor_domain = domains[static_cast<size_t>(sc.neighbor)];
 
-      WordBitset filter(neighbor_domain.size(), false);
+      WordBitset& filter = filter_scratch_by_length_[neighbor_length];
+      filter.ClearAll();
       for (int c = 0; c < 26; ++c) {
         if (possible & (1u << c)) {
           filter |= dict_.LetterMask(neighbor_length, sc.neighbor_offset,

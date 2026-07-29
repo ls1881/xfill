@@ -11,6 +11,14 @@ concrete algorithm improvement. `rf-/ingrid_core`'s actual
 first pass) to get its restart mechanism's exact constants right rather
 than approximating them from memory.
 
+*Session 3 addendum:* one more source, below, was read at the user's
+request and evaluated for whether it should change the algorithm. It did
+not end up changing shipped behavior -- see its entry for why -- but the
+evaluation itself (implement, benchmark, find a real bug, revert) is
+recorded here in keeping with this project's benchmarking philosophy:
+every claimed improvement needs a real before/after number, including
+negative ones.
+
 ## Academic papers
 
 ### Beacham, Chen, Sillito, van Beek — "Constraint Programming Lessons Learned from Crossword Puzzles" (Canadian AI 2001)
@@ -153,6 +161,16 @@ median given certain conditions on the randomization; this project's
 restart loop is the practical mechanism (geometric cutoff growth,
 learned weights preserved across restarts) without reproducing that
 formal guarantee -- the same pragmatic gap `ingrid_core` itself accepts.
+
+### Meehan & Gray — "Constructing Crossword Grids: Use of Heuristics vs Constraints" (Aberdeen, 1997) *(new)*
+
+**What it is.** Confirmed via the actual paper (`gtoal.com/scrabble/meehan/cross.pdf`), not a summary. Compares word-by-word vs. letter-by-letter grid instantiation, and a hand-written Prolog/C backtracker vs. a constraint-logic-programming solver (CHIP), on the same three benchmark grids as Ginsberg et al. 1990. For picking which pattern to fill next, it compares an exact match-count (`most_constrained`), a cheap ratio-based estimate, and a precomputed-probability estimate (`est_constrained`); for picking which word, it compares taking the first few dictionary matches, a random sample, and sampling weighted by how much choice each preserves for the rest of the grid.
+
+**How it differs / how it's used here -- corroboration.** Its results independently validate two choices already made in this project, from a completely different implementation (Prolog/CHIP, not Rust) and era (1997, not this project's other sources): (1) exact match-count `most_constrained` selection was overall the best and most stable of its three fill strategies -- on its hardest 13x13 grid, exact counting took 226 backtracks vs. 3167.6 for the cheap ratio estimate and 2961 for the probability estimate -- which is exactly why this project's `dom/wdeg` uses `WordBitset::Count()` (an exact popcount) rather than a cheaper approximation; (2) it notes that `most_constrained` gets arc-consistency detection "for free," since an already-empty domain has zero matches and is picked (and fails) immediately, without a separate consistency check -- the same reason this project's `SelectBranchSlot` deliberately does not skip a slot whose masked domain is empty (see its doc comment in `solver.hpp`).
+
+**How it differs / how it's used here -- an idea tried and reverted.** Its "seeding" technique (Section 2.4): since a deterministic fill/pick strategy produces the identical fill every time on the same grid, it seeds the search with one random word placed in one of the longest (highest-degree) patterns before instantiation starts, on the reasoning that perturbing a highly-connected pattern first ripples through the rest of the grid more than perturbing an arbitrary one would. This looked like a natural complement to this session's other restart work, so it was implemented: on each restart (never on the deterministic first attempt, consistent with this project's existing rule), place one uniformly-random word into a slot with the most crossings, then run the normal `dom/wdeg` search from there.
+
+It was reverted after benchmarking exposed a real soundness bug, not just a missing win. On `sample_13x13.txt`, the seeded version reported "No solution found" after a single restart in ~2 seconds (610 total backtracks) -- while the unseeded restart mechanism, given the same 90-second window, hadn't even finished its *first* 500-backtrack-budget attempt. The seeded run wasn't actually faster at solving the real problem; forcing a specific random word into a high-degree slot shrinks the *reachable* search space so much that the (heavily constrained) remainder exhausts quickly -- but exhausting that constrained remainder only proves *that seed word doesn't work*, not that the whole grid is unsatisfiable. `Solve()`'s restart loop treats any attempt that exhausts without hitting its backtrack budget as definitive UNSAT, which is correct for the existing (unseeded) restarts, since every one of them searches the same full, unconstrained space, just in a different order -- but it's wrong once an attempt is seeded with an artificial constraint. A correct version would need to track seeded vs. unseeded attempts separately and only ever trust an *unseeded* exhaustion as authoritative (e.g. by alternating them), which is real added complexity for a technique whose actual benefit -- as opposed to this false-positive speed -- remains unmeasured. Given the choice between that complexity and a technique with no demonstrated real upside, it was backed out rather than fixed forward. `Solver::Solve` in `src/solver.cpp` still has one small permanent souvenir of this investigation: an `XFILL_DEBUG_RESTARTS`-gated stderr trace of each restart's cumulative backtracks and next budget, which is what made the bug visible in the first place and is generically useful for debugging future restart behavior.
 
 ## Practitioner writeups
 
