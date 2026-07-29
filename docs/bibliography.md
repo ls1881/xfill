@@ -27,6 +27,45 @@ search space enormously. The academic entry below (Dechter) is the real
 answer to that question; see it for what was implemented, measured, and
 concluded.
 
+*Session 5 addendum:* the user asked for an open-ended pass -- review the
+algorithm, research other CSP approaches, and iterate: implement, measure
+against the real benchmark set, keep what helps, revert and document what
+doesn't. Three things came out of this pass, in the order investigated:
+(1) the "Learning" half of the Dechter (1990) paper below already had
+backjumping investigated and reverted in session 4, but not learning
+itself -- this session finished and honestly benchmarked it (see that
+entry's new subsection); it regressed the same way backjumping did, for
+what looks like the same underlying reason. (2) A restart-strategy
+literature check (Luby et al. 1993 vs. Walsh's geometric strategy) found
+this project's existing choice (geometric, ported from `ingrid_core`) is
+already the one the wider SAT/CSP literature converged on in practice, so
+no code change followed -- see the new corroboration entry below. (3) A
+fresh `sample`-profiling pass on a currently-timing-out real grid found a
+genuine, if modest, remaining constant-factor win unrelated to any of the
+above: see `docs/design.md`'s roadmap for the profiling numbers and what
+changed (`WordBitset`'s methods moved into the header so they can actually
+be inlined at their call sites, since this project builds without LTO).
+
+*Session 6 addendum:* the user pushed back on session 5's conclusion --
+"should be able to fill all the scraped_15x15" -- rather than accepting
+the roughly-30%-solved status quo as a fixed ceiling. This wasn't a new
+technique to research so much as a question this project had never
+actually asked: every session up through session 5 benchmarked at
+`min_score=50` without ever testing whether *that specific number* was
+appropriate, and it turned out to be the single biggest lever pulled in
+this project's history, well ahead of any search-algorithm change --
+`min_score=40` alone roughly triples the practical solve rate (30% → 78%
+on a 100-grid real sample at a 20s cap), and most of the *remaining*
+20s-cap timeouts turn out to just need a couple more minutes of patience,
+not a fundamentally harder search or an even bigger dictionary. Full
+investigation, numbers, and the honest remaining gap (a real if smaller
+hard core, e.g. `sample_13x13.txt`, unresolved after 15+ minutes even
+with the bigger dictionary) are in `docs/design.md`'s roadmap (step 8)
+rather than repeated here, since this was an empirical
+dictionary-configuration investigation rather than a technique drawn from
+an external source -- there's no paper or codebase to annotate, just this
+project's own benchmark set finally being asked the right question.
+
 ### Dechter -- "Tractable Structures for Constraint Satisfaction Problems" (book chapter, 2006) *(new)*
 
 **What it is.** A survey of graph-structure-based tractability results for
@@ -155,6 +194,84 @@ handle the "the search is stuck" case GBJ is also aimed at, from a
 different angle. Untangling that interaction well enough to make GBJ a
 net positive here would need its own dedicated investigation rather
 than a bolt-on; not pursued further this round.
+
+**Learning -- also implemented, also reverted (session 5).** This same
+paper's title has two halves, "Backjumping" and "Learning," and only the
+first was evaluated in session 4. This session implemented the second:
+plain nogood learning (not the clustered/COMBUS variant below -- see
+Anbulagan & Botea), scoped deliberately narrowly to keep it unconditionally
+sound without approximating anything. Every slot's domain carries a
+`responsible_` bitset of which currently-assigned slots actually narrowed
+it (credit flows transitively through unassigned, propagation-only
+intermediaries too, riding the same trail as the domain itself so
+backtracking undoes both together); whenever a domain empties with zero
+candidates having been tried -- either mid-propagation, or in `Backtrack`
+when the global used-word mask alone wipes out an already-nonempty domain
+-- that responsible set (plus, for the used-word case, whichever assigned
+slots own the specific masking words) is recorded as a nogood, capped in
+size and count (Dechter's "i-bounded learning") and deduped by hash.
+`Assign` then checks, before paying for a full propagation cascade,
+whether the assignment just made completes any previously-recorded
+nogood mentioning that slot -- if so it fails immediately. Unlike the
+reverted backjumping half, this never changes *where* the search
+backtracks to, only adds an early-exit check on top of the otherwise
+unchanged chronological search, so there was real reason to expect it
+might avoid backjumping's regression.
+
+It didn't. Benchmarked on the same 20-grid real sample (seed 42,
+`min_score=50`, 20s cap): solved count dropped from 6 to 5, with
+`grid_126.txt` going from solved (7.2s) to timeout, and `grid_016.txt`
+getting markedly slower (16,636 → 78,040 nodes; 2,583 → 12,696 backtracks;
+4 → 13 restarts; 0.88s → 5.06s) despite the mechanism visibly working --
+`grid_016.txt` alone recorded 7,488 nogoods and used them to short-circuit
+941 assignments without running propagation. The pruning is real; the
+net effect is still worse. Best-guess explanation, and it's the same one
+as backjumping's: both `grid_016.txt` and `grid_126.txt`'s regressions
+came with a jump in `restarts` (4→13, and enough to newly time out,
+respectively), meaning nogood-driven pruning changed *how much work each
+restart attempt does before hitting its backtrack budget and giving up*
+-- not the total work, which any sound pruning mechanism should only ever
+reduce, but its *distribution* across attempts. Since each restart reseeds
+`SelectBranchSlot`'s tie-breaking RNG independently (see the restart
+mechanism in `solver.hpp`), an attempt that fails faster/differently
+because of nogood pruning explores a differently-shaped subtree before
+giving up, which changes which attempt number turns out to be the lucky
+one -- for these two grids, unluckily. Reverted (`git checkout` back to
+this session's starting commit for `include/xfill/solver.hpp` and
+`src/solver.cpp`) rather than kept for a cherry-picked win, same standard
+as backjumping. The emerging pattern across both attempts: any mechanism
+that prunes based on the *current* search state interacts with this
+project's restart+dom/wdeg combination in ways that are very easy to get
+soundly right and very hard to get net-positive, because the real lever
+being pulled is each restart's random-seed trajectory, not the raw amount
+of search work. A future attempt at either idea should probably measure
+*that* interaction directly (e.g. restart-count and per-attempt backtrack
+distributions, not just aggregate nodes) rather than treating "it's sound
+and it prunes" as sufficient justification to expect a net win.
+
+### Universal vs. geometric restart strategies -- corroboration, no code change (session 5)
+
+**What it is.** Two restart-schedule results checked against the
+existing choice in `Solve()` (`kRetryGrowthFactor = 1.1`, ported from
+`ingrid_core`, itself citing Balafoutis): Luby, Sinclair & Zuckerman's
+"Optimal Speedup of Las Vegas Algorithms" (1993), which proves a specific
+restart sequence is *log-optimal* when the underlying runtime
+distribution is unknown; and Walsh's geometric-growth strategy, adopted
+by MiniSat from version 1.13 onward and widely credited since as the
+practically better-performing choice despite lacking Luby's worst-case
+guarantee.
+
+**How it differs / how it's used here.** Not implemented, because there
+was nothing to fix: this project already uses geometric growth, which is
+the side the practical literature (not just MiniSat's own choice, but the
+broader SAT/CSP-solver-engineering consensus that followed it) has
+converged on, precisely because Luby's optimality guarantee is a
+worst-case bound that doesn't reflect typical behavior. This is
+corroboration in the same spirit as the Meehan & Gray entry below: an
+independent source, read specifically to find a possible improvement,
+that instead validated a choice already made -- worth recording so a
+future session doesn't re-propose switching to Luby without knowing this
+was already checked.
 
 ## Academic papers
 

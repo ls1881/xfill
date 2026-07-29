@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -11,44 +12,109 @@ namespace xfill {
 // A fixed-size bitset over word indices for a given word length, sized to
 // fit the dictionary's word count for that length. Backed by a flat
 // vector<uint64_t> so operations compile to wide vector instructions.
+//
+// Every method is defined right here in the header (not in dictionary.cpp,
+// where they used to live) so they can actually be inlined at their call
+// sites in solver.cpp's hot propagation loop: this project builds without
+// LTO/IPO (see CMakeLists.txt), so a definition left in a different
+// translation unit is a real, uninlinable function call at -O3 regardless
+// of how trivial its body is. `sample`-profiling a real timing-out 15x15
+// (grid_013.txt) showed this directly -- operator|= alone was the single
+// hottest symbol in the whole binary (27% of samples), ahead of Propagate
+// itself, purely from cross-TU call overhead on a one-line loop. See
+// docs/design.md for the measured effect of moving these here.
 class WordBitset {
  public:
   WordBitset() : num_words_(0) {}
-  explicit WordBitset(size_t num_words, bool all_set = true);
+  explicit WordBitset(size_t num_words, bool all_set = true)
+      : words_((num_words + 63) / 64, 0), num_words_(num_words) {
+    if (all_set) {
+      std::fill(words_.begin(), words_.end(), ~uint64_t{0});
+      size_t rem = num_words_ % 64;
+      if (rem != 0 && !words_.empty()) {
+        words_.back() &= (uint64_t{1} << rem) - 1;
+      }
+    }
+  }
 
-  void Set(size_t index);
-  void Clear(size_t index);
+  void Set(size_t index) { words_[index / 64] |= (uint64_t{1} << (index % 64)); }
+  void Clear(size_t index) { words_[index / 64] &= ~(uint64_t{1} << (index % 64)); }
   // Zeros every word without changing size() or reallocating -- lets a
   // caller reuse one WordBitset as scratch space across many iterations
   // of a hot loop instead of constructing (and heap-allocating) a fresh
   // one each time.
-  void ClearAll();
-  bool Test(size_t index) const;
-  size_t Count() const;
-  bool Any() const;
+  void ClearAll() { std::fill(words_.begin(), words_.end(), uint64_t{0}); }
+  bool Test(size_t index) const { return (words_[index / 64] >> (index % 64)) & 1; }
+  size_t Count() const {
+    size_t total = 0;
+    for (uint64_t w : words_) total += static_cast<size_t>(__builtin_popcountll(w));
+    return total;
+  }
+  bool Any() const {
+    for (uint64_t w : words_) {
+      if (w) return true;
+    }
+    return false;
+  }
   size_t size() const { return num_words_; }
 
   // Indices of every set bit, via ctz + clear-lowest-bit so cost tracks
   // the number of *chunks touched and bits actually set*, not size().
-  std::vector<size_t> SetBits() const;
+  std::vector<size_t> SetBits() const {
+    std::vector<size_t> out;
+    for (size_t i = 0; i < words_.size(); ++i) {
+      uint64_t w = words_[i];
+      while (w != 0) {
+        int bit = __builtin_ctzll(w);
+        out.push_back(i * 64 + static_cast<size_t>(bit));
+        w &= w - 1;  // clear the lowest set bit
+      }
+    }
+    return out;
+  }
 
   // Index of the first (lowest) set bit. Caller must ensure Any() is true.
-  size_t First() const;
+  size_t First() const {
+    for (size_t i = 0; i < words_.size(); ++i) {
+      if (words_[i] != 0) {
+        return i * 64 + static_cast<size_t>(__builtin_ctzll(words_[i]));
+      }
+    }
+    return num_words_;
+  }
 
-  WordBitset& operator&=(const WordBitset& other);
-  WordBitset& operator|=(const WordBitset& other);
+  WordBitset& operator&=(const WordBitset& other) {
+    for (size_t i = 0; i < words_.size(); ++i) words_[i] &= other.words_[i];
+    return *this;
+  }
+  WordBitset& operator|=(const WordBitset& other) {
+    for (size_t i = 0; i < words_.size(); ++i) words_[i] |= other.words_[i];
+    return *this;
+  }
 
   // Clears every bit that's set in `other` -- "remove these candidates".
-  void AndNot(const WordBitset& other);
+  void AndNot(const WordBitset& other) {
+    for (size_t i = 0; i < words_.size(); ++i) words_[i] &= ~other.words_[i];
+  }
 
   // True if any bit is set in both -- cheaper than materializing (*this &
   // other).Any() since it can stop at the first shared word.
-  bool Intersects(const WordBitset& other) const;
+  bool Intersects(const WordBitset& other) const {
+    for (size_t i = 0; i < words_.size(); ++i) {
+      if (words_[i] & other.words_[i]) return true;
+    }
+    return false;
+  }
 
   // True if every bit set here is also set in `other` -- i.e. intersecting
   // with `other` would remove nothing. Lets a caller skip a narrowing step
   // that wouldn't actually narrow anything.
-  bool IsSubsetOf(const WordBitset& other) const;
+  bool IsSubsetOf(const WordBitset& other) const {
+    for (size_t i = 0; i < words_.size(); ++i) {
+      if (words_[i] & ~other.words_[i]) return false;
+    }
+    return true;
+  }
 
  private:
   std::vector<uint64_t> words_;

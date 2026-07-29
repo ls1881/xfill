@@ -110,27 +110,40 @@ reasoning and citations behind each piece, see
 
 ### Known limits
 
-`benchmarks/grids/sample_13x13.txt` and `sample_15x15.txt` (the original,
-fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
-which does solve) still don't finish within a 5-minute cap at
-`min_score=50`, even with randomized restarts. That's an expected result,
-not a bug: per Anbulagan & Botea's phase-transition study of crossword
-CSPs, some "hard region" instances stay expensive for *any* search order,
-because the underlying instance itself is hard, not just this solver's
-choices leading up to it -- restarts fix a search that got *unlucky*, but
-can't turn a genuinely hard instance easy. Fixing this needs nogood
-learning (recording "this partial assignment can't work, don't retry it"),
-not a better search order -- see `docs/design.md`'s roadmap. `sample_21x21.txt`
-is different: it's proven unsatisfiable in microseconds, because it has a
-fully-open 21-cell row and the real dictionary has no words that long at
-`min_score=50` (max length 15) -- not a search problem at all.
+`benchmarks/grids/sample_13x13.txt` still hadn't finished after running
+15+ minutes, even at `min_score=40` (see `docs/design.md`'s roadmap for
+the full min_score investigation this comes from). That's an
+expected result, not a bug: per Anbulagan & Botea's phase-transition
+study of crossword CSPs, some "hard region" instances stay expensive for
+*any* search order, because the underlying instance itself is hard, not
+just this solver's choices leading up to it -- restarts fix a search
+that got *unlucky*, but can't turn a genuinely hard instance easy.
+`sample_15x15.txt` (the original, fully-open-interior 15x15, as opposed
+to `sample_15x15_interlock.txt` which solves quickly) turned out to
+*not* be in that category: it looked just as stuck as `sample_13x13.txt`
+at `min_score=50` (didn't finish in 5 minutes), but at `min_score=40` it
+solves in 158s -- it just needed a less-restricted dictionary and a
+couple of minutes' patience, not a fundamentally harder search.
+`sample_21x21.txt` is different again: it's proven unsatisfiable in
+microseconds, because it has a fully-open 21-cell row and the dictionary
+has no words that long even at `min_score=0` (max length 15) -- not a
+search problem at all.
 
 ## Dictionary format
 
-One entry per line, semicolon-delimited: `WORD;SCORE`. Score is parsed
-and retained but not yet used by the solver (a hook for later
-quality-guided search). Words are uppercased on load, so mixed-case
-input is fine.
+One entry per line, semicolon-delimited: `WORD;SCORE`. Score is used two
+ways: entries below `min_score` (the solver's third CLI argument) are
+dropped from the dictionary entirely at load time, and among the words
+that remain, the solver tries higher-scored ones first within each slot
+(`Dictionary::ScoreOrder`) so a fill reads like a real crossword rather
+than the first alphabetically-valid guess. Words are uppercased on load,
+so mixed-case input is fine.
+
+`min_score=40` is the recommended default for `data/spreadthewordlist_caps.txt`
+specifically (and is what `benchmarks/bench_subset.py` now defaults to) --
+see `docs/design.md`'s roadmap for the investigation behind that number,
+including why lower thresholds stop helping solvability and start hurting
+fill quality in this particular wordlist.
 
 ```
 CAT;50

@@ -70,7 +70,15 @@ def main():
     parser.add_argument("--n", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=float, default=20.0, help="seconds per grid")
-    parser.add_argument("--min-score", type=int, default=50)
+    # 40, not 50 -- see docs/design.md's roadmap and docs/bibliography.md's
+    # session 6 addendum: min_score=50 (this project's original default)
+    # discards 62% of data/spreadthewordlist_caps.txt's ~316k entries and
+    # was the dominant cause of unsolved real grids, not search-algorithm
+    # weakness. min_score=40 keeps the top two score tiers (still clean,
+    # recognizable fill -- score 20 and below in this wordlist contain
+    # visible data-corruption entries, not just obscure-but-valid words)
+    # and roughly doubles the real-world solve rate.
+    parser.add_argument("--min-score", type=int, default=40)
     parser.add_argument("--cli", default=str(REPO_ROOT / "build" / "xfill_cli"))
     parser.add_argument("--dict", default=str(REPO_ROOT / "data" / "spreadthewordlist_caps.txt"))
     parser.add_argument("--save", help="write results to this CSV path")
