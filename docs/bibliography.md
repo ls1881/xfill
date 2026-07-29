@@ -19,6 +19,143 @@ recorded here in keeping with this project's benchmarking philosophy:
 every claimed improvement needs a real before/after number, including
 negative ones.
 
+*Session 4 addendum:* the user asked whether there's a crossword
+equivalent of the "critical junction" structure road-routing algorithms
+(contraction hierarchies, transit-node routing) exploit -- a small set of
+nodes that most long routes must pass through, knowing which prunes the
+search space enormously. The academic entry below (Dechter) is the real
+answer to that question; see it for what was implemented, measured, and
+concluded.
+
+### Dechter -- "Tractable Structures for Constraint Satisfaction Problems" (book chapter, 2006) *(new)*
+
+**What it is.** A survey of graph-structure-based tractability results for
+CSPs, read from the actual chapter text (not a summary) -- and, strikingly,
+its very first worked example is a crossword puzzle used to introduce
+primal/dual constraint graphs. Covers two families of techniques: width-
+based (tree-width/induced-width, join-tree clustering, cluster-tree
+elimination) and cutset-based (cycle-cutset, w-cutset, and -- most
+relevant here -- decomposition into *non-separable components*: a
+connected graph has a *separation node* if some node's removal
+disconnects it, and a subgraph with no such node is *non-separable* /
+*biconnected*; a linear-time DFS (Hopcroft & Tarjan's classic algorithm)
+finds all of them at once, and they're always interconnected in a tree,
+which is itself a valid tree-decomposition).
+
+**How it differs / how it's used here.** Full tree-decomposition (join-
+tree clustering, cluster-tree elimination) was not ported -- those
+algorithms are built around relational join/projection over tuples,
+which doesn't map onto this project's bitset-domain backtracker without
+a much larger rewrite than is justified here, and Dechter's own
+complexity results show they trade time for space *exponential in
+tree-width*, which isn't obviously a win over the existing dom/wdeg
+search on grids that aren't already known to have small tree-width. What
+*was* implemented is the lighter non-separable-components idea: `Solver`
+now computes connected components of the slot-crossing graph once, via
+one BFS pass in the constructor (`slots_by_component_`), and
+`SelectBranchSlot` only ever offers candidates from the lowest-indexed
+component that still has unassigned slots -- fully settling (or proving
+impossible) one component before starting the next, which is always at
+least as good as interleaving since components sharing no crossing can
+never help each other's search, and never *worse* since it's the same
+backtracking tree with a restricted candidate set, not a separate search
+(this matters because the grid-wide no-duplicate-words rule *does* still
+couple different components, so they can't just be solved as fully
+independent, parallel sub-problems without coordination).
+
+**Measured effect.** Zero difference on any single-component grid
+(identical node/backtrack counts on every grid in `benchmarks/grids/` and
+the real scraped set -- exactly the expected no-op, since with one
+component "the lowest-indexed component with unassigned slots" is just
+"the whole grid," same as before). A constructed stress test (4 tiled
+copies of `sample_9x9.txt` as independent components in one grid) showed
+the real effect: 323,978 nodes/9.33s before vs. 125,521 nodes/3.59s after
+-- about 2.6x fewer nodes and faster.
+
+**The honest, complete answer to "is there a crossword equivalent."**
+Yes, structurally -- non-separable components (and their finer-grained
+cousin, articulation points *within* one component) are the real
+crossword analogue of the "critical junction" nodes in road-network
+routing. But checking whether that structure actually *exists* in real
+grids (all 500 in `benchmarks/grids/scraped_15x15/`, via a temporary
+Tarjan's-algorithm diagnostic) found it essentially doesn't: all 500 have
+exactly one connected component, and 485/500 (97%) have *zero*
+articulation points even within that one component; the remaining 15
+have only 1-4. This makes sense in hindsight -- crossword constructors
+deliberately avoid weak, separable interlock as a matter of puzzle
+quality, so well-constructed grids are close to maximally
+non-separable by design. The technique is real, sound, and kept (it's a
+free no-op for the common case and a genuine ~2.6x win for any grid that
+*does* have independent regions, like `sample_9x9.txt`'s degenerate
+disconnected sibling in `benchmarks/grids/synthetic/`), but it isn't the
+lever that will move the needle on why real 15x15s like
+`grid_013.txt`/`grid_017.txt`/etc. still time out -- those grids are hard
+because they're densely, well interlocked, which is the opposite
+condition from what this technique exploits. That's consistent with
+Anbulagan & Botea's phase-transition point (see their entry above): the
+remaining hardness is a property of the instance under *any* search
+order, which is squarely nogood learning's territory, not a structural
+shortcut like this one.
+
+### Dechter -- "Enhancement Schemes for Constraint Processing: Backjumping, Learning, and Cutset Decomposition" (Artificial Intelligence, 1990) *(new)*
+
+**What it is.** The original paper behind graph-based backjumping (GBJ),
+read from the actual text (not a summary) specifically to get the
+algorithm exactly right, since an unsound implementation here risks
+something worse than slowness: falsely reporting no solution when one
+exists. GBJ's idea: when standard backtracking hits a dead end at
+variable X, retrying the *immediately preceding* decision is often
+pointless if that decision had nothing to do with why X failed. GBJ
+instead computes X's "parents" -- the already-assigned variables X is
+actually constrained by, read straight off the constraint graph -- and
+jumps back directly to the most recent one, skipping any decisions in
+between that couldn't possibly matter. The paper proves this is sound: a
+solution is never missed, because the parent set for a whole cascade of
+dead-ends is accumulated (not just recomputed fresh at each one), so a
+later, deeper conflict correctly folds in everything an earlier one
+already ruled out.
+
+**How it differs / how it's used here.** Implemented directly in
+`Backtrack`: an exhausted slot's currently-assigned crossing neighbors
+become its "parents," unioned into an accumulator, and the most recently
+assigned one becomes a jump target that every ancestor stack frame checks
+before trying its next candidate. One deliberate deviation from the
+paper: Dechter's proof assumes a *fixed* variable order, so a parent
+stays valid for the rest of the search; this project's dom/wdeg order is
+dynamic (which slot gets picked next depends on current domain state,
+not a preset sequence), so an accumulated parent from a much earlier,
+already-resolved cascade could reference a slot since reassigned to
+something unrelated. To keep the implementation unconditionally sound
+under dynamic ordering, the accumulator was reset every time search made
+fresh forward progress, restricting jumps to *within* one uninterrupted
+cascade of dead-ends -- where the currently-assigned slots exactly match
+the call stack, exactly matching the paper's model. This is strictly
+more conservative than the full algorithm (forgoes some jumps *across*
+cascades) but never trades away soundness for it.
+
+**Measured effect -- implemented soundly, reverted anyway.** All 15
+tests passed, including the "no solution exists" ones, so the soundness
+goal was met. But the net performance effect on the 20-grid real sample
+was a clear regression: solved count dropped from 6 to 4, with two
+grids that solved comfortably before (`grid_016.txt`, `grid_126.txt`)
+now timing out at 20s. Individual results were genuinely mixed --
+`sample_11x11.txt` improved 4x (268 → 66 nodes) -- but the aggregate
+was worse, so it was reverted rather than kept for a cherry-picked
+win. Best-guess explanation: GBJ was designed as a standalone
+enhancement to plain chronological backtracking, not to compose with a
+search that already has two other adaptive mechanisms doing related
+jobs -- dom/wdeg's crossing-weight learning already biases future slot
+*selection* toward chronically troublesome crossings, and randomized
+restarts already provide an escape hatch from a demonstrably stuck
+attempt. Forcing the *next slot to retry* to be "the most recent
+assigned neighbor of the failure," as GBJ does, can override dom/wdeg's
+own (separately tuned, already-benchmarked) judgment about what's
+actually most urgent to try next, and this project's restarts already
+handle the "the search is stuck" case GBJ is also aimed at, from a
+different angle. Untangling that interaction well enough to make GBJ a
+net positive here would need its own dedicated investigation rather
+than a bolt-on; not pursued further this round.
+
 ## Academic papers
 
 ### Beacham, Chen, Sillito, van Beek — "Constraint Programming Lessons Learned from Crossword Puzzles" (Canadian AI 2001)

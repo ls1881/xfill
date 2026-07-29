@@ -94,6 +94,20 @@ reasoning and citations behind each piece, see
    rather than writing exclusions into every sibling domain on each
    assignment — so no word is ever placed twice in one fill.
 
+7. **Component-restricted branching.** `Solver` computes the connected
+   components of the slot-crossing graph once at construction time (one
+   BFS pass), and branching only ever considers the lowest-indexed
+   component that still has an unassigned slot — fully settling one
+   before starting the next, since components sharing no crossing can
+   never help or hurt each other's search. This is the crossword analogue
+   of the "critical junction" structure road-routing algorithms exploit
+   (see `docs/bibliography.md`'s Dechter entry): it's a free no-op for
+   any single-component grid — which is every curated grid here *and*
+   every one of the 500 real scraped grids, since well-built crosswords
+   are essentially always fully interlocked — but a real ~2.6x win on a
+   grid that does have independent regions (see
+   `benchmarks/grids/synthetic/disconnected_15x15.txt`).
+
 ### Known limits
 
 `benchmarks/grids/sample_13x13.txt` and `sample_15x15.txt` (the original,

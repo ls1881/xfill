@@ -137,7 +137,39 @@ The solver aims to either find a valid fill or prove none exists
    backtracks) -- confirming these are pure constant-factor wins, not
    search-order changes.
 
-6. **Not yet implemented** (see bibliography for why each is a
+6. ✅ **Component-restricted branching** (Dechter's "non-separable
+   components" -- see `docs/bibliography.md`): `Solver` computes connected
+   components of the slot-crossing graph once (one BFS pass in the
+   constructor), and `SelectBranchSlot` only offers candidates from the
+   lowest-indexed component that still has an unassigned slot, fully
+   settling one before starting the next. Free (identical node/backtrack
+   counts) on every single-component grid, which is every grid in
+   `benchmarks/grids/` and, it turns out, all 500 in
+   `benchmarks/grids/scraped_15x15/` too -- real crosswords are built to
+   avoid weak interlock, so they're essentially always non-separable. A
+   constructed stress test (4 tiled copies of `sample_9x9.txt` as
+   independent components) confirms the mechanism itself works: 323,978
+   nodes/9.33s → 125,521 nodes/3.59s, ~2.6x fewer nodes. Kept as a real,
+   sound, zero-cost safety net (e.g. for
+   `benchmarks/grids/synthetic/disconnected_15x15.txt`, or any future
+   grid with genuinely independent regions), not because it moves the
+   needle on the currently-timing-out real grids -- see the bibliography
+   entry for the full investigation, including checking all 500 real
+   grids for articulation points (485/500 have none at all).
+
+   **Tried and reverted:** graph-based backjumping (Dechter 1990). Fully
+   and soundly implemented (jump to the most recent assigned crossing
+   neighbor of an exhausted slot instead of always the immediate parent;
+   see `docs/bibliography.md` for the dynamic-ordering soundness
+   adaptation this needed). All 15 tests passed, but the 20-grid real
+   sample went from 6 solved to 4 -- `grid_016.txt`/`grid_126.txt` no
+   longer finish in 20s even though `sample_11x11.txt` got 4x faster.
+   Reverted on the aggregate result despite the individual win. Likely
+   cause: it overrides dom/wdeg's own tuned choice of what to try next,
+   and duplicates what randomized restarts already handle (escaping a
+   stuck attempt) via a different, conflicting mechanism.
+
+7. **Not yet implemented** (see bibliography for why each is a
    reasonable next step, and what it would cost):
    - Cell-level branching with a SoCDP-style heuristic instead of
      slot-level MRV (Orca's headline architectural difference -- a
