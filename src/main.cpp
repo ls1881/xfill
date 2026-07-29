@@ -80,6 +80,7 @@ int main(int argc, char** argv) {
       }
       *stream << "\nnodes=" << solver.stats().nodes
               << " backtracks=" << solver.stats().backtracks
+              << " restarts=" << solver.stats().restarts
               << " time=" << seconds << "s\n";
     }
 

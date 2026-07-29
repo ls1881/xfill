@@ -1,5 +1,7 @@
 #include "xfill/solver.hpp"
 
+#include <algorithm>
+#include <array>
 #include <utility>
 
 namespace xfill {
@@ -10,6 +12,15 @@ constexpr uint32_t kAllLettersMask = (1u << 26) - 1;
 // crossing causes a wipeout -- lower prioritizes recent conflicts over
 // older ones. Value taken from rf-/ingrid_core's WEIGHT_AGE_FACTOR.
 constexpr float kWeightAgeFactor = 0.99f;
+
+// Restart tuning, all taken verbatim from rf-/ingrid_core's
+// backtracking_search.rs (RANDOM_SLOT_WEIGHTS, RETRY_GROWTH_FACTOR, and its
+// find_fill()'s starting max_backtracks of 500) -- see the Solver class
+// comment in solver.hpp for the design this implements.
+constexpr size_t kRandomTopN = 3;
+constexpr std::array<int, kRandomTopN> kRandomSlotWeights = {4, 2, 1};
+constexpr uint64_t kInitialBacktrackLimit = 500;
+constexpr float kRetryGrowthFactor = 1.1f;
 }  // namespace
 
 Solver::Solver(const Grid& grid, const Dictionary& dict)
@@ -69,9 +80,41 @@ std::optional<Solution> Solver::Solve() {
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
 
-  std::vector<bool> assigned(grid_.slots().size(), false);
-  Trail trail;
-  return Backtrack(domains, used_by_length, assigned, trail, crossing_weights);
+  // Randomized restarts (ingrid_core-derived, see the class comment in
+  // solver.hpp): each attempt starts fresh from the post-root-propagation
+  // domains above, with a newly-seeded RNG for slot-selection tie-breaks,
+  // but keeps the *same* crossing_weights -- what dom/wdeg has learned
+  // about which crossings are troublesome carries over even though the
+  // search tree itself restarts. An attempt that racks up more than
+  // attempt_backtrack_limit_ dead ends aborts (Backtrack sets aborted_)
+  // rather than continuing to grind on what may be a heavy-tailed bad
+  // draw; the limit then grows geometrically for the next attempt. An
+  // attempt that exhausts the search space *without* hitting the limit is
+  // definitive -- solved or genuinely unsatisfiable -- so only that case
+  // returns from the loop.
+  attempt_backtrack_limit_ = kInitialBacktrackLimit;
+  for (uint64_t attempt = 0;; ++attempt) {
+    aborted_ = false;
+    attempt_backtracks_ = 0;
+    randomize_slot_choice_ = attempt > 0;
+    rng_.seed(attempt);
+
+    std::vector<WordBitset> attempt_domains = domains;
+    std::vector<WordBitset> attempt_used_by_length = used_by_length;
+    std::vector<bool> assigned(grid_.slots().size(), false);
+    Trail trail;
+
+    auto result = Backtrack(attempt_domains, attempt_used_by_length, assigned,
+                             trail, crossing_weights);
+    if (result) return result;
+    if (!aborted_) return std::nullopt;
+
+    stats_.restarts++;
+    attempt_backtrack_limit_ = std::max<uint64_t>(
+        attempt_backtrack_limit_ + 1,
+        static_cast<uint64_t>(static_cast<float>(attempt_backtrack_limit_) *
+                               kRetryGrowthFactor));
+  }
 }
 
 void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
@@ -195,8 +238,7 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
                               const std::vector<WordBitset>& used_by_length,
                               const std::vector<bool>& assigned,
                               const std::vector<float>& crossing_weights) const {
-  int best = -1;
-  float best_priority = 0.0f;
+  std::vector<std::pair<float, int>> candidates;  // (priority, slot id)
 
   for (const Slot& slot : grid_.slots()) {
     if (assigned[static_cast<size_t>(slot.id)]) continue;
@@ -206,14 +248,22 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
     size_t count = effective.Count();
 
     float weight = SlotWeight(slot.id, crossing_weights, assigned);
-    float priority = static_cast<float>(count) / weight;
-
-    if (best == -1 || priority < best_priority) {
-      best = slot.id;
-      best_priority = priority;
-    }
+    candidates.push_back({static_cast<float>(count) / weight, slot.id});
   }
-  return best;
+  if (candidates.empty()) return -1;
+
+  // Weighted-random pick among the best few rather than always the single
+  // best -- see the class comment in solver.hpp for why (restart
+  // diversity).
+  size_t top_n = randomize_slot_choice_ ? std::min(candidates.size(), kRandomTopN) : 1;
+  std::partial_sort(candidates.begin(),
+                     candidates.begin() + static_cast<long>(top_n),
+                     candidates.end());
+
+  std::discrete_distribution<size_t> dist(
+      kRandomSlotWeights.begin(),
+      kRandomSlotWeights.begin() + static_cast<long>(top_n));
+  return candidates[dist(rng_)].second;
 }
 
 bool Solver::Assign(int slot, size_t word_index,
@@ -260,6 +310,8 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            std::vector<bool>& assigned,
                                            Trail& trail,
                                            std::vector<float>& crossing_weights) {
+  if (aborted_) return std::nullopt;
+
   int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights);
   if (slot == -1) {
     return ExtractSolution(domains);
@@ -271,6 +323,8 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
 
   // Try higher-quality words first so a valid fill reads like a real
   // crossword rather than the first alphabetically-consistent candidate.
+  // Deliberately not randomized (unlike slot choice above) -- see the
+  // class comment in solver.hpp.
   for (size_t idx : dict_.ScoreOrder(length)) {
     if (!effective.Test(idx)) continue;
     stats_.nodes++;
@@ -285,9 +339,18 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
       if (result) return result;
     }
     Undo(slot, domains, used_by_length, assigned, trail, domain_mark, used_mark);
+
+    // A deeper call may have aborted this whole attempt (backtrack budget
+    // exceeded) rather than genuinely exhausting its options -- stop
+    // trying sibling candidates and unwind immediately instead of
+    // continuing to search a doomed attempt.
+    if (aborted_) return std::nullopt;
   }
 
   stats_.backtracks++;
+  if (++attempt_backtracks_ >= attempt_backtrack_limit_) {
+    aborted_ = true;
+  }
   return std::nullopt;
 }
 

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <random>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -18,6 +19,11 @@ struct Solution {
 struct SolverStats {
   uint64_t nodes = 0;
   uint64_t backtracks = 0;
+  // Number of times Solve() abandoned a search attempt after it hit its
+  // backtrack budget and restarted from the root with a larger budget. 0
+  // means the first attempt found the answer (or proved none exists)
+  // outright.
+  uint64_t restarts = 0;
 };
 
 // CSP solver: incremental backtracking with real (cascading) AC-3
@@ -60,6 +66,47 @@ struct SolverStats {
 // masking each slot's domain against a global "used words of this length"
 // bitset at read time, rather than writing exclusions into every sibling
 // domain on each assignment.
+//
+// On top of that, Solve() wraps the search in randomized restarts with a
+// geometrically-growing backtrack budget, also ported from ingrid_core
+// (its `find_fill`/`find_fill_for_seed`, plus the constants
+// RANDOM_SLOT_WEIGHTS/RETRY_GROWTH_FACTOR and its starting max_backtracks
+// of 500): an attempt that racks up too many dead ends gives up and
+// retries from the root with a larger budget and a new RNG seed, but the
+// *same* (already-learned) crossing weights. This is a direct response to
+// Gomes, Selman & Kautz's "Boosting Combinatorial Search Through
+// Randomization" (AAAI 1998): backtracking search on hard instances has a
+// heavy-tailed runtime distribution -- an unlucky sequence of early
+// choices can blow up to exponential cost, but that same run, replayed
+// with different tie-breaks, often finishes fast -- so periodically
+// abandoning a stuck attempt and reseeding beats waiting out one bad run.
+// Because the backtrack budget always grows and the search is otherwise
+// unchanged, this is still a complete search: an actually-unsatisfiable
+// grid is still proven so, just possibly after a few budget-exceeded
+// restarts rather than one pass.
+//
+// The *first* attempt (attempt 0) always picks the single best dom/wdeg
+// slot deterministically -- exactly the pre-restart behavior -- and only
+// restarts (attempt > 0) switch SelectBranchSlot to a weighted-random pick
+// among the best few. Benchmarking showed always-randomizing regresses
+// grids the plain greedy choice already solves well (see
+// randomize_slot_choice_ below for numbers): the point of randomization is
+// to escape a demonstrably-stuck search, not to second-guess a search that
+// hasn't shown any trouble yet.
+//
+// Word *candidate* choice within a slot deliberately stays plain
+// ScoreOrder iteration, never randomized -- ingrid_core also randomizes
+// word choice (RANDOM_WORD_WEIGHTS), but doing that here would fight this
+// project's explicit score-quality-first goal (see the "prefers the
+// higher-scored word" test) by sometimes trying a worse-scored word before
+// a better one is exhausted. ingrid_core's adaptive-branching "stickiness"
+// (stay on the previous slot if it's still nearly-best, to avoid
+// thrashing between near-tied slots) is also not ported: it's meaningful
+// in ingrid_core's iterative loop, where a slot can remain the current
+// target across several word attempts, but not in this solver's design,
+// where Assign() immediately collapses a chosen slot to a singleton and
+// removes it from consideration -- there is no "still open" slot left to
+// stick to.
 class Solver {
  public:
   Solver(const Grid& grid, const Dictionary& dict);
@@ -133,9 +180,14 @@ class Solver {
                     const std::vector<bool>& assigned) const;
 
   // dom/wdeg branching over not-yet-assigned slots: smallest (masked
-  // domain size / weighted degree), i.e. most urgent first. A domain that
-  // comes up empty is deliberately not skipped -- it looks maximally
-  // urgent, gets selected, and the caller's candidate loop then finds no
+  // domain size / weighted degree), i.e. most urgent first, is the top
+  // candidate -- but rather than always taking that single best slot, a
+  // weighted-random choice is made among the best few (see
+  // kRandomSlotWeights in solver.cpp), so that different restart attempts
+  // (see Solve()) actually explore different branch orders instead of
+  // deterministically replaying the same one. A domain that comes up
+  // empty is deliberately not skipped -- it looks maximally urgent, tends
+  // to get selected, and the caller's candidate loop then finds no
   // matches and backtracks, which is how contradictions surface. Returns
   // -1 once every slot is assigned.
   //
@@ -180,6 +232,25 @@ class Solver {
   // crossings_by_slot_[slot_id] -- every other slot it crosses, and the
   // offset within each side of the crossing cell.
   std::vector<std::vector<SlotCrossing>> crossings_by_slot_;
+
+  // Restart-related state, all reset at the top of each attempt inside
+  // Solve()'s retry loop (see the class comment above for the design this
+  // is drawn from). `rng_` is mutable because SelectBranchSlot, which
+  // draws from it, is logically a const query over the current search
+  // state.
+  mutable std::mt19937_64 rng_{0};
+  uint64_t attempt_backtracks_ = 0;
+  uint64_t attempt_backtrack_limit_ = 0;
+  bool aborted_ = false;
+  // Whether SelectBranchSlot should weighted-randomly pick among the top
+  // few slots (true on restarts) or deterministically take the single
+  // best one (false on the first attempt). Benchmarking showed always
+  // randomizing regresses grids that the plain greedy dom/wdeg choice
+  // already solves well (e.g. sample_7x7.txt: 22 nodes/0 backtracks
+  // greedy vs. 2597 nodes/93 backtracks always-randomized) -- the
+  // diversity is only worth its variance cost once the greedy attempt has
+  // already proven insufficient.
+  bool randomize_slot_choice_ = false;
 };
 
 }  // namespace xfill

@@ -4,6 +4,13 @@ Sources consulted while improving `Solver`, in the order they were read.
 For each: what it is, then how it differs from this project's approach
 and, where applicable, how it was actually used here.
 
+*Session 2 addendum:* the entries below marked "(reread)" or "(new)" were
+revisited/added in a follow-up pass specifically to find the next
+concrete algorithm improvement. `rf-/ingrid_core`'s actual
+`backtracking_search.rs` was reread in full (not just recalled from the
+first pass) to get its restart mechanism's exact constants right rather
+than approximating them from memory.
+
 ## Academic papers
 
 ### Beacham, Chen, Sillito, van Beek — "Constraint Programming Lessons Learned from Crossword Puzzles" (Canadian AI 2001)
@@ -114,6 +121,39 @@ grid (generate many candidate block layouts, keep the one that fills
 cleanly, rather than forcing one specific hard layout) -- this paper is
 where that principle is named and measured rigorously.
 
+### Gomes, Selman & Kautz — "Boosting Combinatorial Search Through Randomization" (AAAI 1998) *(new)*
+
+**What it is.** Confirmed via the actual paper text (fetched from
+`cs.cornell.edu/selman/papers/pdf/98.aaai.boost.pdf`, not a summary), not
+about crosswords at all -- it studies backtracking search on scheduling,
+planning, and circuit-synthesis instances. Its central empirical finding:
+runtime for a *deterministic* complete search algorithm, plotted across
+many similar problem instances, is often heavy-tailed -- a non-negligible
+chance, at any point, of hitting an instance that takes exponentially
+longer than anything seen so far, dragging the mean runtime toward
+infinity. Crucially, they show the same heavy tail appears when a *single*
+instance is re-run many times with a randomized tie-breaking rule and
+different seeds -- so the hardness isn't really a property of the
+instance, it's a property of the (instance, deterministic-algorithm)
+pairing. Their fix: add controlled randomization to variable/value
+selection and restart from scratch (keeping a time or backtrack cutoff)
+whenever a run is taking too long. Reported results include several
+previously-unsolved instances becoming solvable and speedups such as
+logistics.d (108 min to 95 sec) and 3bit-adder-32 (>24 hrs to 165 sec).
+
+**How it differs / how it's used here.** This is the theoretical
+justification for the restart mechanism added to `Solver::Solve` this
+session (see `rf-/ingrid_core` below for the concrete mechanism actually
+ported) -- it's *why* "abandon this attempt and reseed" is expected to
+help on exactly the kind of grids this project has struggled with
+(`sample_13x13/15x15/21x21.txt`), rather than just being a plausible-
+sounding idea. One thing from the paper not replicated: its formal
+"boosted" search provably eliminates heavy tails to the *right* of the
+median given certain conditions on the randomization; this project's
+restart loop is the practical mechanism (geometric cutoff growth,
+learned weights preserved across restarts) without reproducing that
+formal guarantee -- the same pragmatic gap `ingrid_core` itself accepts.
+
 ## Practitioner writeups
 
 ### rainjacket/orca-solver — "How Orca Works" + Rust source (`crates/solver/src/`)
@@ -139,31 +179,55 @@ parallel/distributed search tiers -- all flagged as further upside
 still on the table, not attempted due to the size of the rewrite
 relative to this session's scope.
 
-### rf-/ingrid_core (GitHub, Rust)
+### rf-/ingrid_core (GitHub, Rust) *(reread)*
 
 **What it is.** A production crossword-fill library (used by real
 puzzle-construction tooling); explicitly credits Thanasis Balafoutis's
 "Adaptive Strategies for Solving Constraint Satisfaction Problems" as
 the basis for its search. Read from actual source
-(`backtracking_search.rs`, `arc_consistency.rs`, `dupe_index.rs`), not
-just the README.
+(`backtracking_search.rs`, `arc_consistency.rs`, `dupe_index.rs`) in the
+first pass, and `backtracking_search.rs` specifically reread in full this
+session to pin down its restart mechanism precisely rather than
+approximate it.
 
 **How it differs / how it's used here.** This is the direct source of
-this session's `dom/wdeg` branching heuristic: every crossing starts at
-weight 1, a wipeout bumps the responsible crossing's weight by 1, and
-all weights decay 1% toward 1 on every wipeout (`WEIGHT_AGE_FACTOR =
-0.99`, ported verbatim as `kWeightAgeFactor`) so the heuristic tracks
+the `dom/wdeg` branching heuristic added in the first pass: every crossing
+starts at weight 1, a wipeout bumps the responsible crossing's weight by
+1, and all weights decay 1% toward 1 on every wipeout (`WEIGHT_AGE_FACTOR
+= 0.99`, ported verbatim as `kWeightAgeFactor`) so the heuristic tracks
 which crossings are *currently* troublesome rather than accumulating
-grudges forever. A slot's priority becomes domain size divided by the
-summed weight of its still-unassigned crossings, replacing this
-project's previous plain-MRV-with-static-tie-break. Measured effect:
-`sample_11x11.txt` went from 339 nodes/88 backtracks to 268 nodes/26
-backtracks (42ms → 19.6ms); `sample_7x7.txt` now solves with zero
-backtracks. Two things from the same source *not* ported: "adaptive
-branching" stickiness (stay on the previously-attempted slot if it's
-within a threshold of the new best, avoiding thrashing between
-near-tied slots) and randomized restarts with geometrically-growing
-backtrack budgets. Also notable but unused: its `DupeIndex` generalizes
+grudges forever. Measured effect: `sample_11x11.txt` went from 339
+nodes/88 backtracks to 268 nodes/26 backtracks (42ms → 19.6ms);
+`sample_7x7.txt` now solves with zero backtracks.
+
+This session, its restart mechanism (`find_fill`/`find_fill_for_seed`)
+was reread and partially ported: `RETRY_GROWTH_FACTOR = 1.1` (grows the
+per-attempt backtrack budget), a starting budget of 500 backtracks, and
+`RANDOM_SLOT_WEIGHTS = [4, 2, 1]` (weighted-random choice among the best
+few dom/wdeg-ranked slots instead of always the single best) are ported
+close to verbatim as `kRetryGrowthFactor`/`kInitialBacktrackLimit`/
+`kRandomSlotWeights`. Also ported: sharing `crossing_weights` across
+restarts rather than resetting them, so dom/wdeg's learned "which
+crossings are troublesome" information survives a restart even though the
+search tree itself starts over. Two things deliberately *not* ported,
+both explained in the `Solver` class comment in `solver.hpp`: (1)
+`RANDOM_WORD_WEIGHTS` (randomizing *word* choice, not just slot choice) --
+this project keeps word choice strictly `ScoreOrder`, since randomizing
+it would conflict with the explicit score-quality-first goal validated by
+the "prefers the higher-scored word" test; (2) `ADAPTIVE_BRANCHING_THRESHOLD`
+/"stickiness" (stay on the previous slot if a new one isn't much better,
+to avoid thrashing) -- this is meaningful in ingrid_core's iterative loop,
+where a slot can stay the active target across several word attempts, but
+doesn't map onto this solver's recursive design, where `Assign()`
+immediately collapses a chosen slot to a singleton and removes it from
+consideration entirely -- there's no "still open" slot left to stick to.
+One more deviation, found via benchmarking rather than by reading:
+`ingrid_core` randomizes slot choice on *every* attempt, including the
+first; doing that here regressed grids the plain greedy choice already
+solved well (e.g. `sample_7x7.txt`: 22 nodes/0 backtracks greedy vs. 2597
+nodes/93 backtracks always-randomized), so this project only randomizes
+slot choice on restarts (attempt > 0), keeping attempt 0 fully
+deterministic. Also notable but unused: its `DupeIndex` generalizes
 this project's exact-word-only duplicate check into an n-gram-windowed
 "forbid words sharing a long substring" check (the real-world "max
 shared substring" quality constraint also seen in Arbiser's paper and

@@ -6,17 +6,95 @@ Crossword filling is modeled as a constraint satisfaction problem
 (across/down slots as variables, dictionary words as domains, crossing
 letters as constraints) and solved with constraint propagation and a
 heuristic-guided backtracking search. See [`docs/design.md`](docs/design.md)
-for the architecture and roadmap.
+for the roadmap and [`docs/bibliography.md`](docs/bibliography.md) for the
+papers/codebases each technique below is drawn from.
 
 ## Status
 
-✅ Working baseline solver — correctness-first, unoptimized. Slot
-detection, crossing computation, AC-3 style propagation, and MRV
-backtracking are all implemented and tested. It reliably solves small
-and medium grids (tested up to 7x7 with a real ~280k-entry dictionary
-in well under a second); a fully-loaded 15x15 is not yet fast, since no
-performance work has been done on top of the baseline (see
-[`docs/design.md`](docs/design.md) roadmap — that's the next phase).
+✅ Slot detection, crossing computation, no-duplicate-words enforcement,
+queue-based AC-3 propagation, `dom/wdeg` branching, and randomized
+restarts are all implemented and tested (15/15 tests passing). Small and
+medium grids (tested up to 15x15 with real block patterns, against a real
+~280k-entry dictionary at `min_score=50`) solve in well under a second;
+some genuinely dense grids remain intractable, which is a documented,
+expected limit (see "Known limits" below and
+[`docs/design.md`](docs/design.md)'s roadmap for what would address it),
+not a bug.
+
+## How the algorithm works
+
+This section is kept up to date as `Solver` changes — for the full
+reasoning and citations behind each piece, see
+[`include/xfill/solver.hpp`](include/xfill/solver.hpp)'s class comment
+(most detailed and most current) and
+[`docs/bibliography.md`](docs/bibliography.md) (sources).
+
+1. **Model.** Every across/down run of open cells is a *slot* (a
+   variable); its *domain* is every same-length dictionary word; a
+   *crossing* between two slots is a constraint that they agree on their
+   shared letter. Domains are `WordBitset`s — one bit per word of that
+   length — so intersecting/narrowing a domain is a handful of `uint64_t`
+   operations rather than a loop over strings.
+
+2. **Propagation.** After every assignment, `Propagate` runs queue-based
+   AC-3: only slots whose domain actually shrank get re-examined (not a
+   fixed rescan of every crossing), and it skips a narrowing step
+   entirely when either every letter is still viable at that position, or
+   the neighbor's domain is already a subset of the incoming filter.
+   (Source: `rainjacket/orca-solver`.)
+
+3. **Branching.** `SelectBranchSlot` picks which slot to guess next using
+   `dom/wdeg`: (masked domain size) ÷ (summed weight of this slot's
+   crossings to still-unassigned neighbors), lowest first. Crossing
+   weights start at 1, get bumped by 1 whenever propagation through that
+   crossing wipes out a domain, and decay 1% back toward 1 on every other
+   wipeout — so the heuristic tracks *currently* troublesome crossings
+   instead of a fixed notion of constrainedness. Word choice within a
+   slot always tries higher dictionary-score words first (`ScoreOrder`),
+   so a fill reads like a real crossword instead of the first
+   alphabetically-valid guess. (Source: `rf-/ingrid_core`, crediting
+   Balafoutis's "Adaptive Strategies for Solving CSPs".)
+
+4. **Backtracking.** Trail-based: assigning a slot snapshots only the
+   domains that assignment actually touches (once per decision level),
+   so undoing a decision restores exactly what changed rather than
+   copying every slot's domain at every search node. (Source:
+   `rainjacket/orca-solver`.)
+
+5. **Restarts.** The whole search in steps 2-4 runs inside a retry loop.
+   The first attempt is fully deterministic (greedy `dom/wdeg`). If an
+   attempt racks up more dead ends than its budget (starts at 500, grows
+   ×1.1 per retry), it aborts and restarts from the root with a new RNG
+   seed — restarts after the first pick their branch slot via a
+   weighted-random choice among the best few `dom/wdeg`-ranked slots
+   (weights `{4, 2, 1}`) instead of always the single best, so different
+   attempts actually explore different branch orders. Crossing weights
+   learned by `dom/wdeg` carry over across restarts; only the search tree
+   itself starts over. Because the budget only ever grows, this stays a
+   *complete* search — an unsatisfiable grid is still eventually proven
+   so. (Sources: `rf-/ingrid_core`'s restart loop for the mechanism;
+   Gomes, Selman & Kautz, "Boosting Combinatorial Search Through
+   Randomization," for *why* it helps — backtracking search runtimes are
+   often heavy-tailed, so an attempt that's had a demonstrably unlucky
+   run is better abandoned than waited out.)
+
+6. **Duplicate words.** A slot's effective domain is always masked
+   against a global "words of this length already used elsewhere" bitset,
+   rather than writing exclusions into every sibling domain on each
+   assignment — so no word is ever placed twice in one fill.
+
+### Known limits
+
+`benchmarks/grids/sample_13x13.txt` and `sample_15x15.txt` (the original,
+fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
+which does solve) remain intractable at `min_score=50` even with the
+above. Per Anbulagan & Botea's phase-transition study of crossword CSPs,
+some "hard region" instances stay expensive for *any* search order — that
+needs nogood learning, not a better search order, to fix (see
+`docs/design.md`'s roadmap). `sample_21x21.txt` is different: it's proven
+unsatisfiable in microseconds, because it has a fully-open 21-cell row and
+the real dictionary has no words that long at `min_score=50` (max length
+15) — not a search problem at all.
 
 ## Dictionary format
 
