@@ -53,6 +53,15 @@ std::vector<size_t> WordBitset::SetBits() const {
   return out;
 }
 
+size_t WordBitset::First() const {
+  for (size_t i = 0; i < words_.size(); ++i) {
+    if (words_[i] != 0) {
+      return i * 64 + static_cast<size_t>(__builtin_ctzll(words_[i]));
+    }
+  }
+  return num_words_;
+}
+
 WordBitset& WordBitset::operator&=(const WordBitset& other) {
   for (size_t i = 0; i < words_.size(); ++i) words_[i] &= other.words_[i];
   return *this;
@@ -78,7 +87,7 @@ std::string Trim(const std::string& s) {
 }
 }  // namespace
 
-Dictionary Dictionary::LoadFromFile(const std::string& path) {
+Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("could not open dictionary: " + path);
 
@@ -99,6 +108,7 @@ Dictionary Dictionary::LoadFromFile(const std::string& path) {
         score = 0;
       }
     }
+    if (score < min_score) continue;
     word = Trim(word);
     if (word.empty()) continue;
     for (char& c : word) {
@@ -132,6 +142,15 @@ Dictionary Dictionary::LoadFromFile(const std::string& path) {
     dict.letter_masks_[length] = std::move(masks);
   }
 
+  for (auto& [length, scores] : dict.scores_by_length_) {
+    std::vector<size_t> order(scores.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&scores](size_t a, size_t b) {
+      return scores[a] > scores[b];
+    });
+    dict.score_order_by_length_[length] = std::move(order);
+  }
+
   return dict;
 }
 
@@ -163,6 +182,12 @@ const WordBitset& Dictionary::LetterMask(int length, int position,
 
 WordBitset Dictionary::FullDomain(int length) const {
   return WordBitset(NumWordsOfLength(length), true);
+}
+
+const std::vector<size_t>& Dictionary::ScoreOrder(int length) const {
+  static const std::vector<size_t> empty;
+  auto it = score_order_by_length_.find(length);
+  return it != score_order_by_length_.end() ? it->second : empty;
 }
 
 }  // namespace xfill

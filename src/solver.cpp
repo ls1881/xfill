@@ -5,7 +5,11 @@
 namespace xfill {
 
 Solver::Solver(const Grid& grid, const Dictionary& dict)
-    : grid_(grid), dict_(dict) {}
+    : grid_(grid), dict_(dict) {
+  for (const Slot& slot : grid_.slots()) {
+    slots_by_length_[slot.length].push_back(slot.id);
+  }
+}
 
 std::optional<Solution> Solver::Solve() {
   std::vector<WordBitset> domains(grid_.slots().size());
@@ -16,6 +20,14 @@ std::optional<Solution> Solver::Solve() {
 }
 
 bool Solver::Propagate(std::vector<WordBitset>& domains) const {
+  // Catch domains that start empty (e.g. no dictionary word of that
+  // length) even when the owning slot has no crossings to narrow it --
+  // the loop below only ever inspects crossings, so an isolated slot's
+  // domain would otherwise go unchecked.
+  for (const WordBitset& domain : domains) {
+    if (!domain.Any()) return false;
+  }
+
   bool changed = true;
   while (changed) {
     changed = false;
@@ -59,6 +71,29 @@ bool Solver::Propagate(std::vector<WordBitset>& domains) const {
       if (after == 0) return false;
       if (after != before) changed = true;
     }
+
+    if (!EnforceUniqueWords(domains, changed)) return false;
+  }
+  return true;
+}
+
+bool Solver::EnforceUniqueWords(std::vector<WordBitset>& domains,
+                                 bool& changed) const {
+  for (const auto& [length, slot_ids] : slots_by_length_) {
+    for (int owner : slot_ids) {
+      WordBitset& owner_domain = domains[static_cast<size_t>(owner)];
+      if (owner_domain.Count() != 1) continue;
+      size_t idx = owner_domain.First();
+
+      for (int other : slot_ids) {
+        if (other == owner) continue;
+        WordBitset& other_domain = domains[static_cast<size_t>(other)];
+        if (!other_domain.Test(idx)) continue;
+        other_domain.Clear(idx);
+        if (!other_domain.Any()) return false;
+        changed = true;
+      }
+    }
   }
   return true;
 }
@@ -88,10 +123,15 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset> domains) {
     return ExtractSolution(domains);
   }
 
-  for (size_t idx : domains[static_cast<size_t>(slot)].SetBits()) {
+  int length = grid_.SlotById(slot).length;
+  const WordBitset& domain = domains[static_cast<size_t>(slot)];
+  // Try higher-quality words first so a valid fill reads like a real
+  // crossword rather than the first alphabetically-consistent candidate.
+  for (size_t idx : dict_.ScoreOrder(length)) {
+    if (!domain.Test(idx)) continue;
     stats_.nodes++;
     std::vector<WordBitset> trial = domains;
-    WordBitset chosen(domains[static_cast<size_t>(slot)].size(), false);
+    WordBitset chosen(domain.size(), false);
     chosen.Set(idx);
     trial[static_cast<size_t>(slot)] = chosen;
 

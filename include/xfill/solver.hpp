@@ -39,6 +39,14 @@ class Solver {
   // any slot's domain becomes empty (contradiction).
   bool Propagate(std::vector<WordBitset>& domains) const;
 
+  // Enforces that no two slots of the same length settle on the same
+  // word: once a slot's domain narrows to a single word, that word is
+  // removed from every other same-length slot's domain. Sets `changed`
+  // to true if any domain was narrowed. Returns false on contradiction
+  // (a domain emptied out).
+  bool EnforceUniqueWords(std::vector<WordBitset>& domains,
+                           bool& changed) const;
+
   // MRV: returns the slot id with the smallest domain of size > 1, or -1
   // if every slot already has exactly one remaining candidate.
   int SelectBranchSlot(const std::vector<WordBitset>& domains) const;
@@ -50,6 +58,9 @@ class Solver {
   const Grid& grid_;
   const Dictionary& dict_;
   SolverStats stats_;
+  // Slot ids grouped by length -- only same-length slots can ever collide
+  // on the same word, so this scopes the uniqueness check.
+  std::unordered_map<int, std::vector<int>> slots_by_length_;
 };
 
 }  // namespace xfill

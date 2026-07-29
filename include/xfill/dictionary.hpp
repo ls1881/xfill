@@ -27,6 +27,9 @@ class WordBitset {
   // revisit only if profiling on real grids says it's worth it.
   std::vector<size_t> SetBits() const;
 
+  // Index of the first (lowest) set bit. Caller must ensure Any() is true.
+  size_t First() const;
+
   WordBitset& operator&=(const WordBitset& other);
   WordBitset& operator|=(const WordBitset& other);
 
@@ -41,9 +44,9 @@ class Dictionary {
 
   // Loads a "WORD;SCORE" file, one entry per line (semicolon-delimited;
   // a missing/unparseable score defaults to 0). Words are grouped
-  // internally by length. Score is retained but not yet used by the
-  // solver -- a natural hook for quality-guided search later.
-  static Dictionary LoadFromFile(const std::string& path);
+  // internally by length. Entries scoring below `min_score` are dropped
+  // entirely -- not just deprioritized -- so the solver can never place them.
+  static Dictionary LoadFromFile(const std::string& path, int min_score = 0);
 
   bool HasLength(int length) const;
   size_t NumWordsOfLength(int length) const;
@@ -58,12 +61,19 @@ class Dictionary {
   // dictionary has no words of that length.
   WordBitset FullDomain(int length) const;
 
+  // Word indices of `length`, ordered by descending score (ties broken by
+  // original index). Lets the solver try higher-quality words first without
+  // re-sorting a domain's candidates on every branch. Empty if the
+  // dictionary has no words of that length.
+  const std::vector<size_t>& ScoreOrder(int length) const;
+
  private:
   std::unordered_map<int, std::vector<std::string>> words_by_length_;
   std::unordered_map<int, std::vector<int>> scores_by_length_;
   // letter_masks_[length][position][letter - 'A']
   std::unordered_map<int, std::vector<std::array<WordBitset, 26>>>
       letter_masks_;
+  std::unordered_map<int, std::vector<size_t>> score_order_by_length_;
 };
 
 }  // namespace xfill
