@@ -33,6 +33,18 @@ class WordBitset {
   WordBitset& operator&=(const WordBitset& other);
   WordBitset& operator|=(const WordBitset& other);
 
+  // Clears every bit that's set in `other` -- "remove these candidates".
+  void AndNot(const WordBitset& other);
+
+  // True if any bit is set in both -- cheaper than materializing (*this &
+  // other).Any() since it can stop at the first shared word.
+  bool Intersects(const WordBitset& other) const;
+
+  // True if every bit set here is also set in `other` -- i.e. intersecting
+  // with `other` would remove nothing. Lets a caller skip a narrowing step
+  // that wouldn't actually narrow anything.
+  bool IsSubsetOf(const WordBitset& other) const;
+
  private:
   std::vector<uint64_t> words_;
   size_t num_words_;

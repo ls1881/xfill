@@ -43,19 +43,46 @@ The solver aims to either find a valid fill or prove none exists
      writeup this project's roadmap is informed by). Getting a full
      15x15 solving quickly is the point of steps 2-4 below.
 
-2. **Benchmark harness** — wire up `benchmarks/run_benchmarks.sh` against
-   the grids in `benchmarks/grids/` (generated with
-   `benchmarks/generate_grid.py`), capturing nodes/backtracks/time so
-   every later change has a before/after number.
-3. **Performance passes** (see benchmarking data before committing to
-   any of these):
-   - Delta-undo / trail-based backtracking instead of full domain copies.
+2. ✅ **Benchmark harness** — `benchmarks/run_benchmarks.sh` against the
+   grids in `benchmarks/grids/` (generated with
+   `benchmarks/generate_grid.py`), capturing nodes/backtracks/time.
+3. ✅ **Performance passes**, in the order actually applied (see
+   `docs/bibliography.md` for the sources each is drawn from):
+   - Trail-based incremental backtracking instead of full domain copies
+     (only the domains a decision actually touches get snapshotted).
+   - Queue-based AC-3 with a subset-check and an all-letters-viable fast
+     path, run at every node instead of a one-time root pass -- this is
+     what made real cascading propagation affordable everywhere, not
+     just at the root.
+   - `dom/wdeg` branching (domain size over a weighted degree that grows
+     when a crossing causes a wipeout, decaying otherwise) in place of
+     plain MRV.
+
+   Net effect on `sample_11x11.txt` (min_score=50): 42ms → 19.6ms.
+   `sample_15x15_interlock.txt` (72 words): 6ms, 0 backtracks.
+
+4. **Not yet implemented** (see bibliography for why each is a
+   reasonable next step, and what it would cost):
    - Cell-level branching with a SoCDP-style heuristic instead of
-     slot-level MRV.
-   - Profile backtrack distance to evaluate whether conflict-directed
-     backjumping is worth the added complexity.
-   - Evaluate tree decomposition for grids with separable regions
-     (e.g. independent corners).
+     slot-level MRV (Orca's headline architectural difference -- a
+     bigger rewrite than the above, since it changes the search
+     variable from "which word" to "which letter").
+   - Adaptive branching stickiness and randomized restarts with
+     geometric backtrack-limit growth (`ingrid_core`).
+   - Nogood learning via constraint-graph clustering (Anbulagan & Botea's
+     COMBUS) -- would help most on the genuinely hard, dense grids
+     (`sample_13x13/15x15/21x21.txt`) that remain intractable even after
+     the passes above; per Anbulagan & Botea's own phase-transition
+     data, "hard region" instances can take >24h even for a dedicated
+     solver, so this is a real ceiling, not a bug in this codebase.
+   - Two-stage overestimation search / partial-state warm-starting
+     (Botea & Bulitko) -- built for score-*optimization* crosswords, so
+     porting it to our plain feasibility solver isn't a direct fit, but
+     the "aggressive-prune a partial state, seed a second search with
+     it" shape is transferable.
+   - "Max shared substring" duplicate avoidance (`ingrid_core`'s
+     n-gram-windowed `DupeIndex`) -- generalizes our exact-word-only
+     uniqueness check to also forbid near-duplicate entries.
 
 ## Benchmarking philosophy
 

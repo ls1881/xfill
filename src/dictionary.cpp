@@ -72,6 +72,24 @@ WordBitset& WordBitset::operator|=(const WordBitset& other) {
   return *this;
 }
 
+void WordBitset::AndNot(const WordBitset& other) {
+  for (size_t i = 0; i < words_.size(); ++i) words_[i] &= ~other.words_[i];
+}
+
+bool WordBitset::Intersects(const WordBitset& other) const {
+  for (size_t i = 0; i < words_.size(); ++i) {
+    if (words_[i] & other.words_[i]) return true;
+  }
+  return false;
+}
+
+bool WordBitset::IsSubsetOf(const WordBitset& other) const {
+  for (size_t i = 0; i < words_.size(); ++i) {
+    if (words_[i] & ~other.words_[i]) return false;
+  }
+  return true;
+}
+
 namespace {
 std::string Trim(const std::string& s) {
   size_t start = 0, end = s.size();
