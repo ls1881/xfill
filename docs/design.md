@@ -171,6 +171,20 @@ The solver aims to either find a valid fill or prove none exists
   it and count the result, avoiding a heap allocation on every candidate
   slot on every branching decision — verified to produce identical
   node/backtrack counts on the 100-grid real sample.
+
+  `Backtrack`'s candidate loop had the same pattern: it copied the chosen
+  slot's domain and masked out used words once per node, then tested
+  membership against that copy while iterating every word of that length
+  in score order. Replaced with testing `domains[slot]` and
+  `used_by_length[length]` directly per candidate instead -- correct
+  because `Assign`/`Undo` always round-trip both back to their
+  per-iteration-start values before the next candidate is tested, so a
+  reference behaves identically to the snapshot copy it replaces. Verified
+  byte-identical node counts on both 100-grid real samples; unlike the
+  other allocation removals this session, this one landed close to
+  neutral (within the same noise band as before, not a clear win) -- kept
+  anyway since it's strictly less work with no measured downside, not for
+  a speed claim.
 - **Restarts.** Geometric backtrack-budget growth
   (`kInitialBacktrackLimit = 500`, `kRetryGrowthFactor = 1.1`), motivated
   by Gomes, Selman & Kautz's heavy-tailed-runtime-distribution result.

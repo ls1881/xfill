@@ -480,15 +480,21 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   }
 
   int length = grid_.SlotById(slot).length;
-  WordBitset effective = domains[static_cast<size_t>(slot)];
-  effective.AndNot(used_by_length[static_cast<size_t>(length)]);
+  // Test membership against domains[slot] and used_by_length separately
+  // instead of copying the domain to AndNot() it first: ScoreOrder(length)
+  // spans the whole dictionary at that length, and this loop runs once
+  // per node, so the avoided allocation (and the O(chunks) AndNot pass it
+  // replaces) adds up -- most candidates fail the first (domain) test
+  // immediately, so the second test is rarely even reached.
+  const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
+  const WordBitset& used = used_by_length[static_cast<size_t>(length)];
 
   // Try higher-quality words first so a valid fill reads like a real
   // crossword rather than the first alphabetically-consistent candidate.
   // Deliberately not randomized (unlike slot choice above) -- see the
   // class comment in solver.hpp.
   for (size_t idx : dict_.ScoreOrder(length)) {
-    if (!effective.Test(idx)) continue;
+    if (!slot_domain.Test(idx) || used.Test(idx)) continue;
     stats_.nodes++;
 
     size_t domain_mark = trail.domains.size();

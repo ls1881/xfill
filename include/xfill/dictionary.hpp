@@ -148,11 +148,6 @@ class WordBitset {
     return *this;
   }
 
-  // Clears every bit that's set in `other` -- "remove these candidates".
-  void AndNot(const WordBitset& other) {
-    for (size_t i = 0; i < words_.size(); ++i) words_[i] &= ~other.words_[i];
-  }
-
   // True if any bit is set in both -- cheaper than materializing (*this &
   // other).Any() since it can stop at the first shared word.
   bool Intersects(const WordBitset& other) const {
