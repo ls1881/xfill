@@ -70,8 +70,59 @@ The solver aims to either find a valid fill or prove none exists
   per-slot cost into an O(1) lookup. Verified byte-identical node/backtrack
   counts on both 100-grid real samples, and this was the single biggest
   win of the session: seed 42 dropped from ~20s to a stable ~18s, and the
-  heavier seed-7 sample from 61.1s to 55.5s -- roughly 19% faster overall
-  than where this session started (68.2s).
+  heavier seed-7 sample from 61.1s to 55.5s.
+
+  One more fusion followed the same pattern as the min-domain-pop cache
+  above: narrowing a crossing neighbor's domain was `operator&=` (one
+  chunk-array pass) followed by `Any()` (a second pass, usually short-
+  circuiting early) and then, inside the subsequent re-queue, `Count()`
+  (a third, full pass) -- three passes over data that had just been
+  computed. `WordBitset::AndAssignCount` fuses the intersect and the
+  resulting popcount into one pass; a domain that comes up empty
+  (`new_count == 0`) is exactly the old contradiction case, and a nonzero
+  count is already exactly what re-queuing needs, so there's no separate
+  `Any()` or `Count()` call left to make. Verified byte-identical
+  node/backtrack counts on both samples, with a further ~5% total-time
+  win: seed 42 down to ~17s, seed 7 down to 52.7s.
+
+  Building the per-crossing letter-mask union still started with a full
+  `ClearAll()` (a memset over the scratch bitset) before OR-ing in the
+  first included letter mask -- a redundant pass, since assigning that
+  first mask directly gives the identical result without ever touching
+  the old contents. (An earlier, more aggressive attempt at avoiding this
+  clear -- restructuring the whole loop to be chunk-major -- was tried and
+  reverted for a locality regression on `grid_053.txt`, described above;
+  this is the narrower, letter-major-order-preserving version of that fix,
+  which back when it was first tried showed no measurable difference. It
+  does now: with most of the surrounding overhead already gone, this
+  smaller win is no longer buried in noise.) Verified byte-identical node
+  counts on both samples, with a further ~3% win: seed 42 down to ~16.4s,
+  seed 7 down to 50.1s.
+
+  That same fix, though, still copies the first included letter mask into
+  `filter_scratch_by_length_` even when it's the *only* one -- a real
+  memmove for no reason, since a single-letter `possible` needs no union
+  at all. Since a crossing narrowed down to one viable letter is common
+  (especially deep in the search, once domains are small), special-casing
+  it -- checking `(possible & (possible - 1)) == 0`, the standard
+  single-bit test -- lets that case intersect the neighbor's domain
+  directly against the dictionary's own letter mask, skipping the copy
+  into scratch space entirely; the multi-letter union-building path is
+  unchanged. Verified byte-identical node counts on both samples, with a
+  further ~3% win: seed 42 down to ~15.9s, seed 7 down to 48.7s.
+
+  One more small one in the same neighborhood: `WordBitset::AppendSetBits`
+  (the direct-lookup fast path's "which words survive" enumeration)
+  scanned every chunk of the array unconditionally, even after it had
+  already found every set bit there was -- for a narrow domain (a
+  singleton is the extreme case) whose one surviving word happens to sit
+  in a large dictionary's bitset, most of that scan is checking trailing
+  all-zero chunks for no reason. Since the caller already knows the exact
+  popcount (the same cached count from the min-domain-pop fix above), an
+  optional `max_bits` argument stops the scan the moment that many bits
+  are found. Verified byte-identical node counts on both samples, with a
+  further, smaller ~1% win: seed 42 down to ~15.7s, seed 7 down to ~48.2s
+  -- about 29% faster overall than where this session started (68.2s).
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
   "Once per level" was originally enforced by scanning back through the

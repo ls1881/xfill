@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -90,13 +91,24 @@ class WordBitset {
   // scratch vector across many calls instead of allocating/freeing a new
   // one every time. Caller is responsible for clearing `out` first if a
   // clean result (rather than an appended one) is wanted.
-  void AppendSetBits(std::vector<size_t>& out) const {
-    for (size_t i = 0; i < words_.size(); ++i) {
+  //
+  // `max_bits`, when the caller already knows exactly how many bits are
+  // set (e.g. Propagate, which just read this domain's cached popcount),
+  // stops the scan the moment that many bits have been found instead of
+  // continuing to check every remaining chunk for zero -- for a narrow
+  // domain (a singleton is the extreme case) whose one surviving word
+  // happens to sit in a large dictionary's bitset, that tail of trailing
+  // all-zero chunks can otherwise dwarf the actual work.
+  void AppendSetBits(std::vector<size_t>& out,
+                      size_t max_bits = std::numeric_limits<size_t>::max()) const {
+    size_t found = 0;
+    for (size_t i = 0; i < words_.size() && found < max_bits; ++i) {
       uint64_t w = words_[i];
       while (w != 0) {
         int bit = __builtin_ctzll(w);
         out.push_back(i * 64 + static_cast<size_t>(bit));
         w &= w - 1;  // clear the lowest set bit
+        ++found;
       }
     }
   }
@@ -114,6 +126,22 @@ class WordBitset {
   WordBitset& operator&=(const WordBitset& other) {
     for (size_t i = 0; i < words_.size(); ++i) words_[i] &= other.words_[i];
     return *this;
+  }
+
+  // Intersects with `other` in place and returns the popcount of the
+  // result, in one pass over the chunk array -- fuses what would
+  // otherwise be an operator&=() pass followed by a separate Count()
+  // (or Any()) pass over the same, now-narrowed data. A caller that
+  // needs both the narrowed domain and its new size (e.g. Propagate,
+  // narrowing a crossing neighbor and then needing its count to
+  // re-queue it) gets both for the cost of one traversal instead of two.
+  size_t AndAssignCount(const WordBitset& other) {
+    size_t total = 0;
+    for (size_t i = 0; i < words_.size(); ++i) {
+      words_[i] &= other.words_[i];
+      total += static_cast<size_t>(__builtin_popcountll(words_[i]));
+    }
+    return total;
   }
   WordBitset& operator|=(const WordBitset& other) {
     for (size_t i = 0; i < words_.size(); ++i) words_[i] |= other.words_[i];

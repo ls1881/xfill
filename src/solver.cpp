@@ -260,7 +260,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
     const std::vector<std::string>* slot_words = nullptr;
     if (best_count <= kDirectLookupThreshold) {
       slot_candidates_scratch_.clear();
-      slot_domain.AppendSetBits(slot_candidates_scratch_);
+      slot_domain.AppendSetBits(slot_candidates_scratch_, best_count);
       slot_words = &dict_.WordsOfLength(length);
     }
 
@@ -286,14 +286,33 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       int neighbor_length = grid_.SlotById(sc.neighbor).length;
       WordBitset& neighbor_domain = domains[static_cast<size_t>(sc.neighbor)];
 
-      WordBitset& filter = filter_scratch_by_length_[static_cast<size_t>(neighbor_length)];
-      filter.ClearAll();
-      for (int c = 0; c < 26; ++c) {
-        if (possible & (1u << c)) {
-          filter |= dict_.LetterMask(neighbor_length, sc.neighbor_offset,
-                                      static_cast<char>('A' + c));
+      // A single viable letter is common (especially once domains have
+      // narrowed deep in the search), and needs no union at all: the
+      // "filter" is just that one letter's mask, so this intersects the
+      // neighbor's domain against it directly, skipping the copy into
+      // filter_scratch_by_length_ entirely (there's nothing to union).
+      const WordBitset* filter_ptr;
+      if ((possible & (possible - 1)) == 0) {
+        int c = __builtin_ctz(possible);
+        filter_ptr = &dict_.LetterMask(neighbor_length, sc.neighbor_offset,
+                                        static_cast<char>('A' + c));
+      } else {
+        WordBitset& filter = filter_scratch_by_length_[static_cast<size_t>(neighbor_length)];
+        bool first_mask = true;
+        for (int c = 0; c < 26; ++c) {
+          if (!(possible & (1u << c))) continue;
+          const WordBitset& mask =
+              dict_.LetterMask(neighbor_length, sc.neighbor_offset, static_cast<char>('A' + c));
+          if (first_mask) {
+            filter = mask;
+            first_mask = false;
+          } else {
+            filter |= mask;
+          }
         }
+        filter_ptr = &filter;
       }
+      const WordBitset& filter = *filter_ptr;
 
       // The neighbor's domain only shrinks over the life of the search, so
       // if it's already a subset of the filter, intersecting would be a
@@ -301,14 +320,21 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       if (neighbor_domain.IsSubsetOf(filter)) continue;
 
       SaveDomainOnce(sc.neighbor, domains, trail, epoch);
-      neighbor_domain &= filter;
-      if (!neighbor_domain.Any()) {
+      size_t new_count = neighbor_domain.AndAssignCount(filter);
+      if (new_count == 0) {
         BumpCrossingWeight(crossing_weights, sc.crossing_id);
         for (int t : touched) in_queue[static_cast<size_t>(t)] = false;
         return false;
       }
 
-      enqueue(sc.neighbor);
+      // Same bookkeeping as enqueue(), but the count is already known
+      // from the fused intersect-and-count above, so there's no need to
+      // ask the just-narrowed domain to recompute it.
+      if (!in_queue[static_cast<size_t>(sc.neighbor)]) {
+        touched.push_back(sc.neighbor);
+      }
+      in_queue[static_cast<size_t>(sc.neighbor)] = true;
+      queued_count[static_cast<size_t>(sc.neighbor)] = new_count;
     }
   }
   return true;
