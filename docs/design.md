@@ -60,12 +60,29 @@ The solver aims to either find a valid fill or prove none exists
   depth. Verified via the full unit test suite (including the
   no-solution-exists cases, which exercise Undo most) and, on two
   independent 100-grid real samples (seed 42 and seed 7), identical
-  node/backtrack counts either way. Combined with the `CountAndNot`
-  change above, the seed-7 sample (heavier: 1.55M total nodes across 84
-  solved grids, vs. seed 42's 486k across 78) shows a real, if modest,
-  ~2% total-time improvement (68.2s → 66.8s) -- smaller than run-to-run
-  noise on the lighter seed-42 sample, which is why the heavier sample is
-  the one worth citing here.
+  node/backtrack counts either way.
+
+  Every domain snapshot this scheme (and Undo restoring it) touches is
+  still a real heap allocation and a real free, though: `SaveDomainOnce`
+  copies a slot's domain onto the trail (allocating a fresh buffer), and
+  when Undo later restores that snapshot, the domain state it's
+  overwriting gets freed. Since every domain of a given length is always
+  the same size, that alloc/free pair is pure waste -- the freed buffer
+  is exactly what the next snapshot at that length needs. Fixed with a
+  per-length recycle pool (`snapshot_pool_by_length_`): Undo hands the
+  about-to-be-discarded domain state to the pool instead of letting it be
+  freed, and SaveDomainOnce pops a buffer from the pool and copies into
+  it in place (no reallocation, since the size already matches) instead
+  of allocating a fresh one, falling back to a real allocation only when
+  the pool for that length is empty. Verified byte-identical
+  node/backtrack counts on both 100-grid samples, and a real, clearly
+  visible win on both: the seed-42 sample (486k total nodes across 78
+  solved grids) dropped from a noisy 21.5-22.4s band down to a clean
+  20.45s, and the heavier seed-7 sample (1.55M total nodes across 84
+  solved grids) went from this session's starting point of 68.2s to
+  63.2s -- about 7% faster overall, with profiling confirming
+  malloc/free-related samples on a representative heavy grid dropped by
+  roughly 80%.
 - **Branching.** `dom/wdeg` (`rf-/ingrid_core`, crediting Balafoutis):
   masked domain size over summed crossing weight to unassigned
   neighbors, lowest first; crossing weights bump on wipeout and decay

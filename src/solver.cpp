@@ -39,6 +39,7 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
   last_saved_epoch_.assign(grid_.slots().size(), 0);
+  snapshot_pool_by_length_.resize(static_cast<size_t>(max_length) + 1);
   const std::vector<Crossing>& crossings = grid_.crossings();
   for (size_t i = 0; i < crossings.size(); ++i) {
     const Crossing& cr = crossings[i];
@@ -165,7 +166,20 @@ void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
                              Trail& trail, uint64_t epoch) const {
   if (last_saved_epoch_[static_cast<size_t>(slot)] == epoch) return;
   last_saved_epoch_[static_cast<size_t>(slot)] = epoch;
-  trail.domains.push_back({slot, domains[static_cast<size_t>(slot)]});
+
+  int length = grid_.SlotById(slot).length;
+  std::vector<WordBitset>& pool = snapshot_pool_by_length_[static_cast<size_t>(length)];
+  if (pool.empty()) {
+    trail.domains.push_back({slot, domains[static_cast<size_t>(slot)]});
+    return;
+  }
+  // Reuse a previously-freed buffer of the same length (same word count,
+  // so same size() -- assigning into it is an in-place copy, no
+  // reallocation) instead of heap-allocating a fresh WordBitset.
+  WordBitset recycled = std::move(pool.back());
+  pool.pop_back();
+  recycled = domains[static_cast<size_t>(slot)];
+  trail.domains.push_back({slot, std::move(recycled)});
 }
 
 void Solver::BumpCrossingWeight(std::vector<float>& crossing_weights,
@@ -402,6 +416,13 @@ void Solver::Undo(int slot, std::vector<WordBitset>& domains,
   }
   while (trail.domains.size() > domain_mark) {
     DomainSnapshot& d = trail.domains.back();
+    // The domain state about to be overwritten (the narrower one this
+    // decision produced) is no longer needed -- hand its buffer to the
+    // recycle pool instead of letting the move-assignment below free it,
+    // so a future SaveDomainOnce for this length can reuse it.
+    int length = grid_.SlotById(d.slot).length;
+    snapshot_pool_by_length_[static_cast<size_t>(length)].push_back(
+        std::move(domains[static_cast<size_t>(d.slot)]));
     domains[static_cast<size_t>(d.slot)] = std::move(d.domain);
     trail.domains.pop_back();
   }

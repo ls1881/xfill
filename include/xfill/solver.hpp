@@ -311,6 +311,19 @@ class Solver {
   mutable std::vector<uint64_t> last_saved_epoch_;
   mutable uint64_t next_save_epoch_ = 1;
 
+  // Recycle pool for trail domain snapshots, one stack per length (a
+  // WordBitset's buffer size is fixed by its length, so a buffer freed by
+  // Undo for one length can't be reused for another). Profiling showed
+  // SaveDomainOnce's heap allocation (copying a slot's domain onto the
+  // trail) and Undo's corresponding free (releasing the domain state a
+  // restored snapshot just overwrote) were a real, repeated cost -- this
+  // pair runs on every domain a propagation cascade actually narrows, very
+  // often. Undo pushes the about-to-be-discarded domain here instead of
+  // letting the move-assignment that replaces it free it; SaveDomainOnce
+  // pops a buffer from here and copies into it in place, instead of
+  // heap-allocating a fresh one, whenever one is available.
+  mutable std::vector<std::vector<WordBitset>> snapshot_pool_by_length_;
+
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this
   // is drawn from). `rng_` is mutable because SelectBranchSlot, which
