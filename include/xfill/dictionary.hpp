@@ -4,7 +4,6 @@
 #include <array>
 #include <cstdint>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 namespace xfill {
@@ -60,8 +59,14 @@ class WordBitset {
 
   // Indices of every set bit, via ctz + clear-lowest-bit so cost tracks
   // the number of *chunks touched and bits actually set*, not size().
-  std::vector<size_t> SetBits() const {
+  // `reserve_hint`, when the caller already knows the exact (or an upper
+  // bound on the) popcount -- e.g. Propagate, which just computed this via
+  // Count() to pick the smallest queued domain -- lets the result vector
+  // be allocated once instead of growing via push_back's amortized
+  // doubling, which was a real cost in that hot path.
+  std::vector<size_t> SetBits(size_t reserve_hint = 0) const {
     std::vector<size_t> out;
+    out.reserve(reserve_hint);
     for (size_t i = 0; i < words_.size(); ++i) {
       uint64_t w = words_[i];
       while (w != 0) {
@@ -151,12 +156,16 @@ class Dictionary {
   const std::vector<size_t>& ScoreOrder(int length) const;
 
  private:
-  std::unordered_map<int, std::vector<std::string>> words_by_length_;
-  std::unordered_map<int, std::vector<int>> scores_by_length_;
+  // Indexed directly by length (index 0 unused) rather than keyed in an
+  // unordered_map: word lengths are a small, dense range known at load
+  // time, so a hash + bucket lookup on every access (LetterMask is called
+  // from Propagate's hot inner loop, up to 26 times per crossing) is pure
+  // overhead compared to a direct vector index.
+  std::vector<std::vector<std::string>> words_by_length_;
+  std::vector<std::vector<int>> scores_by_length_;
   // letter_masks_[length][position][letter - 'A']
-  std::unordered_map<int, std::vector<std::array<WordBitset, 26>>>
-      letter_masks_;
-  std::unordered_map<int, std::vector<size_t>> score_order_by_length_;
+  std::vector<std::vector<std::array<WordBitset, 26>>> letter_masks_;
+  std::vector<std::vector<size_t>> score_order_by_length_;
 };
 
 }  // namespace xfill

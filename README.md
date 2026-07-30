@@ -6,8 +6,8 @@ Crossword filling is modeled as a constraint satisfaction problem
 (across/down slots as variables, dictionary words as domains, crossing
 letters as constraints) and solved with constraint propagation and a
 heuristic-guided backtracking search. See [`docs/design.md`](docs/design.md)
-for the roadmap and [`docs/bibliography.md`](docs/bibliography.md) for the
-papers/codebases each technique below is drawn from.
+for architecture and future work, and [`docs/bibliography.md`](docs/bibliography.md)
+for the papers/codebases each technique below is drawn from.
 
 ## Status
 
@@ -15,10 +15,10 @@ papers/codebases each technique below is drawn from.
 queue-based AC-3 propagation, `dom/wdeg` branching, and randomized
 restarts are all implemented and tested (15/15 tests passing). Small and
 medium grids (tested up to 15x15 with real block patterns, against a real
-~280k-entry dictionary at `min_score=50`) solve in well under a second;
+~280k-entry dictionary at `min_score=40`) solve in well under a second;
 some genuinely dense grids remain intractable, which is a documented,
 expected limit (see "Known limits" below and
-[`docs/design.md`](docs/design.md)'s roadmap for what would address it),
+[`docs/design.md`](docs/design.md)'s "Known hard cases" section for more),
 not a bug.
 
 ## How the algorithm works
@@ -49,10 +49,13 @@ reasoning and citations behind each piece, see
    every index one at a time); a wider domain tests all 26 `LetterMask`s
    against it instead, since materializing every surviving candidate
    isn't worth it when there are thousands of them. This split -- and the
-   `SetBits()` fix, and reusing one scratch bitset per length instead of
-   heap-allocating a fresh one per crossing -- came directly out of
-   `sample`-profiling a real (scraped, not synthetic) 15x15 that was
-   timing out: see `docs/design.md`'s roadmap for the numbers.
+   `SetBits()` fix, reusing one scratch bitset per length instead of
+   heap-allocating a fresh one per crossing, indexing all per-length state
+   (`LetterMask`, that scratch bitset) directly by length instead of
+   through a hash map, and reusing the propagation queue's membership
+   buffer across calls instead of reallocating it per node -- came
+   directly out of `sample`-profiling real (scraped, not synthetic) 15x15s
+   that were timing out.
 
 3. **Branching.** `SelectBranchSlot` picks which slot to guess next using
    `dom/wdeg`: (masked domain size) ÷ (summed weight of this slot's
@@ -110,19 +113,16 @@ reasoning and citations behind each piece, see
 
 ### Known limits
 
-`benchmarks/grids/sample_13x13.txt` still hadn't finished after running
-15+ minutes, even at `min_score=40` (see `docs/design.md`'s roadmap for
-the full min_score investigation this comes from). That's an
-expected result, not a bug: per Anbulagan & Botea's phase-transition
-study of crossword CSPs, some "hard region" instances stay expensive for
-*any* search order, because the underlying instance itself is hard, not
-just this solver's choices leading up to it -- restarts fix a search
-that got *unlucky*, but can't turn a genuinely hard instance easy.
-`sample_15x15.txt` (the original, fully-open-interior 15x15, as opposed
-to `sample_15x15_interlock.txt` which solves quickly) turned out to
-*not* be in that category: it looked just as stuck as `sample_13x13.txt`
-at `min_score=50` (didn't finish in 5 minutes), but at `min_score=40` it
-solves in 158s -- it just needed a less-restricted dictionary and a
+`benchmarks/grids/sample_13x13.txt` still hasn't finished after 15+
+minutes, even at `min_score=40`. That's an expected result, not a bug:
+per Anbulagan & Botea's phase-transition study of crossword CSPs, some
+"hard region" instances stay expensive for *any* search order, because
+the underlying instance itself is hard, not just this solver's choices
+leading up to it -- restarts fix a search that got *unlucky*, but can't
+turn a genuinely hard instance easy. `sample_15x15.txt` (the original,
+fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
+which solves quickly) is not in that category: it solves in 158s at
+`min_score=40` -- it just needs a less-restricted dictionary and a
 couple of minutes' patience, not a fundamentally harder search.
 `sample_21x21.txt` is different again: it's proven unsatisfiable in
 microseconds, because it has a fully-open 21-cell row and the dictionary
@@ -140,10 +140,10 @@ than the first alphabetically-valid guess. Words are uppercased on load,
 so mixed-case input is fine.
 
 `min_score=40` is the recommended default for `data/spreadthewordlist_caps.txt`
-specifically (and is what `benchmarks/bench_subset.py` now defaults to) --
-see `docs/design.md`'s roadmap for the investigation behind that number,
-including why lower thresholds stop helping solvability and start hurting
-fill quality in this particular wordlist.
+specifically (and is what `benchmarks/bench_subset.py` defaults to) --
+see `docs/design.md`'s "Dictionary tuning" section for why lower
+thresholds stop helping solvability and start hurting fill quality in
+this particular wordlist.
 
 ```
 CAT;50

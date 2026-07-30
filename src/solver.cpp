@@ -27,12 +27,17 @@ constexpr float kRetryGrowthFactor = 1.1f;
 
 Solver::Solver(const Grid& grid, const Dictionary& dict)
     : grid_(grid), dict_(dict), crossings_by_slot_(grid_.slots().size()) {
+  int max_length = 0;
   for (const Slot& slot : grid_.slots()) {
     slots_by_length_[slot.length].push_back(slot.id);
+    max_length = std::max(max_length, slot.length);
   }
+  filter_scratch_by_length_.resize(static_cast<size_t>(max_length) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
-    filter_scratch_by_length_[length] = WordBitset(dict_.NumWordsOfLength(length), false);
+    filter_scratch_by_length_[static_cast<size_t>(length)] =
+        WordBitset(dict_.NumWordsOfLength(length), false);
   }
+  in_queue_scratch_.assign(grid_.slots().size(), false);
   const std::vector<Crossing>& crossings = grid_.crossings();
   for (size_t i = 0; i < crossings.size(); ++i) {
     const Crossing& cr = crossings[i];
@@ -41,6 +46,29 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
         {cr.slot_b, cr.offset_a, cr.offset_b, crossing_id});
     crossings_by_slot_[static_cast<size_t>(cr.slot_b)].push_back(
         {cr.slot_a, cr.offset_b, cr.offset_a, crossing_id});
+  }
+
+  // Connected components of the slot-crossing graph, via one BFS pass --
+  // O(slots + crossings). See the slots_by_component_ comment in
+  // solver.hpp.
+  component_of_slot_.assign(grid_.slots().size(), -1);
+  for (const Slot& start : grid_.slots()) {
+    if (component_of_slot_[static_cast<size_t>(start.id)] != -1) continue;
+    int component = static_cast<int>(slots_by_component_.size());
+    slots_by_component_.emplace_back();
+
+    std::vector<int> queue{start.id};
+    component_of_slot_[static_cast<size_t>(start.id)] = component;
+    for (size_t head = 0; head < queue.size(); ++head) {
+      int sid = queue[head];
+      slots_by_component_[static_cast<size_t>(component)].push_back(sid);
+      for (const SlotCrossing& sc : crossings_by_slot_[static_cast<size_t>(sid)]) {
+        if (component_of_slot_[static_cast<size_t>(sc.neighbor)] == -1) {
+          component_of_slot_[static_cast<size_t>(sc.neighbor)] = component;
+          queue.push_back(sc.neighbor);
+        }
+      }
+    }
   }
 }
 
@@ -109,6 +137,11 @@ std::optional<Solution> Solver::Solve() {
     std::vector<bool> assigned(grid_.slots().size(), false);
     Trail trail;
 
+    component_remaining_.resize(slots_by_component_.size());
+    for (size_t c = 0; c < slots_by_component_.size(); ++c) {
+      component_remaining_[c] = static_cast<int>(slots_by_component_[c].size());
+    }
+
     auto result = Backtrack(attempt_domains, attempt_used_by_length, assigned,
                              trail, crossing_weights);
     if (result) return result;
@@ -148,8 +181,19 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
                         const std::vector<int>& seed_slots, Trail& trail,
                         size_t level_mark,
                         std::vector<float>& crossing_weights) const {
-  std::vector<bool> in_queue(grid_.slots().size(), false);
-  for (int s : seed_slots) in_queue[static_cast<size_t>(s)] = true;
+  std::vector<bool>& in_queue = in_queue_scratch_;
+  std::vector<int>& touched = queue_touched_scratch_;
+  touched.clear();
+  auto enqueue = [&](int s) {
+    if (!in_queue[static_cast<size_t>(s)]) touched.push_back(s);
+    in_queue[static_cast<size_t>(s)] = true;
+  };
+  // Every entry left `true` here gets reset before this function returns,
+  // by whichever path it returns through -- including the early-return-on-
+  // contradiction case below, where the queue may still hold un-popped
+  // slots -- so the scratch buffer is always all-false again on the next
+  // call.
+  for (int s : seed_slots) enqueue(s);
 
   while (true) {
     // Pop the queued slot with the smallest domain -- checking wipeouts
@@ -189,7 +233,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
     std::vector<size_t> slot_candidates;
     const std::vector<std::string>* slot_words = nullptr;
     if (best_count <= kDirectLookupThreshold) {
-      slot_candidates = slot_domain.SetBits();
+      slot_candidates = slot_domain.SetBits(best_count);
       slot_words = &dict_.WordsOfLength(length);
     }
 
@@ -215,7 +259,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       int neighbor_length = grid_.SlotById(sc.neighbor).length;
       WordBitset& neighbor_domain = domains[static_cast<size_t>(sc.neighbor)];
 
-      WordBitset& filter = filter_scratch_by_length_[neighbor_length];
+      WordBitset& filter = filter_scratch_by_length_[static_cast<size_t>(neighbor_length)];
       filter.ClearAll();
       for (int c = 0; c < 26; ++c) {
         if (possible & (1u << c)) {
@@ -233,10 +277,11 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       neighbor_domain &= filter;
       if (!neighbor_domain.Any()) {
         BumpCrossingWeight(crossing_weights, sc.crossing_id);
+        for (int t : touched) in_queue[static_cast<size_t>(t)] = false;
         return false;
       }
 
-      in_queue[static_cast<size_t>(sc.neighbor)] = true;
+      enqueue(sc.neighbor);
     }
   }
   return true;
@@ -274,21 +319,32 @@ float Solver::SlotWeight(int slot, const std::vector<float>& crossing_weights,
   return total > 0.0f ? total : 1.0f;
 }
 
+int Solver::ActiveComponent() const {
+  for (size_t c = 0; c < component_remaining_.size(); ++c) {
+    if (component_remaining_[c] > 0) return static_cast<int>(c);
+  }
+  return -1;
+}
+
 int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
                               const std::vector<WordBitset>& used_by_length,
                               const std::vector<bool>& assigned,
                               const std::vector<float>& crossing_weights) const {
+  int active = ActiveComponent();
+  if (active == -1) return -1;
+
   std::vector<std::pair<float, int>> candidates;  // (priority, slot id)
 
-  for (const Slot& slot : grid_.slots()) {
-    if (assigned[static_cast<size_t>(slot.id)]) continue;
+  for (int sid : slots_by_component_[static_cast<size_t>(active)]) {
+    if (assigned[static_cast<size_t>(sid)]) continue;
 
-    WordBitset effective = domains[static_cast<size_t>(slot.id)];
+    const Slot& slot = grid_.SlotById(sid);
+    WordBitset effective = domains[static_cast<size_t>(sid)];
     effective.AndNot(used_by_length[static_cast<size_t>(slot.length)]);
     size_t count = effective.Count();
 
-    float weight = SlotWeight(slot.id, crossing_weights, assigned);
-    candidates.push_back({static_cast<float>(count) / weight, slot.id});
+    float weight = SlotWeight(sid, crossing_weights, assigned);
+    candidates.push_back({static_cast<float>(count) / weight, sid});
   }
   if (candidates.empty()) return -1;
 
@@ -315,6 +371,7 @@ bool Solver::Assign(int slot, size_t word_index,
   int length = grid_.SlotById(slot).length;
 
   assigned[static_cast<size_t>(slot)] = true;
+  --component_remaining_[static_cast<size_t>(component_of_slot_[static_cast<size_t>(slot)])];
 
   SaveDomainOnce(slot, domains, trail, level_mark);
   WordBitset chosen(domains[static_cast<size_t>(slot)].size(), false);
@@ -332,6 +389,7 @@ void Solver::Undo(int slot, std::vector<WordBitset>& domains,
                    std::vector<bool>& assigned, Trail& trail,
                    size_t domain_mark, size_t used_mark) const {
   assigned[static_cast<size_t>(slot)] = false;
+  ++component_remaining_[static_cast<size_t>(component_of_slot_[static_cast<size_t>(slot)])];
 
   while (trail.used.size() > used_mark) {
     const UsedSnapshot& u = trail.used.back();

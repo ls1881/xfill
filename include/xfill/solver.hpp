@@ -179,9 +179,17 @@ class Solver {
   float SlotWeight(int slot, const std::vector<float>& crossing_weights,
                     const std::vector<bool>& assigned) const;
 
-  // dom/wdeg branching over not-yet-assigned slots: smallest (masked
-  // domain size / weighted degree), i.e. most urgent first, is the top
-  // candidate -- but rather than always taking that single best slot, a
+  // Index (into slots_by_component_) of the lowest-numbered connected
+  // component that still has an unassigned slot, or -1 if none do.
+  // O(component count), not O(slot count) -- component_remaining_ is
+  // maintained incrementally by Assign/Undo specifically so this stays
+  // cheap even late in a large multi-component search.
+  int ActiveComponent() const;
+
+  // dom/wdeg branching, restricted to the current *active component* (see
+  // slots_by_component_ below): smallest (masked domain size / weighted
+  // degree), i.e. most urgent first, is the top candidate within that
+  // component -- but rather than always taking that single best slot, a
   // weighted-random choice is made among the best few (see
   // kRandomSlotWeights in solver.cpp), so that different restart attempts
   // (see Solve()) actually explore different branch orders instead of
@@ -232,12 +240,48 @@ class Solver {
   // crossings_by_slot_[slot_id] -- every other slot it crosses, and the
   // offset within each side of the crossing cell.
   std::vector<std::vector<SlotCrossing>> crossings_by_slot_;
+
+  // Connected components of the slot-crossing graph (BFS over
+  // crossings_by_slot_, computed once in the constructor -- see the
+  // class comment's discussion of Dechter's "non-separable components").
+  // Two slots in different components share no crossing, directly or
+  // transitively, so nothing about one can ever affect the other's
+  // *word-matching* constraints -- only the grid-wide no-duplicate-words
+  // rule still couples them. slots_by_component_[c] lists component c's
+  // slot ids; component_remaining_[c] is how many of them are still
+  // unassigned in the *current* search attempt (decremented by Assign,
+  // incremented by Undo, reset at the top of each attempt in Solve()).
+  // SelectBranchSlot only ever offers candidates from the lowest-indexed
+  // component with any left -- fully settling (or proving impossible)
+  // one component before starting the next. This is free (identical to
+  // the old unrestricted behavior) when the grid is a single component,
+  // which real, well-interlocked crosswords usually are; it shrinks the
+  // candidate scan for grids that do have independent regions, e.g.
+  // benchmarks/grids/synthetic/disconnected_15x15.txt.
+  std::vector<std::vector<int>> slots_by_component_;
+  std::vector<int> component_of_slot_;
+  mutable std::vector<int> component_remaining_;
   // One scratch WordBitset per word length, reused as Propagate's `filter`
   // instead of heap-allocating a fresh one on every crossing check --
   // profiling showed WordBitset construction/destruction was a real cost
-  // in this hot loop. Sized once in the constructor; ClearAll() resets
-  // without reallocating. Mutable for the same reason as `rng_`.
-  mutable std::unordered_map<int, WordBitset> filter_scratch_by_length_;
+  // in this hot loop. Indexed directly by length (like Dictionary's
+  // internals) rather than an unordered_map, since this is looked up once
+  // per crossing inside Propagate's innermost loop and a hash + bucket
+  // lookup there was itself a measurable cost. Sized once in the
+  // constructor; ClearAll() resets without reallocating. Mutable for the
+  // same reason as `rng_`.
+  mutable std::vector<WordBitset> filter_scratch_by_length_;
+
+  // Propagate's queue membership, kept as a persistent scratch buffer
+  // (sized once to the slot count) instead of a freshly-allocated
+  // vector<bool> on every call -- Propagate runs once per node (i.e. very
+  // often), and profiling showed the per-call allocation was a real cost.
+  // Every entry is false again by the time Propagate returns (queue_touched_
+  // below records exactly which entries were ever set true, so returning
+  // early on a contradiction can still reset just those instead of the
+  // whole vector). Mutable for the same reason as `rng_`.
+  mutable std::vector<bool> in_queue_scratch_;
+  mutable std::vector<int> queue_touched_scratch_;
 
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this
