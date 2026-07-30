@@ -57,6 +57,21 @@ The solver aims to either find a valid fill or prove none exists
   100-grid real samples, with a further ~3% total-time win on top of the
   snapshot-pool change below (seed 42: 20.5s → ~20s; seed 7, heavier:
   63.2s → 61.1s).
+
+  The min-domain queue pop itself had a real quadratic inefficiency: it
+  recomputed `domains[i].Count()` (an O(chunks) popcount) for every still-
+  queued slot on *every single pop*, even slots whose domain hadn't
+  changed since the previous pop -- an O(Q) recomputation repeated Q times
+  to drain a Q-slot queue, O(Q²) total. A queued slot's domain only ever
+  changes inside this same function, and every such change is immediately
+  followed by a call to enqueue() for that slot (or a contradiction
+  return), so caching each slot's popcount at the moment it's (re-)queued
+  keeps the cache valid for as long as it stays queued, turning the scan's
+  per-slot cost into an O(1) lookup. Verified byte-identical node/backtrack
+  counts on both 100-grid real samples, and this was the single biggest
+  win of the session: seed 42 dropped from ~20s to a stable ~18s, and the
+  heavier seed-7 sample from 61.1s to 55.5s -- roughly 19% faster overall
+  than where this session started (68.2s).
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
   "Once per level" was originally enforced by scanning back through the
@@ -148,6 +163,41 @@ original letter-major loop order (no locality regression) while still
 skipping the redundant clear by assigning the first included mask
 directly instead of clearing then OR-ing it in — but that narrower fix
 showed no measurable aggregate win either, so it wasn't kept.
+
+**Also tried and reverted:** breaking `SelectBranchSlot`'s exact dom/wdeg
+priority ties by degree (crossings to unassigned neighbors, preferring
+the more-constraining slot) instead of the arbitrary lowest-slot-id
+tie-break a plain `(priority, slot)` pair comparison gives. On the
+seed-42 sample this looked like a clear win (78/100 solved either way,
+but ~17% fewer total nodes) — but on the heavier, more reliable seed-7
+sample it *regressed* solve count (84 → 82, two real losses and zero
+gains, no grids flipped the other way). Same underlying pattern as the
+backjumping/nogood-learning reverts above: any change to search order,
+even a well-motivated one, perturbs which restart's random seed ends up
+solving a given grid, and the effect isn't reliably positive across a
+large real sample even when a smaller sample suggests it is. Also tried:
+replacing `Propagate`'s O(total slots) min-domain scan with a sorted
+`vector<int>` of just the currently-queued slots (kept in ascending
+order specifically to preserve the original scan's tie-breaking exactly,
+verified byte-identical on both samples) — but this was a wash-to-slight-
+regression, not a win: the O(S) scan being replaced was mostly cheap
+`vector<bool>` reads (the *real* per-slot cost, an O(chunks) popcount, was
+already skipped for non-queued slots via `continue`, same as before), so
+removing it saved little while the new sorted-insert/erase maintenance
+cost was pure added overhead. Profile before assuming a scan is the
+bottleneck, not just the largest loop bound in the code.
+
+Profile-guided optimization (build an instrumented binary, run it over a
+sample of real grids, rebuild using that profile) was also tried as a
+build-level, behavior-preserving alternative to further code changes --
+byte-identical by construction, and safe from the restart-interaction
+risk above since it can't change *what* the solver does, only how the
+compiler lays out the code. It showed no measurable difference, most
+likely because moving `WordBitset`'s methods into the header (an earlier
+session's fix) already captured the main cross-translation-unit inlining
+win PGO would otherwise offer. Not adopted, since it would add a
+real build-process dependency (an instrumented pre-build run) for no
+measured benefit.
 
 ## Dictionary tuning
 

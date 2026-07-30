@@ -38,6 +38,7 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
+  queued_count_scratch_.assign(grid_.slots().size(), 0);
   last_saved_epoch_.assign(grid_.slots().size(), 0);
   snapshot_pool_by_length_.resize(static_cast<size_t>(max_length) + 1);
   const std::vector<Crossing>& crossings = grid_.crossings();
@@ -197,11 +198,23 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
                         std::vector<float>& crossing_weights) const {
   std::vector<bool>& in_queue = in_queue_scratch_;
   std::vector<int>& touched = queue_touched_scratch_;
-  touched.clear();
+  // Caches domains[s].Count() at the moment `s` is (re-)enqueued, valid
+  // for as long as `s` stays queued: a queued slot's domain only ever
+  // changes here in Propagate, and every such change is immediately
+  // followed by a call to enqueue() for that slot (or a contradiction
+  // return) -- so the cached count is never stale while in_queue[s] is
+  // true. Without this, the min-domain scan below recomputed Count() (an
+  // O(chunks) popcount) for every still-queued slot on every single pop,
+  // even slots whose domain hadn't changed since the last pass -- O(Q)
+  // redundant recomputation per pop, O(Q^2) over a queue that takes Q pops
+  // to drain.
+  std::vector<size_t>& queued_count = queued_count_scratch_;
   auto enqueue = [&](int s) {
     if (!in_queue[static_cast<size_t>(s)]) touched.push_back(s);
     in_queue[static_cast<size_t>(s)] = true;
+    queued_count[static_cast<size_t>(s)] = domains[static_cast<size_t>(s)].Count();
   };
+  touched.clear();
   // Every entry left `true` here gets reset before this function returns,
   // by whichever path it returns through -- including the early-return-on-
   // contradiction case below, where the queue may still hold un-popped
@@ -217,7 +230,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
     size_t best_count = 0;
     for (size_t i = 0; i < in_queue.size(); ++i) {
       if (!in_queue[i]) continue;
-      size_t count = domains[i].Count();
+      size_t count = queued_count[i];
       if (slot == -1 || count < best_count) {
         slot = static_cast<int>(i);
         best_count = count;

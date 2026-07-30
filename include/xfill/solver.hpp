@@ -291,6 +291,10 @@ class Solver {
   // whole vector). Mutable for the same reason as `rng_`.
   mutable std::vector<bool> in_queue_scratch_;
   mutable std::vector<int> queue_touched_scratch_;
+  // Propagate's cache of each queued slot's domain popcount -- see the
+  // comment where it's used in Propagate for why this is always valid
+  // for as long as a slot stays queued.
+  mutable std::vector<size_t> queued_count_scratch_;
 
   // Propagate's "which words are still in this slot's domain" list for the
   // direct-lookup path, reused across calls (via WordBitset::AppendSetBits)
