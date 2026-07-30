@@ -45,6 +45,18 @@ The solver aims to either find a valid fill or prove none exists
   cap): identical node/backtrack counts, 78/100 solved either way, but
   ~40% less wall-clock time on the solved subset (35.9s → 21.6s total),
   with some individual grids over 5x faster.
+
+  The direct-lookup fast path's "which words are still in this slot's
+  domain" list (`WordBitset::SetBits`) was itself a fresh
+  `std::vector<size_t>` constructed and freed on every single popped
+  queue slot, even though it already reserved its exact capacity up
+  front. Given an `AppendSetBits` counterpart that fills a caller-supplied
+  vector instead of returning a new one, this became a persistent scratch
+  vector (`slot_candidates_scratch_`) cleared and refilled per slot rather
+  than reallocated. Verified byte-identical node/backtrack counts on two
+  100-grid real samples, with a further ~3% total-time win on top of the
+  snapshot-pool change below (seed 42: 20.5s → ~20s; seed 7, heavier:
+  63.2s → 61.1s).
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
   "Once per level" was originally enforced by scanning back through the

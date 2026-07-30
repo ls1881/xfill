@@ -292,6 +292,11 @@ class Solver {
   mutable std::vector<bool> in_queue_scratch_;
   mutable std::vector<int> queue_touched_scratch_;
 
+  // Propagate's "which words are still in this slot's domain" list for the
+  // direct-lookup path, reused across calls (via WordBitset::AppendSetBits)
+  // instead of a fresh std::vector<size_t> per popped queue slot.
+  mutable std::vector<size_t> slot_candidates_scratch_;
+
   // SelectBranchSlot's (priority, slot id) candidate list, reused across
   // calls instead of a fresh vector on every single branching decision.
   mutable std::vector<std::pair<float, int>> branch_candidates_scratch_;

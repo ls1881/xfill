@@ -80,6 +80,17 @@ class WordBitset {
   std::vector<size_t> SetBits(size_t reserve_hint = 0) const {
     std::vector<size_t> out;
     out.reserve(reserve_hint);
+    AppendSetBits(out);
+    return out;
+  }
+
+  // Same traversal as SetBits(), but appends into a caller-supplied vector
+  // instead of returning a fresh one -- lets a hot-path caller (e.g.
+  // Propagate, which does this once per popped queue slot) reuse one
+  // scratch vector across many calls instead of allocating/freeing a new
+  // one every time. Caller is responsible for clearing `out` first if a
+  // clean result (rather than an appended one) is wanted.
+  void AppendSetBits(std::vector<size_t>& out) const {
     for (size_t i = 0; i < words_.size(); ++i) {
       uint64_t w = words_[i];
       while (w != 0) {
@@ -88,7 +99,6 @@ class WordBitset {
         w &= w - 1;  // clear the lowest set bit
       }
     }
-    return out;
   }
 
   // Index of the first (lowest) set bit. Caller must ensure Any() is true.

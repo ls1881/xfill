@@ -244,10 +244,10 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
     // not derived analytically, per this project's benchmarking
     // philosophy (see docs/design.md).
     constexpr size_t kDirectLookupThreshold = 1000;
-    std::vector<size_t> slot_candidates;
     const std::vector<std::string>* slot_words = nullptr;
     if (best_count <= kDirectLookupThreshold) {
-      slot_candidates = slot_domain.SetBits(best_count);
+      slot_candidates_scratch_.clear();
+      slot_domain.AppendSetBits(slot_candidates_scratch_);
       slot_words = &dict_.WordsOfLength(length);
     }
 
@@ -256,7 +256,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       // the slot's current domain?
       uint32_t possible = 0;
       if (slot_words != nullptr) {
-        for (size_t idx : slot_candidates) {
+        for (size_t idx : slot_candidates_scratch_) {
           char ch = (*slot_words)[idx][static_cast<size_t>(sc.my_offset)];
           possible |= (1u << (ch - 'A'));
         }
