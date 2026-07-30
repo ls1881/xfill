@@ -47,11 +47,35 @@ The solver aims to either find a valid fill or prove none exists
   with some individual grids over 5x faster.
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
+  "Once per level" was originally enforced by scanning back through the
+  trail from that level's start looking for an existing entry for the
+  slot — an O(k) scan repeated for each of the (up to) k domains a single
+  cascade touches. Replaced with an O(1) check: each Assign()-triggered
+  cascade (and each root-propagation pass) draws a fresh, never-repeated
+  epoch number, and every slot remembers the epoch it was last saved
+  during, so "already saved this level" is one integer comparison. A
+  naive version of this that used the trail-size mark itself as the
+  epoch would be unsound, since that mark gets reused whenever Undo
+  returns the trail to the same size for a sibling candidate at the same
+  depth. Verified via the full unit test suite (including the
+  no-solution-exists cases, which exercise Undo most) and, on two
+  independent 100-grid real samples (seed 42 and seed 7), identical
+  node/backtrack counts either way. Combined with the `CountAndNot`
+  change above, the seed-7 sample (heavier: 1.55M total nodes across 84
+  solved grids, vs. seed 42's 486k across 78) shows a real, if modest,
+  ~2% total-time improvement (68.2s → 66.8s) -- smaller than run-to-run
+  noise on the lighter seed-42 sample, which is why the heavier sample is
+  the one worth citing here.
 - **Branching.** `dom/wdeg` (`rf-/ingrid_core`, crediting Balafoutis):
   masked domain size over summed crossing weight to unassigned
   neighbors, lowest first; crossing weights bump on wipeout and decay
   otherwise. Word choice within a slot is always score-ordered, never
-  randomized.
+  randomized. `SelectBranchSlot` scores each unassigned slot via
+  `WordBitset::CountAndNot` (popcount of domain-minus-used-words without
+  materializing the intersection) instead of copying the domain to mask
+  it and count the result, avoiding a heap allocation on every candidate
+  slot on every branching decision — verified to produce identical
+  node/backtrack counts on the 100-grid real sample.
 - **Restarts.** Geometric backtrack-budget growth
   (`kInitialBacktrackLimit = 500`, `kRetryGrowthFactor = 1.1`), motivated
   by Gomes, Selman & Kautz's heavy-tailed-runtime-distribution result.
@@ -78,6 +102,23 @@ section for techniques that were implemented, benchmarked, and reverted
 (graph-based backjumping, plain nogood learning, a project-original
 dom/wdeg weight-seeding scheme) — none of them are part of the current
 solver.
+
+**Tried and reverted:** fusing `Propagate`'s per-crossing filter build,
+subset-check, and clear into one chunk-major pass (iterate chunks
+outermost, OR together whichever of the up to 26 letter masks apply for
+each chunk). In isolation this removes two full passes over the scratch
+bitset (the explicit clear and a separate subset-check read), and most
+grids in the 100-grid real sample got dramatically faster this way — but
+it also switches the memory access pattern from streaming fully through
+one contiguous letter-mask array at a time (the original, letter-major
+loop order) to touching up to 26 *different* masks' memory once per
+chunk, and that regressed grids whose crossings commonly have wide
+`possible` sets: `grid_053.txt` got ~35% slower and flipped from solved
+to timeout. Reverted in favor of a smaller, safe change that keeps the
+original letter-major loop order (no locality regression) while still
+skipping the redundant clear by assigning the first included mask
+directly instead of clearing then OR-ing it in — but that narrower fix
+showed no measurable aggregate win either, so it wasn't kept.
 
 ## Dictionary tuning
 

@@ -38,6 +38,7 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
+  last_saved_epoch_.assign(grid_.slots().size(), 0);
   const std::vector<Crossing>& crossings = grid_.crossings();
   for (size_t i = 0; i < crossings.size(); ++i) {
     const Crossing& cr = crossings[i];
@@ -96,7 +97,7 @@ std::optional<Solution> Solver::Solve() {
   bool changed = true;
   while (changed) {
     changed = false;
-    if (!Propagate(domains, all_slots, root_trail, 0, crossing_weights)) {
+    if (!Propagate(domains, all_slots, root_trail, next_save_epoch_++, crossing_weights)) {
       return std::nullopt;
     }
     root_trail.domains.clear();  // one-time pass -- nothing to undo to
@@ -161,10 +162,9 @@ std::optional<Solution> Solver::Solve() {
 }
 
 void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
-                             Trail& trail, size_t level_mark) const {
-  for (size_t i = level_mark; i < trail.domains.size(); ++i) {
-    if (trail.domains[i].slot == slot) return;
-  }
+                             Trail& trail, uint64_t epoch) const {
+  if (last_saved_epoch_[static_cast<size_t>(slot)] == epoch) return;
+  last_saved_epoch_[static_cast<size_t>(slot)] = epoch;
   trail.domains.push_back({slot, domains[static_cast<size_t>(slot)]});
 }
 
@@ -179,7 +179,7 @@ void Solver::BumpCrossingWeight(std::vector<float>& crossing_weights,
 
 bool Solver::Propagate(std::vector<WordBitset>& domains,
                         const std::vector<int>& seed_slots, Trail& trail,
-                        size_t level_mark,
+                        uint64_t epoch,
                         std::vector<float>& crossing_weights) const {
   std::vector<bool>& in_queue = in_queue_scratch_;
   std::vector<int>& touched = queue_touched_scratch_;
@@ -273,7 +273,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       // no-op -- skip the snapshot and the write.
       if (neighbor_domain.IsSubsetOf(filter)) continue;
 
-      SaveDomainOnce(sc.neighbor, domains, trail, level_mark);
+      SaveDomainOnce(sc.neighbor, domains, trail, epoch);
       neighbor_domain &= filter;
       if (!neighbor_domain.Any()) {
         BumpCrossingWeight(crossing_weights, sc.crossing_id);
@@ -333,15 +333,19 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
   int active = ActiveComponent();
   if (active == -1) return -1;
 
-  std::vector<std::pair<float, int>> candidates;  // (priority, slot id)
+  std::vector<std::pair<float, int>>& candidates = branch_candidates_scratch_;
+  candidates.clear();
 
   for (int sid : slots_by_component_[static_cast<size_t>(active)]) {
     if (assigned[static_cast<size_t>(sid)]) continue;
 
     const Slot& slot = grid_.SlotById(sid);
-    WordBitset effective = domains[static_cast<size_t>(sid)];
-    effective.AndNot(used_by_length[static_cast<size_t>(slot.length)]);
-    size_t count = effective.Count();
+    // Popcount of (domain & ~used) directly, without copying the domain
+    // just to AndNot() it and Count() the result -- this runs once per
+    // unassigned slot in the component on every single branching decision,
+    // so the avoided allocation/copy adds up.
+    size_t count = domains[static_cast<size_t>(sid)].CountAndNot(
+        used_by_length[static_cast<size_t>(slot.length)]);
 
     float weight = SlotWeight(sid, crossing_weights, assigned);
     candidates.push_back({static_cast<float>(count) / weight, sid});
@@ -366,14 +370,14 @@ bool Solver::Assign(int slot, size_t word_index,
                      std::vector<WordBitset>& domains,
                      std::vector<WordBitset>& used_by_length,
                      std::vector<bool>& assigned, Trail& trail,
-                     size_t level_mark,
                      std::vector<float>& crossing_weights) const {
   int length = grid_.SlotById(slot).length;
+  uint64_t epoch = next_save_epoch_++;
 
   assigned[static_cast<size_t>(slot)] = true;
   --component_remaining_[static_cast<size_t>(component_of_slot_[static_cast<size_t>(slot)])];
 
-  SaveDomainOnce(slot, domains, trail, level_mark);
+  SaveDomainOnce(slot, domains, trail, epoch);
   WordBitset chosen(domains[static_cast<size_t>(slot)].size(), false);
   chosen.Set(word_index);
   domains[static_cast<size_t>(slot)] = chosen;
@@ -381,7 +385,7 @@ bool Solver::Assign(int slot, size_t word_index,
   trail.used.push_back({length, word_index});
   used_by_length[static_cast<size_t>(length)].Set(word_index);
 
-  return Propagate(domains, {slot}, trail, level_mark, crossing_weights);
+  return Propagate(domains, {slot}, trail, epoch, crossing_weights);
 }
 
 void Solver::Undo(int slot, std::vector<WordBitset>& domains,
@@ -430,7 +434,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     size_t domain_mark = trail.domains.size();
     size_t used_mark = trail.used.size();
 
-    if (Assign(slot, idx, domains, used_by_length, assigned, trail, domain_mark,
+    if (Assign(slot, idx, domains, used_by_length, assigned, trail,
                crossing_weights)) {
       auto result = Backtrack(domains, used_by_length, assigned, trail,
                                crossing_weights);

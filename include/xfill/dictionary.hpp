@@ -49,6 +49,19 @@ class WordBitset {
     for (uint64_t w : words_) total += static_cast<size_t>(__builtin_popcountll(w));
     return total;
   }
+
+  // Count of bits set here but not in `other` -- i.e. |*this & ~other| --
+  // without materializing the intersection. Lets a caller that only wants
+  // a count (e.g. SelectBranchSlot scoring a slot against the "used words"
+  // mask) skip copying this bitset just to AndNot() it and Count() the
+  // result.
+  size_t CountAndNot(const WordBitset& other) const {
+    size_t total = 0;
+    for (size_t i = 0; i < words_.size(); ++i) {
+      total += static_cast<size_t>(__builtin_popcountll(words_[i] & ~other.words_[i]));
+    }
+    return total;
+  }
   bool Any() const {
     for (uint64_t w : words_) {
       if (w) return true;

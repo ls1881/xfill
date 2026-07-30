@@ -144,11 +144,17 @@ class Solver {
   };
 
   // Saves `domains[slot]` onto the trail, but only if it hasn't already
-  // been saved since `level_mark` -- the first snapshot within a decision
-  // level is the one that must survive to Undo, since it's the only one
-  // reflecting the state before *any* of this level's changes.
+  // been saved during this `epoch` -- the first snapshot within a
+  // decision level is the one that must survive to Undo, since it's the
+  // only one reflecting the state before *any* of this level's changes.
+  // `epoch` is a value unique to one Assign()-triggered cascade (see
+  // next_save_epoch_): unlike a trail-size mark, which gets reused
+  // whenever a sibling candidate at the same depth is tried after Undo
+  // restores the trail back to the same size, an epoch is never reused,
+  // so a plain equality check replaces what used to be a linear scan over
+  // the trail looking for an existing entry for this slot.
   void SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
-                       Trail& trail, size_t level_mark) const;
+                       Trail& trail, uint64_t epoch) const;
 
   // Decays every crossing weight toward 1 (keeping WEIGHT_AGE_FACTOR of
   // its excess) and bumps `culprit`'s weight by 1 -- called once per
@@ -160,12 +166,12 @@ class Solver {
   // Queue-based AC-3: seeds the propagation queue with `seed_slots` and
   // runs to a fixpoint, narrowing crossing neighbors' domains and
   // re-queueing whichever ones actually shrank. Domain changes are
-  // recorded on `trail` (deduped against `level_mark`) so the caller can
-  // undo them later. Returns false on contradiction (a domain emptied),
-  // after bumping the responsible crossing's weight.
+  // recorded on `trail` (deduped against `epoch`, see SaveDomainOnce) so
+  // the caller can undo them later. Returns false on contradiction (a
+  // domain emptied), after bumping the responsible crossing's weight.
   bool Propagate(std::vector<WordBitset>& domains,
                   const std::vector<int>& seed_slots, Trail& trail,
-                  size_t level_mark, std::vector<float>& crossing_weights) const;
+                  uint64_t epoch, std::vector<float>& crossing_weights) const;
 
   // Root-only pass: once a slot's domain is forced to a single word,
   // removes that word from every other same-length slot's domain. Sets
@@ -211,10 +217,13 @@ class Solver {
 
   // Assigns `slot` to word `word_index`, marks the word used, and runs
   // Propagate from `slot` to cascade the consequences. Returns false on
-  // contradiction; the caller must still Undo regardless.
+  // contradiction; the caller must still Undo regardless. Generates its
+  // own fresh epoch (see next_save_epoch_) for this call's SaveDomainOnce
+  // dedup, shared between the direct snapshot of `slot` itself and
+  // everything the resulting Propagate cascade touches.
   bool Assign(int slot, size_t word_index, std::vector<WordBitset>& domains,
               std::vector<WordBitset>& used_by_length,
-              std::vector<bool>& assigned, Trail& trail, size_t level_mark,
+              std::vector<bool>& assigned, Trail& trail,
               std::vector<float>& crossing_weights) const;
 
   // Rolls `domains`/`used_by_length`/`assigned` back to the given trail
@@ -282,6 +291,25 @@ class Solver {
   // whole vector). Mutable for the same reason as `rng_`.
   mutable std::vector<bool> in_queue_scratch_;
   mutable std::vector<int> queue_touched_scratch_;
+
+  // SelectBranchSlot's (priority, slot id) candidate list, reused across
+  // calls instead of a fresh vector on every single branching decision.
+  mutable std::vector<std::pair<float, int>> branch_candidates_scratch_;
+
+  // SaveDomainOnce's O(1) replacement for its old linear trail scan:
+  // last_saved_epoch_[slot] holds the epoch (see next_save_epoch_) during
+  // which `slot` was last snapshotted, or 0 (never a valid epoch) if
+  // never. Each Assign()-triggered cascade (and each root-propagation
+  // pass in Solve()) draws a fresh, never-repeated epoch from
+  // next_save_epoch_, so "already saved during the current epoch" is a
+  // single equality check instead of scanning the trail for an existing
+  // entry -- this matters because a *trail-size* mark, unlike an epoch,
+  // gets reused whenever Undo restores the trail back to the same size
+  // for a sibling candidate at the same search depth, which would make a
+  // plain "already saved, ever" flag incorrectly skip a snapshot that a
+  // deeper, already-undone cascade also needed at that same trail size.
+  mutable std::vector<uint64_t> last_saved_epoch_;
+  mutable uint64_t next_save_epoch_ = 1;
 
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this
