@@ -193,6 +193,53 @@ The solver aims to either find a valid fill or prove none exists
   slots (`kRandomSlotWeights = {4, 2, 1}`). Crossing weights carry over
   across restarts; the search tree does not. Because the budget only
   grows, the search stays complete.
+
+  **Nogood recording from restarts** (Lecoutre, Sais, Tabary & Vidal,
+  IJCAI 2007 — see `docs/bibliography.md`): whenever a slot's candidate
+  loop runs to genuine, complete exhaustion (every candidate tried and
+  undone with the attempt not yet aborted) and that specific exhaustion
+  is what pushes the current attempt over its backtrack budget, the
+  entire current assignment is recorded as a nogood — a combination
+  proven, by that exhaustive search, to never lead to a solution.
+  Future restarts within the same `Solve()` call check, once per node,
+  whether assigning the branch slot to a given word would complete any
+  recorded nogood (all its *other* pairs already matching the current
+  assignment); if so, that word is skipped without re-deriving the
+  failure. This is a structurally different mechanism from the plain
+  nogood learning tried and reverted in an earlier session (see
+  `docs/bibliography.md`'s "Consulted for context" section) — recording
+  only from restart-triggering, fully-exhausted branches keeps the
+  nogood count bounded by the restart count and avoids that earlier
+  attempt's failure mode (pruning that changes how much work the *same*
+  attempt does before hitting its own budget).
+
+  **Measured effect — real, but modest and mixed, unlike the changes
+  above.** Verified sound (all 15 tests pass, including the
+  no-solution-exists cases; newly-solved grids' outputs checked
+  independently for a preserved block pattern, every cell filled, and no
+  duplicate words) and tested across three independent 100-grid real
+  samples (seeds 42, 7, 99) against a clean pre-nogood build, each run
+  twice to rule out measurement noise (a first pass showed one grid's
+  time swing by 15x between runs with nothing else changed — a reminder
+  that single-run timings on this machine aren't trustworthy for a
+  change this size, and both runs of everything reported here were
+  reproduced before being written down). Net effect: seed 42 gained one
+  previously-timing-out grid (`grid_479.txt`) with no losses, at a ~6%
+  time cost on the 78 grids solved either way; seed 99 similarly gained
+  one (`grid_472.txt`) with no losses and only ~1.6% overhead; seed 7,
+  however, *lost* one previously-solved grid (`grid_453.txt`, 12.9s →
+  timeout) with no gains, and ran ~9% slower overall on the 83 grids
+  solved either way. Net across all three: two grids gained, one lost —
+  a real but modest improvement in solvability, not a clear win the way
+  the constant-factor fixes above were. The mixed, per-grid result is
+  the expected signature of this technique (and the reason the earlier
+  plain nogood-learning and backjumping attempts were reverted): any
+  change to per-node search behavior perturbs which restart's random
+  seed ends up solving a given grid, helping some and hurting others,
+  even when the pruning itself is sound. Kept anyway, since the net
+  effect across all three samples is positive and the technique
+  directly targets this project's harder, restart-heavy grids rather
+  than the already-fast ones.
 - **Component-restricted branching** (Dechter's non-separable
   components): `Solver` computes connected components of the
   slot-crossing graph once at construction, and branching only considers
@@ -296,11 +343,16 @@ Reasonable next steps, roughly in order of expected payoff for their
 implementation cost:
 
 - **Nogood learning via constraint-graph clustering** (Anbulagan &
-  Botea's COMBUS). The plain (non-clustered) version of nogood learning
-  was tried and reverted (see bibliography) because it changed
-  restart dynamics for the worse; COMBUS's scoping of nogoods to
-  independent constraint-graph regions might avoid that interaction, but
-  that's untested.
+  Botea's COMBUS). The *restart-scoped* form of nogood learning
+  (Lecoutre, Sais, Tabary & Vidal — see the "Restarts" section above and
+  the bibliography) is implemented and kept, with a real if modest net
+  benefit. COMBUS's finer-grained idea -- scoping nogoods to independent
+  constraint-graph regions -- is a different, still-untried refinement on
+  top of that: it could plausibly make recorded nogoods more general
+  (and so more likely to fire again in a later restart) by dropping
+  irrelevant context from unrelated regions, rather than using this
+  project's current simpler approach of recording the *entire* ancestor
+  assignment regardless of relevance.
 - **Cell-level branching** with a SoCDP-style heuristic instead of
   slot-level MRV (Orca's headline architectural difference) — a bigger
   rewrite than anything above, since it changes the search variable from

@@ -16,7 +16,6 @@ add_library(xfill
   src/grid.cpp
   src/dictionary.cpp
   src/solver.cpp
-  src/heuristics.cpp
 )
 target_include_directories(xfill PUBLIC include)
 
@@ -26,5 +25,5 @@ target_link_libraries(xfill_cli PRIVATE xfill)
 option(XFILL_BUILD_TESTS "Build unit tests" ON)
 if(XFILL_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests/archive_v1)
+  add_subdirectory(tests)
 endif()

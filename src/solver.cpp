@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <utility>
 
 namespace xfill {
@@ -33,8 +34,11 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
     max_length = std::max(max_length, slot.length);
   }
   filter_scratch_by_length_.resize(static_cast<size_t>(max_length) + 1);
+  nogood_forbidden_scratch_by_length_.resize(static_cast<size_t>(max_length) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
     filter_scratch_by_length_[static_cast<size_t>(length)] =
+        WordBitset(dict_.NumWordsOfLength(length), false);
+    nogood_forbidden_scratch_by_length_[static_cast<size_t>(length)] =
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
@@ -467,6 +471,57 @@ void Solver::Undo(int slot, std::vector<WordBitset>& domains,
   }
 }
 
+void Solver::RecordNogoodFromDeadEnd(const std::vector<WordBitset>& domains,
+                                      const std::vector<bool>& assigned) {
+  Nogood nogood;
+  for (const Slot& s : grid_.slots()) {
+    if (!assigned[static_cast<size_t>(s.id)]) continue;
+    nogood.pairs.push_back({s.id, domains[static_cast<size_t>(s.id)].First()});
+  }
+  if (std::getenv("XFILL_DEBUG_NOGOODS")) {
+    std::cerr << "nogood depth=" << nogood.pairs.size() << "\n";
+  }
+  int nogood_idx = static_cast<int>(nogoods_.size());
+  for (const auto& [s, w] : nogood.pairs) {
+    nogoods_by_slot_[s].push_back(nogood_idx);
+  }
+  nogoods_.push_back(std::move(nogood));
+}
+
+const WordBitset* Solver::NogoodForbiddenWords(int slot,
+                                                const std::vector<WordBitset>& domains,
+                                                const std::vector<bool>& assigned) const {
+  auto it = nogoods_by_slot_.find(slot);
+  if (it == nogoods_by_slot_.end()) return nullptr;
+
+  int length = grid_.SlotById(slot).length;
+  WordBitset& forbidden = nogood_forbidden_scratch_by_length_[static_cast<size_t>(length)];
+  bool any = false;
+  for (int nogood_idx : it->second) {
+    const Nogood& nogood = nogoods_[static_cast<size_t>(nogood_idx)];
+    size_t forbidden_word = std::numeric_limits<size_t>::max();
+    bool all_others_match = true;
+    for (const auto& [s2, w2] : nogood.pairs) {
+      if (s2 == slot) {
+        forbidden_word = w2;
+        continue;
+      }
+      if (!assigned[static_cast<size_t>(s2)] || !domains[static_cast<size_t>(s2)].Test(w2)) {
+        all_others_match = false;
+        break;
+      }
+    }
+    if (all_others_match && forbidden_word != std::numeric_limits<size_t>::max()) {
+      if (!any) {
+        forbidden.ClearAll();
+        any = true;
+      }
+      forbidden.Set(forbidden_word);
+    }
+  }
+  return any ? &forbidden : nullptr;
+}
+
 std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            std::vector<WordBitset>& used_by_length,
                                            std::vector<bool>& assigned,
@@ -488,6 +543,12 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   // immediately, so the second test is rarely even reached.
   const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
   const WordBitset& used = used_by_length[static_cast<size_t>(length)];
+  // Words already proven, by an earlier restart's fully-exhausted search,
+  // to be a dead end given exactly the current ancestor assignment -- skip
+  // them without re-deriving the same failure again. nullptr (the common
+  // case: no recorded nogood even mentions this slot) costs one hash
+  // lookup and nothing else.
+  const WordBitset* nogood_forbidden = NogoodForbiddenWords(slot, domains, assigned);
 
   // Try higher-quality words first so a valid fill reads like a real
   // crossword rather than the first alphabetically-consistent candidate.
@@ -495,6 +556,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   // class comment in solver.hpp.
   for (size_t idx : dict_.ScoreOrder(length)) {
     if (!slot_domain.Test(idx) || used.Test(idx)) continue;
+    if (nogood_forbidden != nullptr && nogood_forbidden->Test(idx)) continue;
     stats_.nodes++;
 
     size_t domain_mark = trail.domains.size();
@@ -518,6 +580,15 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   stats_.backtracks++;
   if (++attempt_backtracks_ >= attempt_backtrack_limit_) {
     aborted_ = true;
+    // `slot`'s candidate loop just ran to completion -- every candidate
+    // genuinely tried and undone with aborted_ still false at each prior
+    // step (the check above would have returned early otherwise) -- so
+    // this ancestor assignment really is a proven dead end, not an
+    // artifact of the budget cutoff. Recording it here (only on the
+    // specific exhaustion that triggers a restart, not on every ordinary
+    // backtrack) keeps the nogood count bounded by the restart count,
+    // exactly as in Lecoutre et al.'s nogood-recording-from-restarts.
+    RecordNogoodFromDeadEnd(domains, assigned);
   }
   return std::nullopt;
 }

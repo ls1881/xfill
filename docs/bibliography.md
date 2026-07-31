@@ -92,6 +92,40 @@ cutoff — is the theoretical justification for this solver's restart loop
 "abandon this attempt and reseed" helps on grids that would otherwise
 blow up under one unlucky branch order.
 
+### Lecoutre, Sais, Tabary & Vidal — "Nogood Recording from Restarts" (IJCAI 2007)
+
+Studies nogood learning specifically combined with randomized restarts
+(general CSP benchmarks and a real-world radio frequency assignment
+problem, not crosswords). Its central move: record nogoods only from the
+*last branch* before a restart, and only from decisions that were
+genuinely, completely refuted (a value tried and its whole subtree
+exhausted without success) — never from a branch merely cut short by the
+restart's own cutoff. This keeps the *number* of nogoods bounded by the
+number of restarts (polynomial, not exponential), and — critically for
+this project's history — is a structurally different mechanism from the
+plain nogood learning tried and reverted in an earlier session (which
+recorded from *every* domain wipeout throughout search, changing how much
+work the *same* attempt did before hitting its own budget, which is what
+made that attempt regress). Recording only at restart boundaries, from
+already-exhausted branches, doesn't have that failure mode: it can only
+ever save a *later* restart from redoing a dead end an *earlier* one
+already fully proved.
+
+**How it's used here.** Adapted rather than ported directly, since the
+paper's algorithm assumes binary (assign/refute one variable-value pair
+at a time) branching with an explicit growing decision log, while this
+solver branches d-way (try many candidate words for one slot in
+sequence) and has no such log. The adaptation used here: when a slot's
+candidate loop runs to completion (every candidate genuinely tried and
+undone with the abort flag still clear at each step) and that specific
+exhaustion is what pushes the backtrack count over the current attempt's
+limit, the entire current assignment (every other currently-assigned
+slot's word) is recorded as one nogood — sound because assigning more
+context on top of an already-proven dead end can only keep it a dead
+end, never un-prove it. `Solver::RecordNogoodFromDeadEnd` /
+`NogoodForbiddenWords` in `solver.cpp`/`solver.hpp` implement this;
+see `docs/design.md` for the measured effect.
+
 ### Dechter — "Tractable Structures for Constraint Satisfaction Problems" (book chapter, 2006)
 
 A survey of graph-structure-based tractability results for CSPs. Source

@@ -85,6 +85,24 @@ struct SolverStats {
 // grid is still proven so, just possibly after a few budget-exceeded
 // restarts rather than one pass.
 //
+// Each restart also leaves behind a nogood (Lecoutre, Sais, Tabary &
+// Vidal, "Nogood Recording from Restarts," IJCAI 2007 -- see
+// docs/bibliography.md): whenever a slot's candidate loop runs to
+// genuine, complete exhaustion -- every candidate tried and undone with
+// the attempt not yet aborted -- and that exhaustion is specifically what
+// pushes the backtrack count over budget, the entire current assignment
+// is recorded (RecordNogoodFromDeadEnd) as a combination already proven
+// to be a dead end. Later restarts check, once per node
+// (NogoodForbiddenWords), whether the branch slot's candidate would
+// complete a recorded nogood, skipping it without re-deriving the same
+// failure. This is deliberately not the same as this project's earlier,
+// reverted nogood-learning attempt, which recorded from every domain
+// wipeout throughout search and thereby perturbed the *same* attempt's
+// own trajectory; recording only from already-exhausted, restart-
+// triggering branches keeps the nogood count bounded by the restart
+// count and can only ever help a *later* restart, never the one that
+// produced it.
+//
 // The *first* attempt (attempt 0) always picks the single best dom/wdeg
 // slot deterministically -- exactly the pre-restart behavior -- and only
 // restarts (attempt > 0) switch SelectBranchSlot to a weighted-random pick
@@ -141,6 +159,16 @@ class Solver {
   struct Trail {
     std::vector<DomainSnapshot> domains;
     std::vector<UsedSnapshot> used;
+  };
+
+  // A recorded dead end: `pairs` (slot id, word index) together are
+  // infeasible -- i.e. no solution has every one of these slots assigned
+  // to that exact word simultaneously. See RecordNogoodFromDeadEnd and the
+  // class comment's restart section for how these are derived (only from
+  // a genuinely, completely exhausted slot -- not merely a budget cutoff)
+  // and used (NogoodForbiddenWords).
+  struct Nogood {
+    std::vector<std::pair<int, size_t>> pairs;
   };
 
   // Saves `domains[slot]` onto the trail, but only if it hasn't already
@@ -238,6 +266,29 @@ class Solver {
                                      std::vector<bool>& assigned, Trail& trail,
                                      std::vector<float>& crossing_weights);
 
+  // Records a nogood from the current assignment: every currently-assigned
+  // slot's (slot, word) pair, taken together, is infeasible. Sound to call
+  // only when `slot` (whose candidate loop just ran to completion, every
+  // candidate genuinely tried and undone with aborted_ still false at each
+  // step -- never merely cut short by the backtrack budget) has no
+  // remaining valid word given exactly this ancestor assignment. See the
+  // Solver class comment's restart section for why this can't fire for a
+  // budget-truncated branch, and why using the full current assignment
+  // (rather than only this decision's true ancestors) is still sound, just
+  // more conservative.
+  void RecordNogoodFromDeadEnd(const std::vector<WordBitset>& domains,
+                                const std::vector<bool>& assigned);
+
+  // Words forbidden for `slot` by any recorded nogood whose *other* pairs
+  // are all already satisfied by the current assignment -- i.e. assigning
+  // one of these words to `slot` right now would complete a combination
+  // already proven, in an earlier restart, to be a dead end. Returns
+  // nullptr if none apply (the common case once no nogood mentions `slot`
+  // at all).
+  const WordBitset* NogoodForbiddenWords(int slot,
+                                          const std::vector<WordBitset>& domains,
+                                          const std::vector<bool>& assigned) const;
+
   Solution ExtractSolution(const std::vector<WordBitset>& domains) const;
 
   const Grid& grid_;
@@ -332,6 +383,24 @@ class Solver {
   // pops a buffer from here and copies into it in place, instead of
   // heap-allocating a fresh one, whenever one is available.
   mutable std::vector<std::vector<WordBitset>> snapshot_pool_by_length_;
+
+  // Nogoods recorded from restarts (Lecoutre, Sais, Tabary & Vidal,
+  // "Nogood Recording from Restarts," IJCAI 2007 -- see
+  // docs/bibliography.md): unlike this project's earlier, reverted
+  // attempt at nogood learning (which recorded from *every* domain
+  // wipeout throughout search), these are recorded only from a slot whose
+  // candidate loop genuinely, completely exhausted -- never from a branch
+  // merely cut short by the backtrack budget -- and persist across
+  // restarts *within* one Solve() call (that's the point: stop a later
+  // attempt from redoing a dead end an earlier one already fully proved).
+  // nogoods_by_slot_ maps a slot id to the indices (into nogoods_) of
+  // every nogood mentioning it, so NogoodForbiddenWords only has to check
+  // nogoods actually relevant to the slot being branched on.
+  mutable std::vector<Nogood> nogoods_;
+  mutable std::unordered_map<int, std::vector<int>> nogoods_by_slot_;
+  // Scratch bitset (one per length) for NogoodForbiddenWords' result,
+  // reused across calls like filter_scratch_by_length_.
+  mutable std::vector<WordBitset> nogood_forbidden_scratch_by_length_;
 
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this
