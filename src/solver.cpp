@@ -5,6 +5,9 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 
 namespace xfill {
@@ -79,7 +82,9 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
   }
 }
 
-std::optional<Solution> Solver::Solve() {
+std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
+                                       const std::atomic<bool>* cancel) {
+  cancel_ = cancel;
   std::vector<WordBitset> domains(grid_.slots().size());
   for (const Slot& slot : grid_.slots()) {
     domains[static_cast<size_t>(slot.id)] = dict_.FullDomain(slot.length);
@@ -130,10 +135,24 @@ std::optional<Solution> Solver::Solve() {
   // returns from the loop.
   attempt_backtrack_limit_ = kInitialBacktrackLimit;
   for (uint64_t attempt = 0;; ++attempt) {
+    // Checked here too (not just in Backtrack, once per node) so a
+    // worker that's cancelled between attempts doesn't even start
+    // another one -- relevant for SolveParallel, where cancel_ is set
+    // once some other worker has already found a solution.
+    if (cancel_ != nullptr && cancel_->load(std::memory_order_relaxed)) {
+      return std::nullopt;
+    }
     aborted_ = false;
     attempt_backtracks_ = 0;
-    randomize_slot_choice_ = attempt > 0;
-    rng_.seed(attempt);
+    // The *global* attempt number (offset + local attempt), not just the
+    // local one: SolveParallel gives every worker but the first a
+    // nonzero attempt_offset specifically so its own local attempt 0 is
+    // already randomized, instead of every worker wastefully repeating
+    // worker 0's identical deterministic first pass. Worker 0's
+    // offset is 0, so this is exactly today's single-threaded sequence.
+    uint64_t global_attempt = attempt_offset + attempt;
+    randomize_slot_choice_ = global_attempt > 0;
+    rng_.seed(global_attempt);
 
     std::vector<WordBitset> attempt_domains = domains;
     std::vector<WordBitset> attempt_used_by_length = used_by_length;
@@ -161,6 +180,79 @@ std::optional<Solution> Solver::Solve() {
         static_cast<uint64_t>(static_cast<float>(attempt_backtrack_limit_) *
                                kRetryGrowthFactor));
   }
+}
+
+ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& dict,
+                                           unsigned num_threads) {
+  if (num_threads == 0) {
+    num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 1;
+  }
+
+  // One fully independent Solver per worker -- own domains, trail,
+  // crossing weights, nogoods, RNG, all of it -- so there is nothing
+  // search-related shared between threads and so nothing to
+  // synchronize inside the hot path. Redundant construction-time work
+  // (crossings_by_slot_, slots_by_component_, etc., each O(slots +
+  // crossings)) is negligible next to the search itself.
+  std::vector<std::unique_ptr<Solver>> solvers;
+  solvers.reserve(num_threads);
+  for (unsigned i = 0; i < num_threads; ++i) {
+    solvers.push_back(std::make_unique<Solver>(grid, dict));
+  }
+
+  std::atomic<bool> cancel{false};
+  std::mutex result_mutex;
+  std::optional<Solution> winning_solution;
+  SolverStats winning_stats;
+
+  // Comfortably larger than any realistic restart count, so no two
+  // workers' attempt-number ranges can ever collide (see Solve()'s
+  // global_attempt and the class comment above for why each worker
+  // needs a distinct range at all).
+  constexpr uint64_t kAttemptStride = uint64_t{1} << 40;
+
+  std::vector<std::thread> threads;
+  threads.reserve(num_threads);
+  for (unsigned i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      auto solution = solvers[i]->Solve(static_cast<uint64_t>(i) * kAttemptStride, &cancel);
+      if (!solution) return;
+      // First solution to arrive here wins; cancel tells every other
+      // worker to unwind (checked once per node in Backtrack). A loser
+      // of this race still has a genuine solution, just not the one
+      // reported -- any solution is as good as any other, so it's
+      // simply discarded rather than compared.
+      bool expected = false;
+      if (cancel.compare_exchange_strong(expected, true)) {
+        std::lock_guard<std::mutex> lock(result_mutex);
+        winning_solution = std::move(solution);
+        winning_stats = solvers[i]->stats();
+      }
+    });
+  }
+  for (std::thread& t : threads) t.join();
+
+  ParallelSolveResult result;
+  result.num_threads = num_threads;
+  if (winning_solution) {
+    result.solution = std::move(winning_solution);
+    result.stats = winning_stats;
+  } else {
+    // `cancel` only ever gets set inside the `if (solution)` branch
+    // above, so if we get here it was never set at all -- every worker's
+    // Solve() ran to its own natural completion (a fully exhausted,
+    // non-aborted attempt) rather than being cut off early, so each one
+    // independently proved the grid unsatisfiable. Sum their stats for
+    // a representative "total work" figure, since there's no single
+    // "the" search to report in this case.
+    for (const auto& solver : solvers) {
+      result.stats.nodes += solver->stats().nodes;
+      result.stats.backtracks += solver->stats().backtracks;
+      result.stats.restarts += solver->stats().restarts;
+    }
+  }
+  return result;
 }
 
 void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
@@ -537,6 +629,18 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            Trail& trail,
                                            CrossingWeights& crossing_weights) {
   if (aborted_) return std::nullopt;
+  // Checked once per node, same cadence as aborted_ above (which this
+  // deliberately mimics -- setting aborted_ here, rather than a separate
+  // flag, reuses the existing unwind-without-recording-a-nogood path:
+  // RecordNogoodFromDeadEnd only fires when this node's candidate loop
+  // runs to genuine completion, which this early return skips entirely,
+  // same as a budget-triggered abort). Only ever non-null for a worker
+  // started by SolveParallel; a plain single-threaded Solve() call never
+  // pays even this one relaxed atomic load, since cancel_ stays null.
+  if (cancel_ != nullptr && cancel_->load(std::memory_order_relaxed)) {
+    aborted_ = true;
+    return std::nullopt;
+  }
 
   int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights);
   if (slot == -1) {

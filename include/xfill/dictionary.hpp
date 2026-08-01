@@ -187,8 +187,29 @@ class Dictionary {
   const std::vector<std::string>& WordsOfLength(int length) const;
 
   // Bitset of all words of `length` whose character at `position` is `ch`.
-  // Precomputed at load time for O(1) lookup during propagation.
-  const WordBitset& LetterMask(int length, int position, char ch) const;
+  // Precomputed at load time for O(1) lookup during propagation. Defined
+  // right here (not in dictionary.cpp, where it used to live), same
+  // reason as WordBitset's methods above: this project builds without
+  // LTO/IPO, so a definition left in a different translation unit is a
+  // real, uninlinable call regardless of triviality, and this one is
+  // called from Propagate's hottest inner loop, up to 26 times per
+  // crossing. An earlier attempt moved this along with five other
+  // trivial Dictionary accessors at once and regressed; moved alone this
+  // time, it's a real ~1.7% win -- see docs/design.md for both results
+  // and why only this one function was retested.
+  const WordBitset& LetterMask(int length, int position, char ch) const {
+    static const WordBitset empty(0, false);
+    if (length < 0 || static_cast<size_t>(length) >= letter_masks_.size()) {
+      return empty;
+    }
+    if (position < 0 || position >= length) return empty;
+    int idx = ch - 'A';
+    if (idx < 0 || idx >= 26) return empty;
+    const std::vector<std::array<WordBitset, 26>>& masks =
+        letter_masks_[static_cast<size_t>(length)];
+    if (masks.empty()) return empty;
+    return masks[static_cast<size_t>(position)][static_cast<size_t>(idx)];
+  }
 
   // A domain bitset with every word of `length` set -- i.e. "no
   // constraints applied yet". Empty (all-zero, zero-length) if the

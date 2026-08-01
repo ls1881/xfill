@@ -195,6 +195,45 @@ The solver aims to either find a valid fill or prove none exists
   lost anywhere -- diminishing but still real returns from this same
   class of fix, consistent with most of the grid's per-node work already
   having been wrung out by the changes above.
+
+  **`Dictionary::LetterMask` moved into the header, in isolation.** An
+  earlier session tried moving `LetterMask` along with five other trivial
+  `Dictionary` accessors (`HasLength`, `NumWordsOfLength`, `WordsOfLength`,
+  `FullDomain`, `ScoreOrder`) into the header all at once, for the same
+  cross-TU-inlining reason `WordBitset`'s own methods already live there
+  (see this project's earlier history) -- and found a small, consistent
+  regression across a real sample, so it was reverted without ever
+  isolating which of the six was responsible. `sample`-profiling a real
+  hard grid (`grid_303.txt`) still showed `LetterMask` as a distinct,
+  non-inlined symbol (~3% of samples) well after that revert, so this
+  session retested it alone: `LetterMask` -- and only `LetterMask`, the
+  one actually called from `Propagate`'s hottest inner loop, up to 26
+  times per crossing -- moved into the header, the other five left in
+  `dictionary.cpp`. Verified byte-identical node/backtrack/restart counts
+  on six spot-checked grids and all three 30-grid real samples (seeds
+  42/7/99, zero mismatches). Net effect: consistently faster in every
+  sample this time (seed 42 10.86s → 10.67s, -1.8%; seed 7 3.54s →
+  3.49s, -1.6%; seed 99 2.39s → 2.36s, -1.2%; ~16.8s → ~16.5s overall,
+  -1.7%) with zero grids gained or lost anywhere -- confirming the
+  earlier regression was caused by one or more of the other five
+  functions, not `LetterMask` itself.
+
+  Followed up by testing the two other candidates actually called from
+  somewhere hot -- `WordsOfLength` (once per popped slot in `Propagate`,
+  often several times per node) and `ScoreOrder` (once per node, in
+  `Backtrack`'s candidate loop) -- moved into the header individually,
+  each on top of the kept `LetterMask` change, each reverted alone
+  (`NumWordsOfLength`/`HasLength`/`FullDomain` are cold-path-only --
+  called at setup, never during search -- so not worth testing). Both
+  showed the same small, consistent regression on a single 30-grid
+  sample (seed 42): `WordsOfLength` 10.67s → 10.73s (+0.6%),
+  `ScoreOrder` 10.67s → 10.75s (+0.7%), with the slowdown concentrated
+  on the same handful of larger grids each time (`grid_053.txt`,
+  `grid_058.txt`, `grid_288.txt`, `grid_328.txt`). Resolves the "which
+  one(s)" question above without needing to test all five: `LetterMask`
+  is the only one of the six called frequently enough (up to 26 times
+  per crossing, vs. at most once per node for the other two hot
+  candidates) to make the inlined-code-size tradeoff pay off.
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
   "Once per level" was originally enforced by scanning back through the
@@ -355,6 +394,112 @@ The solver aims to either find a valid fill or prove none exists
   effect across all three samples is positive and the technique
   directly targets this project's harder, restart-heavy grids rather
   than the already-fast ones.
+- **Parallel restarts (`Solver::SolveParallel`).** Every technique above
+  optimizes a single search thread; this one instead runs several of
+  them at once. The theoretical basis was already cited in this project
+  (Gomes, Selman & Kautz, above) but never acted on: if restart helps
+  because backtracking runtime is heavy-tailed and a *different* random
+  run of the same search often finishes fast even when this one hasn't,
+  then running several different random runs *simultaneously* across
+  hardware threads should shorten wall-clock time to the first lucky one
+  by roughly the thread count, on grids where that's the bottleneck --
+  this machine has 14 cores and the solver had used exactly one of them,
+  throughout its whole history, until now.
+
+  Implemented as a portfolio, not a shared-state parallel search: each
+  worker gets its own private `Solver` instance (own domains, trail,
+  crossing weights, nogoods, RNG -- nothing search-related is shared
+  across threads), so there is no synchronization anywhere inside
+  `Propagate`/`Backtrack`/`Assign`/`Undo`, only a single
+  `std::atomic<bool>` cancellation flag checked once per node (in
+  `Backtrack`, same cadence as the existing `aborted_` check) so every
+  other worker unwinds within a node of whichever one finds a solution
+  first. Worker 0 is seeded to reproduce today's single-threaded sequence
+  exactly (attempt 0 deterministic, then randomized restarts); every
+  other worker gets a distinct, non-overlapping attempt-number range so
+  its own attempt 0 is *already* randomized -- otherwise it would just
+  redo worker 0's identical deterministic pass for free, wasting an
+  entire thread. Still complete: `SolveParallel` only reports
+  unsatisfiable once every worker has independently, genuinely exhausted
+  its own search (none merely cancelled), which reduces directly to
+  `Solve()`'s own already-established completeness, run N times.
+
+  Verified sound before measuring speed at all: the existing 15-test
+  suite continues to pass through `Solve()`'s unchanged default
+  behavior (the new `attempt_offset`/`cancel` parameters both default to
+  values that reproduce it exactly), plus four new tests exercising
+  `SolveParallel` directly (a 1-thread run matching `Solve()` verbatim, a
+  multi-thread run against a small satisfiable grid, an
+  every-worker-proves-UNSAT case, and the `num_threads=0` auto-detect
+  path). More importantly for a concurrency change, the full test suite
+  and several real 15x15 solves were run under ThreadSanitizer -- zero
+  data races reported anywhere, consistent with the "nothing shared but
+  one atomic flag" design.
+
+  **Measured effect: a real, large net win, but not a uniform one.**
+  Three independent 30-grid real samples (seeds 42/7/99, `min_score=40`,
+  15s cap, comparing against the single-threaded baseline immediately
+  before this change), using `hardware_concurrency()` threads (14 on the
+  machine this was benchmarked on): total time across the 67 grids
+  solved either way dropped from 16.51s to 9.31s (-43.6%, ~1.8x faster),
+  and two previously-timing-out grids newly solved (`grid_047.txt`,
+  `grid_481.txt`) with zero grids lost. Individual grids varied hugely:
+  `grid_053.txt` went 7.07s → 0.44s (15.5x), `grid_360.txt` 0.46s →
+  0.005s (99% faster) -- but a handful of grids got *slower*, some
+  substantially: `grid_424.txt` 1.74s → 3.36s, `grid_128.txt` 1.74s →
+  2.85s, `grid_328.txt` 0.83s → 1.52s. Root-caused by direct
+  measurement, not guessed: on these specific grids, worker 0's plain
+  deterministic search (or an early low-offset restart) was already
+  close to the fastest available path, and adding more concurrent
+  workers only adds CPU/cache/memory-bandwidth contention with no
+  compensating benefit, since nothing else finds a luckier path fast
+  enough to matter -- confirmed by rerunning `grid_328.txt` at 2/4/8/14
+  threads and seeing time increase monotonically with thread count
+  (0.85s/1.00s/1.25s/1.52s). This is the expected, inherent signature of
+  portfolio parallelism, not a bug: it helps most exactly on the grids
+  that need restart's "heavy tail" escape hatch, and can only add
+  overhead on ones that didn't need it. A large number of already-fast
+  grids also show a fixed few-millisecond overhead from spawning and
+  constructing `hardware_concurrency()` `Solver` instances regardless of
+  whether the grid needs them, imperceptible in absolute terms (a 2ms
+  solve becoming 5ms) but visible as a large *percentage* change on a
+  tiny baseline. Kept given the size of the net win and that it directly
+  targets this project's worst cases (the restart-heavy grids that
+  dominate real-world timeouts) rather than trading away performance on
+  already-fast ones to get it -- `xfill_cli` now defaults to
+  `SolveParallel`; pass an explicit `num_threads` of 1 for the old
+  single-threaded behavior (useful for reproducible timing comparisons,
+  as every non-parallel benchmark elsewhere in this document was).
+
+  **Tried and reverted: a "head start" for worker 0.** Since the
+  contention regressions above are all cases where worker 0 alone was
+  already close to fastest, the obvious-looking fix is to give worker 0
+  up to 200ms uncontended (polled every 2ms, ended early on either a
+  solution or a proven-UNSAT result) before spawning the rest at all.
+  Implemented, made correct (a `worker0_done` flag distinct from the
+  existing solution-only `cancel` flag, so a fast *UNSAT* also ends the
+  head start early instead of always sitting out the full 200ms), and
+  passed all 20 tests plus a ThreadSanitizer pass -- but benchmarking
+  (seed 42, 30-grid sample) showed a net *regression*: total time across
+  the 20 grids solved both ways went 2.11s -> 2.85s (+35%). It did help
+  the grid it targeted (`grid_328.txt`: 1.517s -> 1.171s), but it hurt
+  far more grids than it helped: several already-fast grids that
+  previously got solved almost instantly by a lucky *non-zero-offset*
+  worker -- not by needing a restart, just by that worker's own already-
+  randomized attempt 0 stumbling onto a solution faster than worker 0's
+  deterministic path -- now have to wait out (most of) the head start
+  before those workers are even allowed to start, e.g. `grid_013.txt`
+  0.009s -> 0.160s, `grid_058.txt` 0.041s -> 0.252s, `grid_360.txt`
+  0.005s -> 0.206s. In other words, the "extra workers only add
+  contention" assumption behind the head start only holds for the small
+  set of grids identified above; for most grids in the sample, the extra
+  workers' *own* randomized starting points are themselves a source of
+  speed, not just a restart-escape mechanism, so delaying them costs more
+  than the contention they'd otherwise cause. Reverted before running the
+  remaining two seeds -- the seed-42 signal was already large and
+  directionally consistent with the mechanism, not close enough to be
+  worth chasing with retuning (e.g. a shorter head start would just
+  shrink both effects, not resolve the tension between them).
 - **Component-restricted branching** (Dechter's non-separable
   components): `Solver` computes connected components of the
   slot-crossing graph once at construction, and branching only considers
@@ -492,15 +637,22 @@ tiers that contain visible data-corruption garbage (e.g. `NDRR`,
 
 A small number of real, densely-interlocked grids (e.g.
 `benchmarks/grids/sample_13x13.txt`) remain unsolved even after 15+
-minutes at `min_score=40`. This is an expected result, not a bug: per
-Anbulagan & Botea's phase-transition study of crossword CSPs, some "hard
-region" instances stay expensive under *any* search order, because the
-underlying instance is hard, not because of a fixable search choice.
-Restarts fix a search that got unlucky; they can't turn a genuinely hard
-instance easy. Most 20-second-cap timeouts on the real benchmark set are
-not in this category — they solve within a couple of minutes given a
-longer budget — see the README's "Known limits" section for the
-distinction on specific grids.
+minutes at `min_score=40` -- and, tested after implementing
+`SolveParallel` (see the "Restarts" section above), still unsolved after
+20+ minutes with a 14-way portfolio search running, confirming this
+really is the "genuinely hard regardless of search order" case the
+theory below predicts, not just an unlucky single-threaded run. This is
+an expected result, not a bug: per Anbulagan & Botea's phase-transition
+study of crossword CSPs, some "hard region" instances stay expensive
+under *any* search order, because the underlying instance is hard, not
+because of a fixable search choice. Restarts fix a search that got
+unlucky -- and running more of them at once, as `SolveParallel` does,
+is still fundamentally the same fix -- but neither can turn a genuinely
+hard instance easy. Most 20-second-cap timeouts on the real benchmark
+set are not in this category — they solve within a couple of minutes
+given a longer budget, and `SolveParallel` demonstrably rescues several
+of them within the original cap — see the README's "Known limits"
+section for the distinction on specific grids.
 
 ## Future work
 

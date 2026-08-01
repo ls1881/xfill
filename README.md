@@ -12,8 +12,9 @@ for the papers/codebases each technique below is drawn from.
 ## Status
 
 ✅ Slot detection, crossing computation, no-duplicate-words enforcement,
-queue-based AC-3 propagation, `dom/wdeg` branching, and randomized
-restarts are all implemented and tested (16/16 tests passing). Small and
+queue-based AC-3 propagation, `dom/wdeg` branching, randomized restarts,
+and a parallel-restart portfolio search (`Solver::SolveParallel`, `xfill_cli`'s
+default) are all implemented and tested (20/20 tests passing). Small and
 medium grids (tested up to 15x15 with real block patterns, against a real
 ~280k-entry dictionary at `min_score=40`) solve in well under a second;
 some genuinely dense grids remain intractable, which is a documented,
@@ -115,15 +116,41 @@ reasoning and citations behind each piece, see
    grid that does have independent regions (see
    `benchmarks/grids/synthetic/disconnected_15x15.txt`).
 
+8. **Parallel restarts.** `Solver::SolveParallel` runs several independent
+   restart sequences at once (`hardware_concurrency()` threads by
+   default, `xfill_cli`'s default) instead of steps 2-6's single retry
+   loop — a direct, if belated, application of the Gomes/Selman/Kautz
+   heavy-tailed-runtime result above: if a *different* random run of the
+   same search often finishes fast, running several simultaneously
+   should find one that does sooner in wall-clock time. Each worker gets
+   its own private `Solver` (own domains, trail, crossing weights,
+   nogoods, RNG — nothing search-related is shared, so nothing needs
+   synchronizing beyond one `std::atomic<bool>` cancellation flag,
+   checked once per node); worker 0 reproduces today's exact
+   single-threaded sequence, every other worker's own first attempt is
+   already randomized so it doesn't just redo worker 0's deterministic
+   pass for free. Still complete — unsatisfiable is only reported once
+   every worker has independently exhausted its own search. Real, large
+   net win on the real benchmark set (three 30-grid samples: -43.6%
+   total time, two previously-timing-out grids newly solved, zero lost),
+   but not uniform: a handful of grids that were already close to
+   worker 0's best case get *slower* from added thread contention with
+   no compensating benefit — see `docs/design.md` for the full numbers
+   and `docs/bibliography.md`'s Gomes, Selman & Kautz entry. Pass an
+   explicit `num_threads` of 1 for the old single-threaded behavior.
+
 ### Known limits
 
 `benchmarks/grids/sample_13x13.txt` still hasn't finished after 15+
-minutes, even at `min_score=40`. That's an expected result, not a bug:
-per Anbulagan & Botea's phase-transition study of crossword CSPs, some
+minutes, even at `min_score=40` -- confirmed still true even with
+`SolveParallel`'s 14-way portfolio search (also stopped after 20+
+minutes with no solution). That's an expected result, not a bug: per
+Anbulagan & Botea's phase-transition study of crossword CSPs, some
 "hard region" instances stay expensive for *any* search order, because
 the underlying instance itself is hard, not just this solver's choices
-leading up to it -- restarts fix a search that got *unlucky*, but can't
-turn a genuinely hard instance easy. `sample_15x15.txt` (the original,
+leading up to it -- restarts (and, by the same logic, more of them at
+once) fix a search that got *unlucky*, but can't turn a genuinely hard
+instance easy. `sample_15x15.txt` (the original,
 fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
 which solves quickly) is not in that category: it solves in about 4.7s at
 `min_score=40` -- much faster than the ~158s this took earlier in the
@@ -188,8 +215,13 @@ ctest --test-dir build --output-on-failure
 ## Running
 
 ```bash
-./build/xfill_cli <grid_spec_file> <dictionary_file>
+./build/xfill_cli <grid_spec_file> <dictionary_file> [min_score] [num_threads]
 ```
+
+`num_threads` defaults to 0, meaning `std::thread::hardware_concurrency()`
+(see "Parallel restarts" above). Pass `1` for the old single-threaded
+behavior — useful for reproducible timing, or comparing against a build
+predating `SolveParallel`.
 
 ## Benchmarking
 

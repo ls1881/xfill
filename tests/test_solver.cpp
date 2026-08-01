@@ -82,3 +82,55 @@ TEST_CASE("Solver reports no solution for an isolated slot with no matching word
   auto solution = solver.Solve();
   REQUIRE_FALSE(solution.has_value());
 }
+
+TEST_CASE("SolveParallel with 1 thread finds the same solution as Solve()") {
+  // num_threads=1 should be worker 0 alone, which is seeded to reproduce
+  // today's single-threaded sequence exactly (attempt_offset=0).
+  auto grid = xfill::Grid::FromSpec({"..", ".."});
+  auto dict = WriteAndLoadDict("test_parallel_single.dict",
+                                {"AT;10", "NO;10", "AN;10", "TO;10"});
+
+  auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/1);
+  REQUIRE(result.solution.has_value());
+  REQUIRE(result.num_threads == 1);
+  REQUIRE(result.solution->assignment.at(0) == "AT");
+  REQUIRE(result.solution->assignment.at(1) == "NO");
+  REQUIRE(result.solution->assignment.at(2) == "AN");
+  REQUIRE(result.solution->assignment.at(3) == "TO");
+}
+
+TEST_CASE("SolveParallel with several threads finds a valid solution") {
+  auto grid = xfill::Grid::FromSpec({"...", "###", "..."});
+  auto dict = WriteAndLoadDict("test_parallel_multi.dict",
+                                {"CAT;50", "DOG;40"});
+
+  auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/4);
+  REQUIRE(result.solution.has_value());
+  REQUIRE(result.num_threads == 4);
+  // Two non-crossing 3-letter slots, two 3-letter words -- either
+  // assignment (CAT/DOG or DOG/CAT) is valid; just check it's a genuine,
+  // non-duplicate use of the dictionary.
+  const std::string& first = result.solution->assignment.at(0);
+  const std::string& second = result.solution->assignment.at(1);
+  REQUIRE(first != second);
+  REQUIRE((first == "CAT" || first == "DOG"));
+  REQUIRE((second == "CAT" || second == "DOG"));
+}
+
+TEST_CASE("SolveParallel proves no solution when every worker independently exhausts") {
+  auto grid = xfill::Grid::FromSpec({"...."});
+  auto dict = WriteAndLoadDict("test_parallel_unsat.dict", {"CAT;10"});
+
+  auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/4);
+  REQUIRE_FALSE(result.solution.has_value());
+  REQUIRE(result.num_threads == 4);
+}
+
+TEST_CASE("SolveParallel with num_threads=0 uses hardware_concurrency") {
+  auto grid = xfill::Grid::FromSpec({"..."});
+  auto dict = WriteAndLoadDict("test_parallel_auto.dict", {"CAT;10"});
+
+  auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/0);
+  REQUIRE(result.solution.has_value());
+  REQUIRE(result.num_threads >= 1);
+}

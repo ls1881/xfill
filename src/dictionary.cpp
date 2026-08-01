@@ -148,21 +148,6 @@ const std::vector<std::string>& Dictionary::WordsOfLength(int length) const {
   return words_by_length_[static_cast<size_t>(length)];
 }
 
-const WordBitset& Dictionary::LetterMask(int length, int position,
-                                          char ch) const {
-  static const WordBitset empty(0, false);
-  if (length < 0 || static_cast<size_t>(length) >= letter_masks_.size()) {
-    return empty;
-  }
-  if (position < 0 || position >= length) return empty;
-  int idx = ch - 'A';
-  if (idx < 0 || idx >= 26) return empty;
-  const std::vector<std::array<WordBitset, 26>>& masks =
-      letter_masks_[static_cast<size_t>(length)];
-  if (masks.empty()) return empty;
-  return masks[static_cast<size_t>(position)][static_cast<size_t>(idx)];
-}
-
 WordBitset Dictionary::FullDomain(int length) const {
   return WordBitset(NumWordsOfLength(length), true);
 }

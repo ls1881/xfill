@@ -92,6 +92,19 @@ cutoff — is the theoretical justification for this solver's restart loop
 "abandon this attempt and reseed" helps on grids that would otherwise
 blow up under one unlucky branch order.
 
+**Also the justification for `Solver::SolveParallel`'s portfolio search**
+(see the class comment in `solver.hpp` and `docs/design.md`): if
+restart's benefit comes from re-rolling the dice on a heavy-tailed
+distribution, running several independent re-rolls *simultaneously*
+across hardware threads instead of one at a time should shorten the
+*wall-clock* time to the first lucky one by roughly the number of
+threads, on grids where that's the bottleneck. This project cited this
+paper for its restart mechanism from early on, but had stayed
+single-threaded regardless until this session -- the parallel
+consequence of the paper's own finding sat unused for a while before
+being implemented (see the afck/crosswords-rs entry's now-outdated
+"single-threaded throughout" note, corrected below).
+
 ### Lecoutre, Sais, Tabary & Vidal — "Nogood Recording from Restarts" (IJCAI 2007)
 
 Studies nogood learning specifically combined with randomized restarts
@@ -255,8 +268,13 @@ not skip a slot whose masked domain is empty.
 - **afck/crosswords-rs, snowan.gitbook.io "Design Crossword Puzzle Solver".** Independent corroboration that this project's architecture
   (bitset/slot CSP, MRV-family ordering, AC-3-style propagation,
   generate-many-candidates-and-keep-the-best grid construction) isn't
-  idiosyncratic. Their parallel/distributed search ideas aren't
-  implemented — this solver is single-threaded throughout.
+  idiosyncratic. Their parallel/distributed search ideas were not
+  implemented for several sessions after this note was first written —
+  this solver stayed single-threaded throughout — until
+  `Solver::SolveParallel` (see the Gomes, Selman & Kautz entry above and
+  `docs/design.md`), which is closer to a portfolio of independent
+  restart sequences racing each other than to their specific
+  distributed-search design, but addresses the same gap.
 - **cs.columbia.edu/~evs/ais/finalprojs/steinthal.** A naive
   letter-by-letter solver with no bitset indexing, cited as the negative
   example `WordBitset`'s precomputed letter masks are meant to avoid

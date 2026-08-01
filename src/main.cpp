@@ -47,21 +47,25 @@ void WriteFilledGrid(std::ostream& out, const xfill::Grid& grid,
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::cerr << "usage: xfill_cli <grid_spec_file> <dictionary_file> "
-                 "[min_score]\n";
+                 "[min_score] [num_threads]\n"
+                 "  num_threads: 0 (default) = "
+                 "std::thread::hardware_concurrency(); 1 = single-threaded,\n"
+                 "  for reproducible timing or comparing against a build "
+                 "predating SolveParallel.\n";
     return 1;
   }
 
   try {
     int min_score = argc >= 4 ? std::stoi(argv[3]) : 0;
+    unsigned num_threads = argc >= 5 ? static_cast<unsigned>(std::stoul(argv[4])) : 0;
 
     xfill::Grid grid = xfill::Grid::FromFile(argv[1]);
     xfill::Dictionary dict =
         xfill::Dictionary::LoadFromFile(argv[2], min_score);
 
-    xfill::Solver solver(grid, dict);
-
     auto start = std::chrono::steady_clock::now();
-    auto solution = solver.Solve();
+    xfill::ParallelSolveResult result =
+        xfill::Solver::SolveParallel(grid, dict, num_threads);
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
 
@@ -77,15 +81,19 @@ int main(int argc, char** argv) {
     // terminal scrolls away but the file persists across runs.
     for (std::ostream* stream : {static_cast<std::ostream*>(&std::cout),
                                   static_cast<std::ostream*>(&out)}) {
-      if (!solution) {
+      if (!result.solution) {
         *stream << "No solution found.\n";
       } else {
-        WriteFilledGrid(*stream, grid, *solution);
+        WriteFilledGrid(*stream, grid, *result.solution);
       }
-      *stream << "\nnodes=" << solver.stats().nodes
-              << " backtracks=" << solver.stats().backtracks
-              << " restarts=" << solver.stats().restarts
-              << " time=" << seconds << "s\n";
+      // "restarts=... time=...s" must stay contiguous, in this order:
+      // benchmarks/bench_subset.py's STATS_RE depends on that exact
+      // substring, so num_threads is appended after time, not between.
+      *stream << "\nnodes=" << result.stats.nodes
+              << " backtracks=" << result.stats.backtracks
+              << " restarts=" << result.stats.restarts
+              << " time=" << seconds << "s"
+              << " threads=" << result.num_threads << "\n";
     }
 
     std::cerr << "wrote " << output_path.string() << "\n";

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <random>
@@ -24,6 +25,20 @@ struct SolverStats {
   // means the first attempt found the answer (or proved none exists)
   // outright.
   uint64_t restarts = 0;
+};
+
+// Result of Solver::SolveParallel: the solution (if any), plus stats.
+// When a solution is found, `stats` is whichever thread's search
+// actually produced it (matching Solve()'s usual meaning: the real path
+// to the answer). When every thread instead independently proves the
+// grid unsatisfiable, there's no single "the" search to report, so
+// `stats` is the sum across all of them -- the total work needed to
+// prove it. num_threads is how many were actually launched, which may
+// be less than requested if hardware_concurrency() couldn't be read.
+struct ParallelSolveResult {
+  std::optional<Solution> solution;
+  SolverStats stats;
+  unsigned num_threads = 0;
 };
 
 // CSP solver: incremental backtracking with real (cascading) AC-3
@@ -135,13 +150,47 @@ struct SolverStats {
 // where Assign() immediately collapses a chosen slot to a singleton and
 // removes it from consideration -- there is no "still open" slot left to
 // stick to.
+//
+// SolveParallel runs several independent copies of the whole scheme
+// above concurrently -- a portfolio of restart sequences racing each
+// other -- instead of the single sequential retry loop Solve() runs on
+// its own. This is a direct, if belated, application of this project's
+// own restart citation (Gomes, Selman & Kautz: backtracking runtime is
+// heavy-tailed, so a *different* random run of the same search often
+// finishes fast even when this one hasn't) to hardware this solver had
+// simply never used: each worker gets its own private Solver instance
+// (own domains, trail, crossing weights, nogoods, RNG -- nothing search-
+// related is shared across threads, so there's no synchronization inside
+// the hot path at all), seeded so worker 0 reproduces today's exact
+// single-threaded sequence (attempt 0 deterministic, then randomized
+// restarts) while every other worker randomizes from its own first
+// attempt -- otherwise it would just redo worker 0's deterministic pass
+// for free. A shared atomic flag, checked once per node alongside the
+// existing backtrack-budget abort check, lets every other worker unwind
+// within a node of whichever one finds a solution first; if every worker
+// instead independently proves the grid unsatisfiable, the search is
+// still complete -- SolveParallel only returns nullopt once all of them
+// have. See docs/design.md for the design rationale and measured effect,
+// and docs/bibliography.md for why this wasn't done sooner.
 class Solver {
  public:
   Solver(const Grid& grid, const Dictionary& dict);
 
-  // Runs constraint propagation + backtracking search.
-  // Returns the first valid solution found, or nullopt if none exists.
-  std::optional<Solution> Solve();
+  // Runs constraint propagation + backtracking search. Returns the first
+  // valid solution found, or nullopt if none exists (or if `cancel` is
+  // set by another thread first -- see SolveParallel, which is what
+  // actually needs these two parameters; a single-threaded caller can
+  // ignore both).
+  std::optional<Solution> Solve(uint64_t attempt_offset = 0,
+                                 const std::atomic<bool>* cancel = nullptr);
+
+  // Runs num_threads independent Solve() calls concurrently (0 means
+  // std::thread::hardware_concurrency(), falling back to 1 if that can't
+  // be determined) and returns as soon as any of them finds a solution,
+  // or once all of them have independently proven there isn't one. See
+  // the class comment above for the design.
+  static ParallelSolveResult SolveParallel(const Grid& grid, const Dictionary& dict,
+                                            unsigned num_threads = 0);
 
   const SolverStats& stats() const { return stats_; }
 
@@ -506,6 +555,12 @@ class Solver {
   uint64_t attempt_backtracks_ = 0;
   uint64_t attempt_backtrack_limit_ = 0;
   bool aborted_ = false;
+  // Set for the duration of one Solve() call from that call's `cancel`
+  // parameter (null for an ordinary single-threaded call). Checked in
+  // Backtrack alongside aborted_, once per node -- SolveParallel's other
+  // workers use this to unwind promptly once one of them finds a
+  // solution, without any synchronization inside the search itself.
+  const std::atomic<bool>* cancel_ = nullptr;
   // Whether SelectBranchSlot should weighted-randomly pick among the top
   // few slots (true on restarts) or deterministically take the single
   // best one (false on the first attempt). Benchmarking showed always

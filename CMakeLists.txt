@@ -12,12 +12,16 @@ endif()
 # Enable vectorization-friendly optimizations in Release builds.
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 
+# SolveParallel (solver.cpp) uses std::thread.
+find_package(Threads REQUIRED)
+
 add_library(xfill
   src/grid.cpp
   src/dictionary.cpp
   src/solver.cpp
 )
 target_include_directories(xfill PUBLIC include)
+target_link_libraries(xfill PUBLIC Threads::Threads)
 
 add_executable(xfill_cli src/main.cpp)
 target_link_libraries(xfill_cli PRIVATE xfill)
