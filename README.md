@@ -13,7 +13,7 @@ for the papers/codebases each technique below is drawn from.
 
 ✅ Slot detection, crossing computation, no-duplicate-words enforcement,
 queue-based AC-3 propagation, `dom/wdeg` branching, and randomized
-restarts are all implemented and tested (15/15 tests passing). Small and
+restarts are all implemented and tested (16/16 tests passing). Small and
 medium grids (tested up to 15x15 with real block patterns, against a real
 ~280k-entry dictionary at `min_score=40`) solve in well under a second;
 some genuinely dense grids remain intractable, which is a documented,
@@ -63,7 +63,11 @@ reasoning and citations behind each piece, see
    weights start at 1, get bumped by 1 whenever propagation through that
    crossing wipes out a domain, and decay 1% back toward 1 on every other
    wipeout — so the heuristic tracks *currently* troublesome crossings
-   instead of a fixed notion of constrainedness. Word choice within a
+   instead of a fixed notion of constrainedness. (`CrossingWeights`
+   computes this lazily — one crossing updated per wipeout rather than
+   decaying all of them every time — a VSIDS-style trick borrowed from
+   MiniSat; see `docs/bibliography.md`'s Eén & Sörensson entry.) Word
+   choice within a
    slot always tries higher dictionary-score words first (`ScoreOrder`),
    so a fill reads like a real crossword instead of the first
    alphabetically-valid guess. (Source: `rf-/ingrid_core`, crediting
@@ -121,9 +125,11 @@ the underlying instance itself is hard, not just this solver's choices
 leading up to it -- restarts fix a search that got *unlucky*, but can't
 turn a genuinely hard instance easy. `sample_15x15.txt` (the original,
 fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
-which solves quickly) is not in that category: it solves in 158s at
-`min_score=40` -- it just needs a less-restricted dictionary and a
-couple of minutes' patience, not a fundamentally harder search.
+which solves quickly) is not in that category: it solves in about 4.7s at
+`min_score=40` -- much faster than the ~158s this took earlier in the
+project's history, thanks to the propagation and restart optimizations
+in `docs/design.md`'s "Implementation summary" -- it just needs a
+less-restricted dictionary, not a fundamentally harder search.
 `sample_21x21.txt` is different again: it's proven unsatisfiable in
 microseconds, because it has a fully-open 21-cell row and the dictionary
 has no words that long even at `min_score=0` (max length 15) -- not a

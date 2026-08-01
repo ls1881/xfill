@@ -123,6 +123,78 @@ The solver aims to either find a valid fill or prove none exists
   are found. Verified byte-identical node counts on both samples, with a
   further, smaller ~1% win: seed 42 down to ~15.7s, seed 7 down to ~48.2s
   -- about 29% faster overall than where this session started (68.2s).
+
+  **Unsorted active-queue list for the min-domain pop.** The pop itself
+  still scanned `in_queue` (a `vector<bool>` sized to the *whole grid's*
+  slot count) on every single pop, to find the queued slot with the
+  smallest domain -- cheap per slot, but paid unconditionally for every
+  slot in the grid regardless of how many were actually queued. A
+  *sorted* `vector<int>` of just the queued slots was tried for this
+  before and reverted as a wash (see below) -- its sorted-insert
+  maintenance cost ate the savings. This is the same underlying idea
+  (scan only what's queued) with a different data structure: an
+  *unsorted* flat list, since the min-scan already has to visit every
+  queued slot to find the smallest domain regardless, and so can find
+  the popped slot's position in that same pass -- push is O(1)
+  (`push_back`), pop is O(1) (swap-with-last, `pop_back`), no insert-
+  order maintenance at all. Ties broken explicitly by lowest slot id to
+  match the original full-array scan's tie-break exactly, since the
+  list's order is now insertion order, not slot-id order. Caught one real
+  bug while implementing this: a second, inlined copy of the enqueue
+  logic (the "same bookkeeping as enqueue()" fast path for a neighbor
+  whose narrowed count is already known) updated `in_queue`/
+  `queued_count` but not the new list, silently making any slot enqueued
+  through that path invisible to the min-scan forever after -- caught
+  immediately since it turned a 0.16s grid into an apparent hang, not a
+  subtle wrongness. Verified byte-identical node/backtrack/restart counts
+  on all three 30-grid real samples (seeds 42/7/99, zero mismatches) once
+  fixed. Net effect: consistently ~2% faster in every sample (seed 42
+  10.97s → 10.74s, seed 7 3.59s → 3.52s, seed 99 2.42s → 2.36s; ~17.0s →
+  ~16.6s overall) with zero grids gained or lost in any of the three --
+  a small but genuine, risk-free win, unlike the search-order-affecting
+  changes above and below.
+
+  **Cached neighbor length in `SlotCrossing`.** `Propagate`'s per-crossing
+  loop -- its hottest loop, run on every popped slot -- re-derived
+  `grid_.SlotById(sc.neighbor).length` on every single iteration, even
+  though it's fixed for the life of the search. `sc.neighbor` can be any
+  slot in the grid, so that lookup is a cache-miss-prone random access
+  into a `vector<Slot>` (each `Slot` padded out by its own `cells`
+  member), whereas `crossings_by_slot_[slot]` -- and so `sc` itself -- is
+  already being scanned sequentially. Added a `neighbor_length` field to
+  `SlotCrossing`, computed once in the constructor alongside the
+  already-cached `crossing_id`, and read directly instead of re-deriving
+  it. Purely an integer cached at construction (no floating point, unlike
+  the crossing-weights change above), so provably behavior-preserving --
+  confirmed byte-identical node/backtrack/restart counts on both several
+  spot-checked grids and all three 30-grid real samples (seeds 42/7/99,
+  zero mismatches). Net effect: consistently faster in every sample
+  (seed 42 11.18s → 11.07s, -1.0%; seed 7 3.66s → 3.56s, -2.6%; seed 99
+  2.49s → 2.39s, -4.0%; ~17.3s → ~17.0s overall, -1.7%) with zero grids
+  gained or lost in any of the three -- another small, risk-free win in
+  the same vein as the active-queue list just above.
+
+  **Flat `slot_length_` array.** The same cache-miss-prone
+  `grid_.SlotById(id).length` pattern the fix just above targets for
+  crossing neighbors was also the way `SaveDomainOnce`, `Propagate`'s own
+  popped slot, `SelectBranchSlot`, `Assign`, `Undo`, `Backtrack`, and
+  `NogoodForbiddenWords` all looked up a slot's own length -- effectively
+  once per node at minimum, across most of the hot call graph. Added
+  `slot_length_`, a `vector<int>` indexed directly by slot id and
+  populated once in the constructor, and replaced every one of those call
+  sites with a direct read from it -- same reasoning as
+  `SlotCrossing::neighbor_length`: a small, dense array is cheaper to
+  keep in cache than a random access into `vector<Slot>`. Another
+  integer-only, zero-floating-point change, so provably behavior-
+  preserving; confirmed byte-identical node/backtrack/restart counts on
+  six spot-checked grids and all three 30-grid samples (seeds 42/7/99,
+  zero mismatches). Net effect, smaller than its two predecessors but
+  still consistently non-negative in every sample (seed 42 11.07s →
+  10.86s, -1.9%; seed 7 3.56s → 3.54s, -0.6%; seed 99 2.39s → 2.39s,
+  ~flat; ~17.0s → ~16.8s overall, -1.4%), again with zero grids gained or
+  lost anywhere -- diminishing but still real returns from this same
+  class of fix, consistent with most of the grid's per-node work already
+  having been wrung out by the changes above.
 - **Backtracking.** Trail-based: assigning a slot snapshots only the
   domains that assignment actually touches, once per decision level.
   "Once per level" was originally enforced by scanning back through the
@@ -185,6 +257,49 @@ The solver aims to either find a valid fill or prove none exists
   neutral (within the same noise band as before, not a clear win) -- kept
   anyway since it's strictly less work with no measured downside, not for
   a speed claim.
+
+  **Lazily-decayed crossing weights** (Eén & Sörensson's MiniSat, VSIDS-
+  style activity bumping -- see `docs/bibliography.md`): `BumpCrossingWeight`
+  used to decay *every* crossing's weight on *every* propagation failure --
+  an O(total grid crossings) pass paid on most nodes of the search, not
+  just the culprit crossing's own O(1) update. `sample`-profiling a real
+  hard grid (`grid_303.txt`) showed `Propagate` dominating self-time as
+  expected, but this pass was a real, previously-unexamined contributor
+  buried inside it. `Solver::CrossingWeights` (`solver.hpp`) replaces the
+  eager per-event decay of every weight with the same trick MiniSat uses
+  for variable activity: track each crossing's weight as an unnormalized
+  `offset` value against a single shared `scale` that absorbs the decay,
+  so bumping one crossing touches only that one entry (O(1)) instead of
+  the whole array, with an infrequent O(n) renormalization pass (roughly
+  every ~2300 events) before `scale` could underflow.
+
+  Algebraically exact, but **not floating-point-identical** to the eager
+  version it replaces -- confirmed this is the eager float32 baseline's
+  own accumulated rounding drift (switching the lazy version's internal
+  arithmetic to double changed which grids diverged not at all), not a
+  bug in the rewrite, but it means a tiny fraction of dom/wdeg's
+  priority-sort ties land differently, which -- like any other change to
+  per-node search behavior -- perturbs which restart's random seed ends
+  up solving a given grid. Benchmarked accordingly, with the same rigor
+  as a heuristic change (three independent 100-grid real samples, seeds
+  42/7/99, `min_score=40`, 15s cap per grid), not treated as a provably
+  safe refactor. Verified sound throughout (all 15 tests pass; newly-
+  produced fills spot-checked for a preserved block pattern, every cell
+  filled, no duplicate words). Net effect, restricted to grids solved
+  either way in a given seed (so the comparison isn't skewed by a grid
+  that timed out on one side): seed 42 (20 shared grids) 15.88s → 10.73s
+  (-32%), seed 7 (24 shared grids) 4.27s → 3.53s (-17%), seed 99 (23
+  shared grids) 1.65s → 2.38s (+45%, almost entirely `grid_128.txt`
+  alone going 1.0s → 1.75s). Across all three, 67 shared grids: 21.79s
+  → 16.65s, about 24% faster overall -- but seed 99 also *lost* one
+  grid (`grid_307.txt`, 6.5s solved under the old code, 34s under the
+  new one -- past the 15s cap, though still eventually solved and still
+  correct) with no grid gained in exchange, anywhere. A real, mixed
+  result in the same vein as nogood-recording-from-restarts above: net
+  positive (and here, substantially so, on time) but not uniformly so,
+  because a search-order-affecting change can't be otherwise on this
+  solver's restart-heavy harder grids. Kept given the size of the net
+  win relative to the one loss.
 - **Restarts.** Geometric backtrack-budget growth
   (`kInitialBacktrackLimit = 500`, `kRetryGrowthFactor = 1.1`), motivated
   by Gomes, Selman & Kautz's heavy-tailed-runtime-distribution result.
@@ -287,17 +402,37 @@ gains, no grids flipped the other way). Same underlying pattern as the
 backjumping/nogood-learning reverts above: any change to search order,
 even a well-motivated one, perturbs which restart's random seed ends up
 solving a given grid, and the effect isn't reliably positive across a
-large real sample even when a smaller sample suggests it is. Also tried:
-replacing `Propagate`'s O(total slots) min-domain scan with a sorted
-`vector<int>` of just the currently-queued slots (kept in ascending
-order specifically to preserve the original scan's tie-breaking exactly,
-verified byte-identical on both samples) — but this was a wash-to-slight-
-regression, not a win: the O(S) scan being replaced was mostly cheap
-`vector<bool>` reads (the *real* per-slot cost, an O(chunks) popcount, was
-already skipped for non-queued slots via `continue`, same as before), so
-removing it saved little while the new sorted-insert/erase maintenance
-cost was pure added overhead. Profile before assuming a scan is the
-bottleneck, not just the largest loop bound in the code.
+large real sample even when a smaller sample suggests it is.
+
+**Also tried and reverted:** replacing `Propagate`'s O(total slots)
+min-domain scan with a sorted `vector<int>` of just the currently-queued
+slots (kept in ascending order specifically to preserve the original
+scan's tie-breaking exactly, verified byte-identical on both samples) —
+but this was a wash-to-slight-regression, not a win: the O(S) scan being
+replaced was mostly cheap `vector<bool>` reads (the *real* per-slot cost,
+an O(chunks) popcount, was already skipped for non-queued slots via
+`continue`, same as before), so removing it saved little while the new
+sorted-insert/erase maintenance cost was pure added overhead. Profile
+before assuming a scan is the bottleneck, not just the largest loop bound
+in the code. (A later session revisited the same underlying idea with an
+*unsorted* list instead — see the "Propagation" section above — and that
+version *did* win; the sorted-maintenance cost, not the core idea, was
+what sank this one.)
+
+**Also tried and reverted:** the Luby restart sequence (Luby, Sinclair &
+Zuckerman, 1993 — see `docs/bibliography.md`) in place of the geometric
+backtrack-budget growth (`kRetryGrowthFactor = 1.1`). Implemented as a
+straight swap of the per-attempt budget formula, verified sound (all 15
+tests pass) and benchmarked the same way as any other restart-affecting
+change: three independent 30-grid real samples. Solve count was a wash
+across all three (`grid_047.txt` and `grid_307.txt` gained,
+`grid_328.txt` and `grid_424.txt` lost — two for two) but total time on
+the 65 grids solved either way *regressed* by about 33% (14.3s → 19.0s),
+almost entirely from two grids (`grid_128.txt`, `grid_290.txt`) taking
+several seconds longer under Luby's oscillating budget before a large
+enough attempt came up. Reverted: unlike nogood-recording-from-restarts
+or the lazily-decayed crossing weights (both real, if mixed, net wins),
+this traded away more time than the solve-count wash was worth.
 
 Profile-guided optimization (build an instrumented binary, run it over a
 sample of real grids, rebuild using that profile) was also tried as a
@@ -310,6 +445,36 @@ session's fix) already captured the main cross-translation-unit inlining
 win PGO would otherwise offer. Not adopted, since it would add a
 real build-process dependency (an instrumented pre-build run) for no
 measured benefit.
+
+## Correctness fixes
+
+Two real bugs, both dormant at the recommended `min_score=40` and found
+via a UBSan/ASan sweep plus a CLI fuzz check rather than in normal use:
+
+- **Non-alphabetic dictionary entries caused undefined behavior.** The
+  real wordlist has a handful of entries mixing letters and digits (e.g.
+  `ENTREE3000`, `ARTHURC4CLARKE`) that survive loading at a low enough
+  `min_score`. `Propagate`'s direct-lookup path reads a candidate word's
+  raw character and shifts by `ch - 'A'` with no check that it's
+  actually a letter -- for a digit this shifts by a negative amount,
+  confirmed via UBSan (`shift exponent -N is negative`). Fixing just
+  that shift exposed a second, related bug: a domain whose candidates
+  are *all* non-letters at some position leaves `possible == 0`, which
+  `(possible & (possible - 1)) == 0` can't distinguish from "exactly one
+  bit set," so the single-bit fast path ran `__builtin_ctz(0)` (also
+  undefined) and crashed further downstream. Fixed at the actual
+  boundary instead of patching every reader: `Dictionary::LoadFromFile`
+  now rejects any entry that isn't pure A-Z after uppercasing, the same
+  as an empty word already is -- restoring the invariant every consumer
+  of loaded words already assumed. Regression test in
+  `tests/test_dictionary.cpp`; verified clean under UBSan and ASan
+  afterward.
+- **`xfill_cli`'s `min_score` argument crashed ungracefully on bad
+  input.** `std::stoi(argv[3])` was parsed outside the `try`/`catch`
+  block, so a non-numeric third argument (e.g. `xfill_cli grid.txt
+  dict.txt abc`) terminated via an uncaught `std::invalid_argument`
+  (SIGABRT) instead of the program's normal `error: ...` handling.
+  Fixed by moving the parse inside the `try` block.
 
 ## Dictionary tuning
 

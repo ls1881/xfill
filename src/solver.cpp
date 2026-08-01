@@ -11,10 +11,6 @@ namespace xfill {
 
 namespace {
 constexpr uint32_t kAllLettersMask = (1u << 26) - 1;
-// How much a crossing weight decays toward 1 every time some *other*
-// crossing causes a wipeout -- lower prioritizes recent conflicts over
-// older ones. Value taken from rf-/ingrid_core's WEIGHT_AGE_FACTOR.
-constexpr float kWeightAgeFactor = 0.99f;
 
 // Restart tuning, all taken verbatim from rf-/ingrid_core's
 // backtracking_search.rs (RANDOM_SLOT_WEIGHTS, RETRY_GROWTH_FACTOR, and its
@@ -28,13 +24,14 @@ constexpr float kRetryGrowthFactor = 1.1f;
 
 Solver::Solver(const Grid& grid, const Dictionary& dict)
     : grid_(grid), dict_(dict), crossings_by_slot_(grid_.slots().size()) {
-  int max_length = 0;
+  slot_length_.assign(grid_.slots().size(), 0);
   for (const Slot& slot : grid_.slots()) {
+    slot_length_[static_cast<size_t>(slot.id)] = slot.length;
     slots_by_length_[slot.length].push_back(slot.id);
-    max_length = std::max(max_length, slot.length);
+    max_length_ = std::max(max_length_, slot.length);
   }
-  filter_scratch_by_length_.resize(static_cast<size_t>(max_length) + 1);
-  nogood_forbidden_scratch_by_length_.resize(static_cast<size_t>(max_length) + 1);
+  filter_scratch_by_length_.resize(static_cast<size_t>(max_length_) + 1);
+  nogood_forbidden_scratch_by_length_.resize(static_cast<size_t>(max_length_) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
     filter_scratch_by_length_[static_cast<size_t>(length)] =
         WordBitset(dict_.NumWordsOfLength(length), false);
@@ -42,17 +39,20 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
+  active_queue_scratch_.reserve(grid_.slots().size());
   queued_count_scratch_.assign(grid_.slots().size(), 0);
   last_saved_epoch_.assign(grid_.slots().size(), 0);
-  snapshot_pool_by_length_.resize(static_cast<size_t>(max_length) + 1);
+  snapshot_pool_by_length_.resize(static_cast<size_t>(max_length_) + 1);
   const std::vector<Crossing>& crossings = grid_.crossings();
   for (size_t i = 0; i < crossings.size(); ++i) {
     const Crossing& cr = crossings[i];
     int crossing_id = static_cast<int>(i);
+    int length_a = slot_length_[static_cast<size_t>(cr.slot_a)];
+    int length_b = slot_length_[static_cast<size_t>(cr.slot_b)];
     crossings_by_slot_[static_cast<size_t>(cr.slot_a)].push_back(
-        {cr.slot_b, cr.offset_a, cr.offset_b, crossing_id});
+        {cr.slot_b, cr.offset_a, cr.offset_b, crossing_id, length_b});
     crossings_by_slot_[static_cast<size_t>(cr.slot_b)].push_back(
-        {cr.slot_a, cr.offset_b, cr.offset_a, crossing_id});
+        {cr.slot_a, cr.offset_b, cr.offset_a, crossing_id, length_a});
   }
 
   // Connected components of the slot-crossing graph, via one BFS pass --
@@ -97,7 +97,7 @@ std::optional<Solution> Solver::Solve() {
   all_slots.reserve(grid_.slots().size());
   for (const Slot& slot : grid_.slots()) all_slots.push_back(slot.id);
 
-  std::vector<float> crossing_weights(grid_.crossings().size(), 1.0f);
+  CrossingWeights crossing_weights(grid_.crossings().size());
 
   Trail root_trail;
   bool changed = true;
@@ -110,11 +110,7 @@ std::optional<Solution> Solver::Solve() {
     if (!EnforceUniqueWordsOnce(domains, changed)) return std::nullopt;
   }
 
-  int max_length = 0;
-  for (const auto& [length, ids] : slots_by_length_) {
-    if (length > max_length) max_length = length;
-  }
-  std::vector<WordBitset> used_by_length(static_cast<size_t>(max_length) + 1);
+  std::vector<WordBitset> used_by_length(static_cast<size_t>(max_length_) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
     used_by_length[static_cast<size_t>(length)] =
         WordBitset(dict_.NumWordsOfLength(length), false);
@@ -172,7 +168,7 @@ void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
   if (last_saved_epoch_[static_cast<size_t>(slot)] == epoch) return;
   last_saved_epoch_[static_cast<size_t>(slot)] = epoch;
 
-  int length = grid_.SlotById(slot).length;
+  int length = slot_length_[static_cast<size_t>(slot)];
   std::vector<WordBitset>& pool = snapshot_pool_by_length_[static_cast<size_t>(length)];
   if (pool.empty()) {
     trail.domains.push_back({slot, domains[static_cast<size_t>(slot)]});
@@ -187,19 +183,10 @@ void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
   trail.domains.push_back({slot, std::move(recycled)});
 }
 
-void Solver::BumpCrossingWeight(std::vector<float>& crossing_weights,
-                                int culprit) const {
-  for (size_t i = 0; i < crossing_weights.size(); ++i) {
-    float increment = (static_cast<int>(i) == culprit) ? 1.0f : 0.0f;
-    crossing_weights[i] =
-        1.0f + (crossing_weights[i] - 1.0f) * kWeightAgeFactor + increment;
-  }
-}
-
 bool Solver::Propagate(std::vector<WordBitset>& domains,
                         const std::vector<int>& seed_slots, Trail& trail,
                         uint64_t epoch,
-                        std::vector<float>& crossing_weights) const {
+                        CrossingWeights& crossing_weights) const {
   std::vector<bool>& in_queue = in_queue_scratch_;
   std::vector<int>& touched = queue_touched_scratch_;
   // Caches domains[s].Count() at the moment `s` is (re-)enqueued, valid
@@ -213,8 +200,23 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
   // redundant recomputation per pop, O(Q^2) over a queue that takes Q pops
   // to drain.
   std::vector<size_t>& queued_count = queued_count_scratch_;
+  // Flat, unordered list of currently-queued slot ids -- lets the min-scan
+  // below touch only slots actually in the queue (typically far fewer
+  // than the grid's total slot count) instead of scanning `in_queue` for
+  // all of them. A *sorted* version of this was tried before and found a
+  // wash (the O(S) bool-array scan it replaced was already cheap, and
+  // keeping the vector sorted on every insert cost as much as it saved);
+  // this one stays unsorted -- O(1) push on enqueue, O(1) swap-remove on
+  // pop, since the min-scan already finds the popped slot's position in
+  // the same pass that finds its value -- so there's no equivalent
+  // maintenance cost to give the earlier attempt's wash its regression.
+  std::vector<int>& active = active_queue_scratch_;
+  active.clear();
   auto enqueue = [&](int s) {
-    if (!in_queue[static_cast<size_t>(s)]) touched.push_back(s);
+    if (!in_queue[static_cast<size_t>(s)]) {
+      touched.push_back(s);
+      active.push_back(s);
+    }
     in_queue[static_cast<size_t>(s)] = true;
     queued_count[static_cast<size_t>(s)] = domains[static_cast<size_t>(s)].Count();
   };
@@ -229,21 +231,28 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
   while (true) {
     // Pop the queued slot with the smallest domain -- checking wipeouts
     // (via SelectBranchSlot/the candidate loop, not here) happens sooner
-    // when the most-constrained slots propagate first.
+    // when the most-constrained slots propagate first. Ties broken by
+    // lowest slot id explicitly (matching the original full-array scan's
+    // tie-break, which always found the lowest-indexed slot first) since
+    // `active`'s order is insertion order, not slot-id order.
     int slot = -1;
     size_t best_count = 0;
-    for (size_t i = 0; i < in_queue.size(); ++i) {
-      if (!in_queue[i]) continue;
-      size_t count = queued_count[i];
-      if (slot == -1 || count < best_count) {
-        slot = static_cast<int>(i);
+    size_t best_pos = 0;
+    for (size_t pos = 0; pos < active.size(); ++pos) {
+      int s = active[pos];
+      size_t count = queued_count[static_cast<size_t>(s)];
+      if (slot == -1 || count < best_count || (count == best_count && s < slot)) {
+        slot = s;
         best_count = count;
+        best_pos = pos;
       }
     }
     if (slot == -1) break;
     in_queue[static_cast<size_t>(slot)] = false;
+    active[best_pos] = active.back();
+    active.pop_back();
 
-    int length = grid_.SlotById(slot).length;
+    int length = slot_length_[static_cast<size_t>(slot)];
     const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
 
     // For a domain narrowed below this many candidates, it's cheaper to
@@ -287,7 +296,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       }
       if (possible == kAllLettersMask) continue;  // no constraint to apply
 
-      int neighbor_length = grid_.SlotById(sc.neighbor).length;
+      int neighbor_length = sc.neighbor_length;
       WordBitset& neighbor_domain = domains[static_cast<size_t>(sc.neighbor)];
 
       // A single viable letter is common (especially once domains have
@@ -326,7 +335,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       SaveDomainOnce(sc.neighbor, domains, trail, epoch);
       size_t new_count = neighbor_domain.AndAssignCount(filter);
       if (new_count == 0) {
-        BumpCrossingWeight(crossing_weights, sc.crossing_id);
+        crossing_weights.Bump(sc.crossing_id);
         for (int t : touched) in_queue[static_cast<size_t>(t)] = false;
         return false;
       }
@@ -336,6 +345,7 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       // ask the just-narrowed domain to recompute it.
       if (!in_queue[static_cast<size_t>(sc.neighbor)]) {
         touched.push_back(sc.neighbor);
+        active.push_back(sc.neighbor);
       }
       in_queue[static_cast<size_t>(sc.neighbor)] = true;
       queued_count[static_cast<size_t>(sc.neighbor)] = new_count;
@@ -365,12 +375,12 @@ bool Solver::EnforceUniqueWordsOnce(std::vector<WordBitset>& domains,
   return true;
 }
 
-float Solver::SlotWeight(int slot, const std::vector<float>& crossing_weights,
+float Solver::SlotWeight(int slot, const CrossingWeights& crossing_weights,
                           const std::vector<bool>& assigned) const {
   float total = 0.0f;
   for (const SlotCrossing& sc : crossings_by_slot_[static_cast<size_t>(slot)]) {
     if (!assigned[static_cast<size_t>(sc.neighbor)]) {
-      total += crossing_weights[static_cast<size_t>(sc.crossing_id)];
+      total += crossing_weights.Get(sc.crossing_id);
     }
   }
   return total > 0.0f ? total : 1.0f;
@@ -386,7 +396,7 @@ int Solver::ActiveComponent() const {
 int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
                               const std::vector<WordBitset>& used_by_length,
                               const std::vector<bool>& assigned,
-                              const std::vector<float>& crossing_weights) const {
+                              const CrossingWeights& crossing_weights) const {
   int active = ActiveComponent();
   if (active == -1) return -1;
 
@@ -396,13 +406,12 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
   for (int sid : slots_by_component_[static_cast<size_t>(active)]) {
     if (assigned[static_cast<size_t>(sid)]) continue;
 
-    const Slot& slot = grid_.SlotById(sid);
     // Popcount of (domain & ~used) directly, without copying the domain
     // just to AndNot() it and Count() the result -- this runs once per
     // unassigned slot in the component on every single branching decision,
     // so the avoided allocation/copy adds up.
     size_t count = domains[static_cast<size_t>(sid)].CountAndNot(
-        used_by_length[static_cast<size_t>(slot.length)]);
+        used_by_length[static_cast<size_t>(slot_length_[static_cast<size_t>(sid)])]);
 
     float weight = SlotWeight(sid, crossing_weights, assigned);
     candidates.push_back({static_cast<float>(count) / weight, sid});
@@ -427,8 +436,8 @@ bool Solver::Assign(int slot, size_t word_index,
                      std::vector<WordBitset>& domains,
                      std::vector<WordBitset>& used_by_length,
                      std::vector<bool>& assigned, Trail& trail,
-                     std::vector<float>& crossing_weights) const {
-  int length = grid_.SlotById(slot).length;
+                     CrossingWeights& crossing_weights) const {
+  int length = slot_length_[static_cast<size_t>(slot)];
   uint64_t epoch = next_save_epoch_++;
 
   assigned[static_cast<size_t>(slot)] = true;
@@ -463,7 +472,7 @@ void Solver::Undo(int slot, std::vector<WordBitset>& domains,
     // decision produced) is no longer needed -- hand its buffer to the
     // recycle pool instead of letting the move-assignment below free it,
     // so a future SaveDomainOnce for this length can reuse it.
-    int length = grid_.SlotById(d.slot).length;
+    int length = slot_length_[static_cast<size_t>(d.slot)];
     snapshot_pool_by_length_[static_cast<size_t>(length)].push_back(
         std::move(domains[static_cast<size_t>(d.slot)]));
     domains[static_cast<size_t>(d.slot)] = std::move(d.domain);
@@ -494,7 +503,7 @@ const WordBitset* Solver::NogoodForbiddenWords(int slot,
   auto it = nogoods_by_slot_.find(slot);
   if (it == nogoods_by_slot_.end()) return nullptr;
 
-  int length = grid_.SlotById(slot).length;
+  int length = slot_length_[static_cast<size_t>(slot)];
   WordBitset& forbidden = nogood_forbidden_scratch_by_length_[static_cast<size_t>(length)];
   bool any = false;
   for (int nogood_idx : it->second) {
@@ -526,7 +535,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            std::vector<WordBitset>& used_by_length,
                                            std::vector<bool>& assigned,
                                            Trail& trail,
-                                           std::vector<float>& crossing_weights) {
+                                           CrossingWeights& crossing_weights) {
   if (aborted_) return std::nullopt;
 
   int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights);
@@ -534,7 +543,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     return ExtractSolution(domains);
   }
 
-  int length = grid_.SlotById(slot).length;
+  int length = slot_length_[static_cast<size_t>(slot)];
   // Test membership against domains[slot] and used_by_length separately
   // instead of copying the domain to AndNot() it first: ScoreOrder(length)
   // spans the whole dictionary at that length, and this loop runs once

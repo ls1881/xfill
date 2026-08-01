@@ -57,6 +57,16 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
     for (char& c : word) {
       c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
     }
+    // A crossword cell only ever holds one A-Z letter, and every reader
+    // of these words (LetterMask's construction, Propagate's direct-
+    // lookup path) assumes that's true of everything loaded -- so an
+    // entry that isn't pure A-Z after uppercasing (the real wordlist has
+    // a few, e.g. "ENTREE3000") is rejected here, at the boundary, rather
+    // than mishandled downstream: letting one through was confirmed via
+    // UBSan to cause undefined behavior in Propagate's `1u << (ch - 'A')`.
+    bool all_letters = std::all_of(word.begin(), word.end(),
+                                    [](char c) { return c >= 'A' && c <= 'Z'; });
+    if (!all_letters) continue;
 
     int length = static_cast<int>(word.size());
     max_length = std::max(max_length, length);

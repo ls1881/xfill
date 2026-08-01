@@ -1,21 +1,10 @@
 #include <catch2/catch_test_macros.hpp>
-#include <cstdio>
-#include <fstream>
 
+#include "test_helpers.hpp"
 #include "xfill/grid.hpp"
 #include "xfill/solver.hpp"
 
-namespace {
-xfill::Dictionary WriteAndLoadDict(const std::string& path,
-                                    const std::vector<std::string>& lines) {
-  std::ofstream out(path);
-  for (const auto& line : lines) out << line << "\n";
-  out.close();
-  auto dict = xfill::Dictionary::LoadFromFile(path);
-  std::remove(path.c_str());
-  return dict;
-}
-}  // namespace
+using xfill_test::WriteAndLoadDict;
 
 TEST_CASE("Solver fills a single open slot with no crossings") {
   auto grid = xfill::Grid::FromSpec({"..."});

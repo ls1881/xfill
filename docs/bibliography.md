@@ -126,6 +126,45 @@ end, never un-prove it. `Solver::RecordNogoodFromDeadEnd` /
 `NogoodForbiddenWords` in `solver.cpp`/`solver.hpp` implement this;
 see `docs/design.md` for the measured effect.
 
+### Eén & Sörensson — "An Extensible SAT-solver" (SAT 2003, MiniSat)
+
+The MiniSat paper (and source, `Solver::varBumpActivity`/`varDecayActivity`)
+underlying VSIDS-style variable-activity branching in modern SAT solvers.
+Not the branching heuristic itself (this project already has its own,
+dom/wdeg, from Balafoutis via `ingrid_core`) but a specific *bookkeeping*
+trick reused here: naively, "decay every variable's activity a little,
+then bump the one involved in this conflict" is an O(all variables) pass
+paid on every conflict. MiniSat avoids this by never touching the
+untouched variables at all -- it keeps each variable's activity
+unnormalized and grows the *bump increment* geometrically instead of
+shrinking every stored activity, dividing out the accumulated growth
+only when actually comparing two variables (or periodically rescaling
+before the increment could overflow). The same shape of update
+(`x_i <- x_i * decay + [i == culprit]`, applied to every `i` on every
+event) governed this solver's dom/wdeg crossing weights before
+`Solver::CrossingWeights` (`solver.hpp`) replaced the naive version with
+this identical trick: see its class comment and `docs/design.md` for the
+adaptation and measured effect.
+
+**Caveat found while adapting it.** The reformulated update is
+algebraically exact but not floating-point-identical to the original
+eager one -- the eager version's own float32 rounding, compounded over
+many sequential decay operations on a bumped crossing, drifts from the
+true mathematical value in a way the lazy version (needing only one
+multiplication to reach the same point) doesn't reproduce. Verified this
+isn't a bug in the reformulation (switching the lazy version's internal
+arithmetic to double changes nothing about which grids diverge -- the
+drift is the eager float32 baseline's, not error introduced by the
+rewrite) but it does mean this change is not the provably
+behavior-preserving kind this project usually prefers for a pure
+performance win (contrast the `WordBitset`-to-header moves, or
+`AndAssignCount`'s narrow-and-count fusion): a tiny fraction of dom/wdeg's
+priority-sort ties land differently, which -- same as any other change to
+per-node search behavior -- perturbs which restart's random seed ends up
+solving a given grid. Benchmarked with the same rigor as a heuristic
+change accordingly (three independent 100-grid samples); see
+`docs/design.md`.
+
 ### Dechter — "Tractable Structures for Constraint Satisfaction Problems" (book chapter, 2006)
 
 A survey of graph-structure-based tractability results for CSPs. Source
@@ -167,6 +206,21 @@ not skip a slot whose masked domain is empty.
 
 ## Consulted for context, not adopted
 
+- **Luby, Sinclair & Zuckerman — "Optimal Speedup of Las Vegas Algorithms" (1993).** Introduces the universal restart sequence
+  (1, 1, 2, 1, 1, 2, 4, ...) as a per-attempt cutoff schedule, provably
+  within a log factor of the best *fixed* cutoff without needing to know
+  it in advance — a well-established alternative to this solver's
+  geometric backtrack-budget growth (`kRetryGrowthFactor`, ported from
+  `ingrid_core`). Implemented and benchmarked (three independent 30-grid
+  real samples) as a straight swap of the budget formula; solve count was
+  an exact wash (two grids gained, two lost) but total time on the
+  grids solved either way regressed by roughly a third, driven by two
+  grids that happened to take much longer before Luby's oscillating
+  budget produced a large-enough attempt. Reverted — see `docs/design.md`
+  for the numbers. Plausible this solver's fairly small (30-100 grid)
+  real samples just don't have enough restart-heavy instances for Luby's
+  asymptotic guarantee to pay off yet; not ruled out for good, just not
+  a win on the evidence gathered so far.
 - **Anbulagan & Botea — "Crossword Puzzles as a Constraint Problem" (CP
   2008).** Reports a phase-transition study: crossword hardness peaks in
   a middle range of dictionary size and blocked-cell count, with "hard

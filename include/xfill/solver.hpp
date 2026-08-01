@@ -67,6 +67,16 @@ struct SolverStats {
 // bitset at read time, rather than writing exclusions into every sibling
 // domain on each assignment.
 //
+// Those crossing weights are stored lazily-decayed (CrossingWeights,
+// below), not decayed on every crossing on every wipeout: that eager
+// version was an O(total grid crossings) pass paid on most nodes, fixed
+// with the same trick MiniSat uses for VSIDS variable-activity bumping
+// (Een & Sorensson, "An Extensible SAT-solver," SAT 2003 -- see
+// docs/bibliography.md) -- see the CrossingWeights comment for the
+// derivation and docs/design.md for why this one, unlike most of this
+// solver's other constant-factor fixes, isn't provably behavior-
+// preserving and was benchmarked like a heuristic change instead.
+//
 // On top of that, Solve() wraps the search in randomized restarts with a
 // geometrically-growing backtrack budget, also ported from ingrid_core
 // (its `find_fill`/`find_fill_for_seed`, plus the constants
@@ -144,6 +154,16 @@ class Solver {
     // grid crossing -- lets dom/wdeg attribute a wipeout to the specific
     // arc that caused it.
     int crossing_id;
+    // grid_.SlotById(neighbor).length, precomputed once here instead of
+    // re-fetched every time Propagate visits this crossing (its hottest
+    // loop, run on every popped slot): `neighbor` can be any slot in the
+    // grid, so grid_.SlotById(neighbor) is a cache-miss-prone random
+    // access into a vector<Slot> (each Slot padded out by its own `cells`
+    // vector), while crossings_by_slot_[slot] -- and so this field -- is
+    // already being scanned sequentially, so it costs nothing extra to
+    // have it sitting right here. See docs/design.md for the measured
+    // effect.
+    int neighbor_length;
   };
 
   struct DomainSnapshot {
@@ -171,6 +191,67 @@ class Solver {
     std::vector<std::pair<int, size_t>> pairs;
   };
 
+  // dom/wdeg's crossing weights, lazily decayed instead of eagerly.
+  // Conceptually each crossing i has a weight w_i, starting at 1, updated
+  // on *every* wipeout (anywhere in the grid) as
+  // w_i <- 1 + (w_i - 1) * kWeightAgeFactor + [i == culprit] -- every
+  // weight decays a little each time, and the crossing that caused this
+  // particular wipeout also gets bumped. Applying that to every crossing
+  // on every wipeout is an O(total grid crossings) pass paid on most
+  // nodes of the search. Substituting x_i = w_i - 1 turns the recurrence
+  // into x_i <- x_i * kWeightAgeFactor + [i == culprit] -- a plain "decay
+  // everything, bump one" update, exactly the shape MiniSat's VSIDS
+  // variable-activity bumping solves the same way: track x_i implicitly
+  // as offset[i] * scale_, where scale_ absorbs the decay (scale_ *=
+  // kWeightAgeFactor on every event, offset[culprit] += 1/scale_ on a
+  // bump), so a non-culprit crossing's offset is provably unchanged by an
+  // event that doesn't concern it -- Bump() becomes O(1) instead of
+  // O(total crossings). scale_ shrinks every event, so it's renormalized
+  // (a real O(n) pass, but only roughly once every ~2300 events -- solve
+  // kWeightAgeFactor^n = kRenormalizeThreshold for n) before it could
+  // underflow. See docs/design.md for the derivation check and measured
+  // effect.
+  //
+  // Not numerically identical to the eager recurrence it replaces: the
+  // eager version accumulates its own float rounding error over
+  // thousands of sequential (w-1)*d operations on a bumped crossing,
+  // while this scheme reaches the same value in one multiplication
+  // (offset*scale) and so tracks the true mathematical value more
+  // closely -- confirmed (see docs/design.md) that switching to double
+  // changes nothing, i.e. the difference is the eager float32 baseline's
+  // own drift, not error introduced here. Usually too small to matter,
+  // but dom/wdeg's priority sort can have a near-exact tie where it picks
+  // a different slot -- so, in practice, this is a search-order-affecting
+  // change like any heuristic tweak, not a provably behavior-preserving
+  // refactor, and was benchmarked accordingly.
+  struct CrossingWeights {
+    explicit CrossingWeights(size_t n) : offset(n, 0.0f) {}
+
+    float Get(int id) const {
+      return 1.0f + offset[static_cast<size_t>(id)] * scale;
+    }
+
+    void Bump(int culprit) {
+      scale *= kWeightAgeFactor;
+      offset[static_cast<size_t>(culprit)] += 1.0f / scale;
+      if (scale < kRenormalizeThreshold) Renormalize();
+    }
+
+    void Renormalize() {
+      for (float& v : offset) v *= scale;
+      scale = 1.0f;
+    }
+
+    // How much a crossing weight decays toward 1 every time some *other*
+    // crossing causes a wipeout -- lower prioritizes recent conflicts over
+    // older ones. Value taken from rf-/ingrid_core's WEIGHT_AGE_FACTOR.
+    static constexpr float kWeightAgeFactor = 0.99f;
+    static constexpr float kRenormalizeThreshold = 1e-10f;
+
+    std::vector<float> offset;
+    float scale = 1.0f;
+  };
+
   // Saves `domains[slot]` onto the trail, but only if it hasn't already
   // been saved during this `epoch` -- the first snapshot within a
   // decision level is the one that must survive to Undo, since it's the
@@ -184,13 +265,6 @@ class Solver {
   void SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,
                        Trail& trail, uint64_t epoch) const;
 
-  // Decays every crossing weight toward 1 (keeping WEIGHT_AGE_FACTOR of
-  // its excess) and bumps `culprit`'s weight by 1 -- called once per
-  // propagation failure, attributing the wipeout to the arc that caused
-  // it while letting older conflicts fade.
-  void BumpCrossingWeight(std::vector<float>& crossing_weights,
-                          int culprit) const;
-
   // Queue-based AC-3: seeds the propagation queue with `seed_slots` and
   // runs to a fixpoint, narrowing crossing neighbors' domains and
   // re-queueing whichever ones actually shrank. Domain changes are
@@ -199,7 +273,7 @@ class Solver {
   // domain emptied), after bumping the responsible crossing's weight.
   bool Propagate(std::vector<WordBitset>& domains,
                   const std::vector<int>& seed_slots, Trail& trail,
-                  uint64_t epoch, std::vector<float>& crossing_weights) const;
+                  uint64_t epoch, CrossingWeights& crossing_weights) const;
 
   // Root-only pass: once a slot's domain is forced to a single word,
   // removes that word from every other same-length slot's domain. Sets
@@ -210,7 +284,7 @@ class Solver {
   // Sum of crossing_weights over this slot's crossings to still-
   // unassigned neighbors (the wdeg of dom/wdeg). Falls back to 1 if the
   // slot has no such crossings, so priority reduces to plain domain size.
-  float SlotWeight(int slot, const std::vector<float>& crossing_weights,
+  float SlotWeight(int slot, const CrossingWeights& crossing_weights,
                     const std::vector<bool>& assigned) const;
 
   // Index (into slots_by_component_) of the lowest-numbered connected
@@ -241,7 +315,7 @@ class Solver {
   int SelectBranchSlot(const std::vector<WordBitset>& domains,
                         const std::vector<WordBitset>& used_by_length,
                         const std::vector<bool>& assigned,
-                        const std::vector<float>& crossing_weights) const;
+                        const CrossingWeights& crossing_weights) const;
 
   // Assigns `slot` to word `word_index`, marks the word used, and runs
   // Propagate from `slot` to cascade the consequences. Returns false on
@@ -252,7 +326,7 @@ class Solver {
   bool Assign(int slot, size_t word_index, std::vector<WordBitset>& domains,
               std::vector<WordBitset>& used_by_length,
               std::vector<bool>& assigned, Trail& trail,
-              std::vector<float>& crossing_weights) const;
+              CrossingWeights& crossing_weights) const;
 
   // Rolls `domains`/`used_by_length`/`assigned` back to the given trail
   // marks for the given slot.
@@ -264,7 +338,7 @@ class Solver {
   std::optional<Solution> Backtrack(std::vector<WordBitset>& domains,
                                      std::vector<WordBitset>& used_by_length,
                                      std::vector<bool>& assigned, Trail& trail,
-                                     std::vector<float>& crossing_weights);
+                                     CrossingWeights& crossing_weights);
 
   // Records a nogood from the current assignment: every currently-assigned
   // slot's (slot, word) pair, taken together, is infeasible. Sound to call
@@ -294,6 +368,21 @@ class Solver {
   const Grid& grid_;
   const Dictionary& dict_;
   SolverStats stats_;
+  // Longest slot in the grid, computed once in the constructor and reused
+  // everywhere a per-length scratch vector needs sizing (its own
+  // scratch buffers below, and Solve()'s used_by_length) -- avoids
+  // re-deriving it from slots_by_length_ a second time.
+  int max_length_ = 0;
+  // slot_length_[slot_id] -- every slot's length, populated once in the
+  // constructor. Every hot-path caller that needs a slot's length
+  // (SaveDomainOnce, Propagate, SelectBranchSlot, Assign, Undo,
+  // Backtrack, NogoodForbiddenWords -- i.e. most of them) used to fetch
+  // it via grid_.SlotById(id).length, a random access into a
+  // vector<Slot> (each Slot padded out by its own `cells` member) --
+  // this is a small, dense array instead, cheaper to keep in cache for
+  // the same reason SlotCrossing::neighbor_length is (see docs/design.md
+  // for the measured effect of both).
+  std::vector<int> slot_length_;
   // Slot ids grouped by length -- only same-length slots can ever collide
   // on the same word, so this scopes the uniqueness checks.
   std::unordered_map<int, std::vector<int>> slots_by_length_;
@@ -346,6 +435,12 @@ class Solver {
   // comment where it's used in Propagate for why this is always valid
   // for as long as a slot stays queued.
   mutable std::vector<size_t> queued_count_scratch_;
+  // Propagate's flat, unordered list of currently-queued slot ids, used
+  // by the min-domain pop so it scans only actually-queued slots instead
+  // of every slot in the grid. See the comment where it's used in
+  // Propagate for why this stays unsorted (no maintenance cost) unlike an
+  // earlier, reverted sorted-vector attempt at the same idea.
+  mutable std::vector<int> active_queue_scratch_;
 
   // Propagate's "which words are still in this slot's domain" list for the
   // direct-lookup path, reused across calls (via WordBitset::AppendSetBits)

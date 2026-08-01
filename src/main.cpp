@@ -51,9 +51,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  int min_score = argc >= 4 ? std::stoi(argv[3]) : 0;
-
   try {
+    int min_score = argc >= 4 ? std::stoi(argv[3]) : 0;
+
     xfill::Grid grid = xfill::Grid::FromFile(argv[1]);
     xfill::Dictionary dict =
         xfill::Dictionary::LoadFromFile(argv[2], min_score);
@@ -71,6 +71,10 @@ int main(int argc, char** argv) {
         output_dir / (std::filesystem::path(argv[1]).stem().string() + "_output.txt");
     std::ofstream out(output_path, std::ios::trunc);
 
+    // Same output to both: stdout for interactive use and for
+    // benchmarks/bench_subset.py, which parses the stats line from it;
+    // the file for inspecting a specific grid's fill later, since a
+    // terminal scrolls away but the file persists across runs.
     for (std::ostream* stream : {static_cast<std::ostream*>(&std::cout),
                                   static_cast<std::ostream*>(&out)}) {
       if (!solution) {
