@@ -120,7 +120,9 @@ reasoning and citations behind each piece, see
    every one of the 500 real scraped grids, since well-built crosswords
    are essentially always fully interlocked — but a real ~2.6x win on a
    grid that does have independent regions (see
-   `benchmarks/grids/synthetic/disconnected_15x15.txt`).
+   `benchmarks/grids/synthetic/disconnected_15x15.txt`, one of two
+   purpose-built edge-case grids alongside `rectangular_9x5.txt`, which
+   tests a non-square grid).
 
 8. **Parallel restarts.** `Solver::SolveParallel` runs several independent
    restart sequences at once (`hardware_concurrency()` threads by
@@ -147,8 +149,8 @@ reasoning and citations behind each piece, see
 
 ### Known limits
 
-`benchmarks/grids/sample_13x13.txt` still hasn't finished after 15+
-minutes, even at `min_score=40` -- confirmed still true even with
+`benchmarks/grids/curated/sample_13x13.txt` still hasn't finished after
+15+ minutes, even at `min_score=40` -- confirmed still true even with
 `SolveParallel`'s 14-way portfolio search (also stopped after 20+
 minutes with no solution). That's an expected result, not a bug: per
 Anbulagan & Botea's phase-transition study of crossword CSPs, some
@@ -235,11 +237,15 @@ predating `SolveParallel`.
 ./benchmarks/run_benchmarks.sh ./build/xfill_cli data/spreadthewordlist_caps.txt
 ```
 
-Grids in `benchmarks/grids/` were generated with:
+Grids in `benchmarks/grids/curated/` were generated with:
 
 ```bash
-python3 benchmarks/generate_grid.py --size 15 --block-pairs 18 > benchmarks/grids/sample_15x15.txt
+python3 benchmarks/generate_grid.py --size 15 --block-pairs 18 > benchmarks/grids/curated/sample_15x15.txt
 ```
+
+`benchmarks/grids/synthetic/` holds a couple of hand-built grids that
+target one specific solver behavior each rather than general sizing
+(disconnected components, a non-square shape) — see step 7 above.
 
 `benchmarks/grids/scraped_15x15/` holds 500 real 15x15 grid layouts
 (block patterns only, via `benchmarks/scrape_crosswordgrids.py`) —

@@ -52,7 +52,12 @@ class Grid {
   const std::vector<Crossing>& crossings() const { return crossings_; }
 
  private:
+  // Scans each row, then each column, for maximal runs of open cells;
+  // any run of length >= 2 becomes a Slot (a length-1 run has nothing to
+  // cross, so it can never be a real crossword entry).
   void ComputeSlots();
+  // Any cell covered by both an across and a down slot is a Crossing
+  // between them, at that cell's offset within each.
   void ComputeCrossings();
 
   int width_;

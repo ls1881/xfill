@@ -714,7 +714,7 @@ tiers that contain visible data-corruption garbage (e.g. `NDRR`,
 ## Known hard cases
 
 A small number of real, densely-interlocked grids (e.g.
-`benchmarks/grids/sample_13x13.txt`) remain unsolved even after 15+
+`benchmarks/grids/curated/sample_13x13.txt`) remain unsolved even after 15+
 minutes at `min_score=40` -- and, tested after implementing
 `SolveParallel` (see the "Restarts" section above), still unsolved after
 20+ minutes with a 14-way portfolio search running, confirming this

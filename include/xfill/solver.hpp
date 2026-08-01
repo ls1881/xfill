@@ -418,6 +418,8 @@ class Solver {
                                           const std::vector<WordBitset>& domains,
                                           const std::vector<bool>& assigned) const;
 
+  // Reads off the final word for every slot once Backtrack has assigned
+  // them all (each domain is by then a true singleton).
   Solution ExtractSolution(const std::vector<WordBitset>& domains) const;
 
   const Grid& grid_;
