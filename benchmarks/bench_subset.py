@@ -31,11 +31,14 @@ def pick_subset(n, seed):
     return sorted(rng.sample(grids, n), key=lambda p: p.name)
 
 
-def run_one(cli, dict_path, grid_path, min_score, timeout):
+def run_one(cli, dict_path, grid_path, min_score, timeout, threads=None):
     start = time.time()
+    args = [str(cli), str(grid_path), str(dict_path), str(min_score)]
+    if threads is not None:
+        args.append(str(threads))
     try:
         proc = subprocess.run(
-            [str(cli), str(grid_path), str(dict_path), str(min_score)],
+            args,
             capture_output=True, text=True, timeout=timeout,
         )
     except subprocess.TimeoutExpired:
@@ -83,6 +86,17 @@ def main():
     parser.add_argument("--dict", default=str(REPO_ROOT / "data" / "spreadthewordlist_caps.txt"))
     parser.add_argument("--save", help="write results to this CSV path")
     parser.add_argument("--compare", help="CSV from a previous --save run to diff against")
+    # Forwarded as xfill_cli's 4th positional arg. Omitted by default (the
+    # solver's own default -- hardware_concurrency() via SolveParallel).
+    # Pass 1 for reproducible, noise-free comparisons: SolveParallel's
+    # winning worker (and thus its exact node/backtrack count) depends on
+    # real-time thread-scheduling luck, which varies run to run even for
+    # byte-identical code, so a >1-thread comparison can show per-grid node
+    # count "changes" that are pure scheduling noise, not a real behavior
+    # difference -- confirmed directly while isolating a solver change from
+    # that noise (see docs/design.md).
+    parser.add_argument("--threads", type=int, default=None,
+                         help="xfill_cli num_threads; omit for the solver's own default")
     args = parser.parse_args()
 
     subset = pick_subset(args.n, args.seed)
@@ -90,7 +104,7 @@ def main():
 
     results = []
     for grid_path in subset:
-        r = run_one(args.cli, args.dict, grid_path, args.min_score, args.timeout)
+        r = run_one(args.cli, args.dict, grid_path, args.min_score, args.timeout, args.threads)
         results.append(r)
         line = f"{r['grid']:16s} {r['status']:8s} nodes={str(r['nodes']):>8s} backtracks={str(r['backtracks']):>7s} restarts={str(r['restarts']):>4s} time={r['time']:.3f}s"
         if prior and r["grid"] in prior:

@@ -339,6 +339,84 @@ The solver aims to either find a valid fill or prove none exists
   because a search-order-affecting change can't be otherwise on this
   solver's restart-heavy harder grids. Kept given the size of the net
   win relative to the one loss.
+- **Narrow-domain candidate fast path, plus a real bug found while adding
+  it.** `Backtrack`'s candidate loop (see above) tests `dict_.ScoreOrder(length)`
+  membership one word at a time -- O(`NumWordsOfLength`) per branching
+  node regardless of how narrow the domain actually is, fine near the
+  root but wasteful once deep search has narrowed a slot to a handful of
+  candidates out of a length group that can run into the thousands (short
+  slots especially). Below a threshold, `Backtrack` now extracts just the
+  live candidates (`WordBitset::AndNotAssign`, a new method, plus
+  `AppendSetBits`) and sorts that small set by a precomputed
+  `Dictionary::ScoreRank` (the inverse of `ScoreOrder`, built once at load
+  time) instead of walking the whole length group -- same "direct
+  extraction below a threshold" shape as Propagate's
+  `kDirectLookupThreshold` split, applied to word selection instead of
+  letter viability.
+
+  Two mistakes surfaced building this, both worth recording:
+
+  1. **A real, pre-existing correctness bug.** `NogoodForbiddenWords`
+     returns a pointer into per-length *scratch* state
+     (`nogood_forbidden_scratch_by_length_`), reused across calls. The
+     original code held that pointer across `Backtrack`'s whole candidate
+     loop -- which recurses back into `Backtrack` -- so a descendant call
+     for a *different* slot of the *same length* would silently overwrite
+     the very buffer an ancestor frame's loop was still reading from on
+     its next iteration. Harmless on a search's very first attempt (no
+     nogoods exist yet), but from the second attempt on, this could make
+     a genuinely-exhaustive attempt wrongly skip a valid candidate --
+     the specific failure mode being `Solve()` reporting a satisfiable
+     grid as UNSAT. Fixed by merging any nogood-forbidden words into a
+     local `WordBitset` copy immediately (`effective_used`, folded into
+     the existing `used` mask) instead of holding a pointer across the
+     recursive loop -- the same fix shape applied to the new narrow-path
+     candidate list itself (a per-frame `std::vector`, not scratch, for
+     the same reason). Verified via
+     AddressSanitizer + UndefinedBehaviorSanitizer on a real restart-heavy
+     grid (`grid_053.txt`, which racks up 13+ nogood-triggering restarts
+     under `min_score=40`) -- clean, and the resulting fill still passes
+     block-pattern/no-duplicate validation. No dedicated unit test added
+     (reliably forcing two same-length slots into a nogood-aliasing
+     collision deterministically in a small synthetic grid is fragile);
+     the sanitizer run against a real grid that's known to exercise this
+     exact path stands in for one.
+  2. **A self-inflicted regression, caught by benchmarking before
+     shipping.** The first version of this fast path computed
+     `domain_count` via a fresh `WordBitset::CountAndNot` at the top of
+     *every* `Backtrack` call, to decide which path to take -- paid even
+     when the answer was "take the plain scan," which is most nodes.
+     `SelectBranchSlot` already computes this exact value for the chosen
+     slot while scoring every candidate in the component; the fix was to
+     have it return that count (`out_domain_count`, an output parameter)
+     instead of recomputing it. Caught because seed-42 benchmarking
+     showed a net *regression* (total time 2.44s → 3.42s) despite
+     byte-identical node counts -- the fast path itself wasn't the
+     problem, the redundant popcount pass paid by *every other* node was.
+
+  A third thing this surfaced, unrelated to the bug fix: `SolveParallel`
+  benchmark comparisons are inherently noisy in a way single-threaded
+  ones aren't -- which worker's random attempt happens to finish first is
+  real-time-scheduling-dependent, so two runs of *byte-identical* code can
+  report different node counts for the same grid (confirmed directly:
+  several grids' node counts differed between two back-to-back runs of
+  the *same* binary). `benchmarks/bench_subset.py` gained a `--threads`
+  flag (forwarded to `xfill_cli`'s 4th argument) so a change like this one
+  can be isolated from that noise via `--threads 1`, matching
+  `SolveParallel`'s own worker-0 sequence exactly.
+
+  Measured effect (single-threaded, `--threads 1`, isolating this change
+  from `SolveParallel`'s scheduling noise above; three seeds, `min_score=40`,
+  15s cap): node counts identical to the pre-change baseline on every
+  grid in all three seeds (confirms this is a pure constant-factor change,
+  not a search-order change) with total solved-time down 1.15%/1.75%/2.1%
+  → -3.01%/-1.2%/-2.1% once the `SelectBranchSlot` reuse fix (above)
+  landed. `kCandidateDirectThreshold = 1000` was picked the same way as
+  Propagate's threshold: re-running the benchmark at 200/1000/4000 and
+  taking the plateau (-1.2%/-3.0%/-2.9%, seed 42). Modest, but real,
+  uniform (no grid regressed in any seed), and free of any search-order
+  risk -- kept alongside the bug fix above, which is not optional
+  regardless of the speed number.
 - **Restarts.** Geometric backtrack-budget growth
   (`kInitialBacktrackLimit = 500`, `kRetryGrowthFactor = 1.1`), motivated
   by Gomes, Selman & Kautz's heavy-tailed-runtime-distribution result.
@@ -694,3 +772,15 @@ can lose to a simpler approach in practice due to cache locality and
 constant factors, and some changes that prune real work still land net
 negative once restart dynamics are accounted for. A negative result gets
 written up with the same honesty as a positive one.
+
+Since `SolveParallel` became `xfill_cli`'s default (see above), a plain
+`bench_subset.py` run compares whichever worker's random attempt happened
+to finish first -- real-time-scheduling-dependent, so it can report
+different node counts for the *same grid* across two runs of identical
+code. That's expected noise for judging `SolveParallel` itself, but it
+pollutes the signal when isolating a change to the underlying single-
+search algorithm (a solved grid's time swinging on scheduling luck rather
+than the change under test). Use `bench_subset.py --threads 1` for that
+case -- it reproduces worker 0's exact deterministic sequence, so
+identical code always gives identical node counts and any time delta is
+attributable to the change, not to scheduling.

@@ -148,6 +148,14 @@ class WordBitset {
     return *this;
   }
 
+  // Clears every bit also set in `other` -- i.e. *this &= ~other. Lets a
+  // caller build "domain minus already-used/forbidden words" in place
+  // instead of copying `other`'s complement first.
+  WordBitset& AndNotAssign(const WordBitset& other) {
+    for (size_t i = 0; i < words_.size(); ++i) words_[i] &= ~other.words_[i];
+    return *this;
+  }
+
   // True if any bit is set in both -- cheaper than materializing (*this &
   // other).Any() since it can stop at the first shared word.
   bool Intersects(const WordBitset& other) const {
@@ -222,6 +230,16 @@ class Dictionary {
   // dictionary has no words of that length.
   const std::vector<size_t>& ScoreOrder(int length) const;
 
+  // Inverse of ScoreOrder: this word's position within it (0 = highest
+  // score). Lets a caller holding a small, already-filtered set of word
+  // indices (e.g. Backtrack's narrow-domain path, below) sort just those
+  // by score in O(k log k) instead of walking the *whole* ScoreOrder list
+  // checking membership, which costs O(NumWordsOfLength) regardless of how
+  // few candidates actually remain.
+  size_t ScoreRank(int length, size_t word_index) const {
+    return score_rank_by_length_[static_cast<size_t>(length)][word_index];
+  }
+
  private:
   // Indexed directly by length (index 0 unused) rather than keyed in an
   // unordered_map: word lengths are a small, dense range known at load
@@ -233,6 +251,11 @@ class Dictionary {
   // letter_masks_[length][position][letter - 'A']
   std::vector<std::vector<std::array<WordBitset, 26>>> letter_masks_;
   std::vector<std::vector<size_t>> score_order_by_length_;
+  // score_rank_by_length_[length][word_index] = word_index's position in
+  // score_order_by_length_[length] -- the inverse permutation, precomputed
+  // once at load time so ScoreRank() is O(1) instead of an O(n) search
+  // through ScoreOrder on every call.
+  std::vector<std::vector<size_t>> score_rank_by_length_;
 };
 
 }  // namespace xfill

@@ -361,10 +361,16 @@ class Solver {
   // marked used, which would make its own masked domain look empty (self-
   // exclusion) if re-examined -- that's a false contradiction, not a real
   // one, so assigned slots must be skipped explicitly instead.
+  // `out_domain_count`, when non-null, receives the chosen slot's popcount
+  // of (domain & ~used) -- already computed here while scoring every
+  // candidate in the component, so the caller (Backtrack, choosing between
+  // its two candidate-iteration strategies) can reuse it instead of paying
+  // for the same fused AndNot-count a second time.
   int SelectBranchSlot(const std::vector<WordBitset>& domains,
                         const std::vector<WordBitset>& used_by_length,
                         const std::vector<bool>& assigned,
-                        const CrossingWeights& crossing_weights) const;
+                        const CrossingWeights& crossing_weights,
+                        size_t* out_domain_count = nullptr) const;
 
   // Assigns `slot` to word `word_index`, marks the word used, and runs
   // Propagate from `slot` to cascade the consequences. Returns false on
@@ -496,9 +502,13 @@ class Solver {
   // instead of a fresh std::vector<size_t> per popped queue slot.
   mutable std::vector<size_t> slot_candidates_scratch_;
 
-  // SelectBranchSlot's (priority, slot id) candidate list, reused across
-  // calls instead of a fresh vector on every single branching decision.
-  mutable std::vector<std::pair<float, int>> branch_candidates_scratch_;
+  // SelectBranchSlot's (priority, slot id, domain_count) candidate list,
+  // reused across calls instead of a fresh vector on every single
+  // branching decision. Default tuple ordering sorts by priority first,
+  // slot id second (id ties never actually occur, since ids are unique) --
+  // domain_count is carried along purely for the caller to retrieve, never
+  // itself compared.
+  mutable std::vector<std::tuple<float, int, size_t>> branch_candidates_scratch_;
 
   // SaveDomainOnce's O(1) replacement for its old linear trail scan:
   // last_saved_epoch_[slot] holds the epoch (see next_save_epoch_) during
@@ -545,6 +555,16 @@ class Solver {
   // Scratch bitset (one per length) for NogoodForbiddenWords' result,
   // reused across calls like filter_scratch_by_length_.
   mutable std::vector<WordBitset> nogood_forbidden_scratch_by_length_;
+
+  // Backtrack's scratch bitset (one per length) for its narrow-domain
+  // candidate path: "this slot's domain, minus used words, minus any
+  // nogood-forbidden words" is built here in place instead of allocating a
+  // fresh WordBitset per branching node. Only ever read from immediately
+  // after being written, before any recursive Backtrack call that could
+  // reuse the same length's buffer -- unlike the *extracted index list*
+  // (a local variable in Backtrack, not scratch state), this bitset itself
+  // never needs to survive across a recursive call.
+  mutable std::vector<WordBitset> candidate_scratch_by_length_;
 
   // Restart-related state, all reset at the top of each attempt inside
   // Solve()'s retry loop (see the class comment above for the design this

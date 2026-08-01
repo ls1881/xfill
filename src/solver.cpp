@@ -35,10 +35,13 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
   }
   filter_scratch_by_length_.resize(static_cast<size_t>(max_length_) + 1);
   nogood_forbidden_scratch_by_length_.resize(static_cast<size_t>(max_length_) + 1);
+  candidate_scratch_by_length_.resize(static_cast<size_t>(max_length_) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
     filter_scratch_by_length_[static_cast<size_t>(length)] =
         WordBitset(dict_.NumWordsOfLength(length), false);
     nogood_forbidden_scratch_by_length_[static_cast<size_t>(length)] =
+        WordBitset(dict_.NumWordsOfLength(length), false);
+    candidate_scratch_by_length_[static_cast<size_t>(length)] =
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
   in_queue_scratch_.assign(grid_.slots().size(), false);
@@ -488,11 +491,12 @@ int Solver::ActiveComponent() const {
 int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
                               const std::vector<WordBitset>& used_by_length,
                               const std::vector<bool>& assigned,
-                              const CrossingWeights& crossing_weights) const {
+                              const CrossingWeights& crossing_weights,
+                              size_t* out_domain_count) const {
   int active = ActiveComponent();
   if (active == -1) return -1;
 
-  std::vector<std::pair<float, int>>& candidates = branch_candidates_scratch_;
+  std::vector<std::tuple<float, int, size_t>>& candidates = branch_candidates_scratch_;
   candidates.clear();
 
   for (int sid : slots_by_component_[static_cast<size_t>(active)]) {
@@ -506,7 +510,7 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
         used_by_length[static_cast<size_t>(slot_length_[static_cast<size_t>(sid)])]);
 
     float weight = SlotWeight(sid, crossing_weights, assigned);
-    candidates.push_back({static_cast<float>(count) / weight, sid});
+    candidates.push_back({static_cast<float>(count) / weight, sid, count});
   }
   if (candidates.empty()) return -1;
 
@@ -521,7 +525,10 @@ int Solver::SelectBranchSlot(const std::vector<WordBitset>& domains,
   std::discrete_distribution<size_t> dist(
       kRandomSlotWeights.begin(),
       kRandomSlotWeights.begin() + static_cast<long>(top_n));
-  return candidates[dist(rng_)].second;
+  const auto& [priority, chosen_slot, chosen_count] = candidates[dist(rng_)];
+  (void)priority;
+  if (out_domain_count != nullptr) *out_domain_count = chosen_count;
+  return chosen_slot;
 }
 
 bool Solver::Assign(int slot, size_t word_index,
@@ -642,39 +649,51 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     return std::nullopt;
   }
 
-  int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights);
+  size_t domain_count = 0;
+  int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights,
+                               &domain_count);
   if (slot == -1) {
     return ExtractSolution(domains);
   }
 
   int length = slot_length_[static_cast<size_t>(slot)];
-  // Test membership against domains[slot] and used_by_length separately
-  // instead of copying the domain to AndNot() it first: ScoreOrder(length)
-  // spans the whole dictionary at that length, and this loop runs once
-  // per node, so the avoided allocation (and the O(chunks) AndNot pass it
-  // replaces) adds up -- most candidates fail the first (domain) test
-  // immediately, so the second test is rarely even reached.
   const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
-  const WordBitset& used = used_by_length[static_cast<size_t>(length)];
+
   // Words already proven, by an earlier restart's fully-exhausted search,
   // to be a dead end given exactly the current ancestor assignment -- skip
   // them without re-deriving the same failure again. nullptr (the common
   // case: no recorded nogood even mentions this slot) costs one hash
-  // lookup and nothing else.
+  // lookup and nothing else. NogoodForbiddenWords returns a pointer into
+  // per-length *scratch* state (nogood_forbidden_scratch_by_length_),
+  // reused across calls -- safe to read here, but NOT safe to hold onto
+  // across the loop below, which recurses back into Backtrack: a
+  // descendant call for a different slot of the same length would call
+  // NogoodForbiddenWords again and silently overwrite the very buffer this
+  // pointer refers to, corrupting an ancestor frame's still-in-progress
+  // iteration. So it's merged into a local copy immediately instead of
+  // kept as a pointer -- one WordBitset copy+OR, paid only on the (past
+  // the first attempt) uncommon path where a nogood actually applies here.
   const WordBitset* nogood_forbidden = NogoodForbiddenWords(slot, domains, assigned);
+  WordBitset combined_used_storage;
+  const WordBitset* used = &used_by_length[static_cast<size_t>(length)];
+  if (nogood_forbidden != nullptr) {
+    combined_used_storage = *used;
+    combined_used_storage |= *nogood_forbidden;
+    used = &combined_used_storage;
+  }
 
   // Try higher-quality words first so a valid fill reads like a real
   // crossword rather than the first alphabetically-consistent candidate.
   // Deliberately not randomized (unlike slot choice above) -- see the
   // class comment in solver.hpp.
-  for (size_t idx : dict_.ScoreOrder(length)) {
-    if (!slot_domain.Test(idx) || used.Test(idx)) continue;
-    if (nogood_forbidden != nullptr && nogood_forbidden->Test(idx)) continue;
+  //
+  // Shared body for both candidate-iteration paths below: assign, recurse,
+  // undo, and report whether this attempt aborted (stop trying siblings)
+  // or a solution was found (unwind immediately).
+  auto try_candidate = [&](size_t idx) -> std::optional<Solution> {
     stats_.nodes++;
-
     size_t domain_mark = trail.domains.size();
     size_t used_mark = trail.used.size();
-
     if (Assign(slot, idx, domains, used_by_length, assigned, trail,
                crossing_weights)) {
       auto result = Backtrack(domains, used_by_length, assigned, trail,
@@ -682,12 +701,66 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
       if (result) return result;
     }
     Undo(slot, domains, used_by_length, assigned, trail, domain_mark, used_mark);
+    return std::nullopt;
+  };
 
-    // A deeper call may have aborted this whole attempt (backtrack budget
-    // exceeded) rather than genuinely exhausting its options -- stop
-    // trying sibling candidates and unwind immediately instead of
-    // continuing to search a doomed attempt.
-    if (aborted_) return std::nullopt;
+  // dict_.ScoreOrder(length) spans every word of this length, so walking it
+  // costs O(NumWordsOfLength) regardless of how narrow the domain actually
+  // is -- fine when most words are live candidates, wasteful once deep
+  // search has narrowed the domain to a handful out of a dictionary length
+  // group that can run into the thousands (short slots especially).
+  // `domain_count` -- reused from SelectBranchSlot above, not recomputed
+  // here, since a second CountAndNot pass on every single branching node
+  // (most of which take the plain scan below anyway) would cost more than
+  // this fast path saves -- upper-bounds the true candidate count (it
+  // predates nogood_forbidden's own narrowing, if any; a safe direction to
+  // be wrong, since AppendSetBits' max_bits below only ever needs to be
+  // *at least* the real count). Below the threshold it's cheaper to
+  // extract just those candidates and sort that small set by score than to
+  // filter the whole dictionary length group. 1000 was picked the same way
+  // as Propagate's kDirectLookupThreshold: re-running
+  // benchmarks/bench_subset.py (single-threaded, for a noise-free reading
+  // -- see --threads there) at 200/1000/4000 and taking the plateau (200:
+  // -1.2%, 1000: -3.0%, 4000: -2.9%, all vs. the pre-this-change baseline,
+  // averaged over 3 seeds).
+  constexpr size_t kCandidateDirectThreshold = 1000;
+
+  if (domain_count <= kCandidateDirectThreshold) {
+    // Shared scratch is safe here (unlike the pointer above): this frame
+    // only ever reads `candidates` while building `ordered_candidates`,
+    // entirely before the loop -- and thus before any recursive call that
+    // could reuse this same length's buffer -- below starts.
+    WordBitset& candidates =
+        candidate_scratch_by_length_[static_cast<size_t>(length)];
+    candidates = slot_domain;
+    candidates.AndNotAssign(*used);
+
+    // A local vector, not a reused scratch member: this list, unlike
+    // `candidates` above, has to survive across the recursive calls in the
+    // loop below, so a shared buffer would get clobbered by a same-length
+    // descendant the same way the nogood pointer above did.
+    std::vector<size_t> ordered_candidates;
+    ordered_candidates.reserve(domain_count);
+    candidates.AppendSetBits(ordered_candidates, domain_count);
+    std::sort(ordered_candidates.begin(), ordered_candidates.end(),
+              [this, length](size_t a, size_t b) {
+                return dict_.ScoreRank(length, a) < dict_.ScoreRank(length, b);
+              });
+
+    for (size_t idx : ordered_candidates) {
+      if (auto result = try_candidate(idx)) return result;
+      // A deeper call may have aborted this whole attempt (backtrack
+      // budget exceeded) rather than genuinely exhausting its options --
+      // stop trying sibling candidates and unwind immediately instead of
+      // continuing to search a doomed attempt.
+      if (aborted_) return std::nullopt;
+    }
+  } else {
+    for (size_t idx : dict_.ScoreOrder(length)) {
+      if (!slot_domain.Test(idx) || used->Test(idx)) continue;
+      if (auto result = try_candidate(idx)) return result;
+      if (aborted_) return std::nullopt;
+    }
   }
 
   stats_.backtracks++;

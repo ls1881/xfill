@@ -80,6 +80,7 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
   dict.scores_by_length_.resize(num_lengths);
   dict.letter_masks_.resize(num_lengths);
   dict.score_order_by_length_.resize(num_lengths);
+  dict.score_rank_by_length_.resize(num_lengths);
 
   for (auto& [length, words] : words_by_length) {
     dict.words_by_length_[static_cast<size_t>(length)] = std::move(words);
@@ -122,6 +123,9 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
     std::stable_sort(order.begin(), order.end(), [&scores](size_t a, size_t b) {
       return scores[a] > scores[b];
     });
+    std::vector<size_t> rank(order.size());
+    for (size_t pos = 0; pos < order.size(); ++pos) rank[order[pos]] = pos;
+    dict.score_rank_by_length_[static_cast<size_t>(length)] = std::move(rank);
     dict.score_order_by_length_[static_cast<size_t>(length)] = std::move(order);
   }
 

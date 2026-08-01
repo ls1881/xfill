@@ -72,7 +72,13 @@ reasoning and citations behind each piece, see
    slot always tries higher dictionary-score words first (`ScoreOrder`),
    so a fill reads like a real crossword instead of the first
    alphabetically-valid guess. (Source: `rf-/ingrid_core`, crediting
-   Balafoutis's "Adaptive Strategies for Solving CSPs".)
+   Balafoutis's "Adaptive Strategies for Solving CSPs".) Below a
+   candidate-count threshold, the live candidates are extracted directly
+   and sorted by a precomputed score rank instead of walking every word of
+   that length checking membership — the same "direct extraction below a
+   threshold" split step 2 uses for letter viability, applied here to word
+   selection; see `docs/design.md` for the measured effect and a
+   correctness bug this surfaced and fixed along the way.
 
 4. **Backtracking.** Trail-based: assigning a slot snapshots only the
    domains that assignment actually touches (once per decision level),
