@@ -23,6 +23,27 @@ constexpr size_t kRandomTopN = 3;
 constexpr std::array<int, kRandomTopN> kRandomSlotWeights = {4, 2, 1};
 constexpr uint64_t kInitialBacktrackLimit = 500;
 constexpr float kRetryGrowthFactor = 1.1f;
+
+// How many restarts must already have happened before Backtrack's
+// large-domain branch starts shuffling word candidates instead of using
+// dict_.ScoreOrder's strict best-first order (see the class comment's
+// "restart" section in solver.hpp). Every one of this dictionary's word
+// lengths has well over 1000 candidates (see docs/design.md), so a fresh
+// slot's *first* branch in any component -- on any grid, not just a
+// wide-open one -- routinely starts in that large-domain branch: gating
+// purely on domain size (an earlier version of this fix) still shuffled on
+// essentially every restart of every grid, and regressed grid_328.txt from
+// solved in 0.83s to a 20s timeout. Restart *count* is a much better signal
+// for "genuinely stuck, diversify harder": grid_328.txt/grid_053.txt/
+// grid_058.txt (all in the benchmark corpus) solve within 3-17 restarts on
+// the unmodified solver, while the motivating wide-open 7x7 case needed
+// dozens. 20 sits comfortably above the former and well before the latter.
+//
+// Only applies to attempt_offset_ == 0 (worker 0, or a plain single-
+// threaded Solve() call) -- see attempt_offset_'s comment in solver.hpp for
+// why every other SolveParallel worker skips this gate and shuffles from
+// its own local attempt 0.
+constexpr uint64_t kWordShuffleRestartThreshold = 20;
 }  // namespace
 
 Solver::Solver(const Grid& grid, const Dictionary& dict)
@@ -86,11 +107,24 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
 }
 
 std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
-                                       const std::atomic<bool>* cancel) {
+                                       const std::atomic<bool>* cancel,
+                                       bool unlimited_budget) {
   cancel_ = cancel;
+  attempt_offset_ = attempt_offset;
   std::vector<WordBitset> domains(grid_.slots().size());
   for (const Slot& slot : grid_.slots()) {
-    domains[static_cast<size_t>(slot.id)] = dict_.FullDomain(slot.length);
+    WordBitset& domain = domains[static_cast<size_t>(slot.id)];
+    domain = dict_.FullDomain(slot.length);
+    // Seeded/pre-filled cells (see Grid::FromSpec) narrow this slot's
+    // domain before propagation or search ever runs, the same way a
+    // crossing constraint would once a neighbor is assigned -- just
+    // known up front instead of discovered mid-search.
+    for (size_t k = 0; k < slot.cells.size(); ++k) {
+      char letter = grid_.PrefilledLetter(slot.cells[k]);
+      if (letter != '\0') {
+        domain &= dict_.LetterMask(slot.length, static_cast<int>(k), letter);
+      }
+    }
   }
 
   // Catch domains that start empty (e.g. no dictionary word of that
@@ -136,7 +170,22 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
   // attempt that exhausts the search space *without* hitting the limit is
   // definitive -- solved or genuinely unsatisfiable -- so only that case
   // returns from the loop.
-  attempt_backtrack_limit_ = kInitialBacktrackLimit;
+  //
+  // `unlimited_budget`: never restart at all -- attempt 0 just keeps
+  // going, however long it takes, until it's genuinely exhaustive.
+  // EXPERIMENTAL: restarts trade a guarantee of eventual completion for
+  // expected-case speed (Gomes/Selman/Kautz's heavy-tailed-runtime
+  // argument), which is the right trade for *finding* a solution fast but
+  // the wrong one for *proving none exists* -- each restart discards
+  // almost all of that attempt's progress toward a genuinely exhaustive
+  // pass, and grid_072.txt/grid_217.txt (real, scraped, actually
+  // unsatisfiable at min_score=40) showed this directly: neither ever
+  // completed one in 90 minutes of nothing but restarting. A single
+  // uninterrupted DFS is still complete either way, just with less
+  // variance and no risk of restart-thrashing forever short of a genuine
+  // exhaustive pass.
+  attempt_backtrack_limit_ =
+      unlimited_budget ? std::numeric_limits<uint64_t>::max() : kInitialBacktrackLimit;
   for (uint64_t attempt = 0;; ++attempt) {
     // Checked here too (not just in Backtrack, once per node) so a
     // worker that's cancelled between attempts doesn't even start
@@ -178,10 +227,18 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
                 << " total_backtracks=" << stats_.backtracks
                 << " next_limit=" << attempt_backtrack_limit_ << "\n";
     }
-    attempt_backtrack_limit_ = std::max<uint64_t>(
-        attempt_backtrack_limit_ + 1,
-        static_cast<uint64_t>(static_cast<float>(attempt_backtrack_limit_) *
-                               kRetryGrowthFactor));
+    // A float->uint64_t cast is undefined behavior once the float value
+    // exceeds uint64_t's representable range (confirmed via UBSan: a test
+    // with a trivially small search space can restart often enough,
+    // rapidly enough, for kRetryGrowthFactor's geometric growth to reach
+    // that range well within a test run). No real search benefits from a
+    // budget anywhere near UINT64_MAX backtracks anyway -- clamp instead
+    // of letting the cast overflow.
+    float grown = static_cast<float>(attempt_backtrack_limit_) * kRetryGrowthFactor;
+    uint64_t grown_limit = grown >= static_cast<float>(std::numeric_limits<uint64_t>::max())
+                                ? std::numeric_limits<uint64_t>::max()
+                                : static_cast<uint64_t>(grown);
+    attempt_backtrack_limit_ = std::max<uint64_t>(attempt_backtrack_limit_ + 1, grown_limit);
   }
 }
 
@@ -204,6 +261,39 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
     solvers.push_back(std::make_unique<Solver>(grid, dict));
   }
 
+  // See SharedCrossingWeights' comment in solver.hpp: one instance shared
+  // by every *restart-based* worker, so a crossing several of them
+  // independently struggle with gets deprioritized everywhere, not just
+  // in whichever worker hit it first. Wired in before any thread starts
+  // (never touched again by this function itself), so there's nothing to
+  // synchronize about the pointer assignment below -- only the counts
+  // inside it are ever written concurrently, and those are already
+  // atomic. Gated on num_threads > 1, same as unlimited_budget below and
+  // for the same reason: a lone worker has nobody to share with, and
+  // wiring it up anyway would perturb SlotWeight's sum (an extra
+  // +get(id)-1.0f term on every crossing) even with a single writer,
+  // breaking the num_threads=1 reproducibility `bench_subset.py
+  // --threads 1` and this project's other single-threaded comparisons
+  // depend on.
+  //
+  // The dedicated unlimited_budget worker (the last one, see below) is
+  // deliberately excluded: its whole value is a single, uninterrupted
+  // trajectory that's guaranteed to eventually reach a genuine exhaustive
+  // conclusion, with no restart to recover from a bad branch. Confirmed
+  // directly this costs it real cases: wiring it in regressed
+  // `grid_115.txt` from reliably solved (~6-7s via this exact worker) to
+  // consistently timing out, across repeated runs -- the restart-based
+  // workers' own experience, however genuinely troublesome for *their*
+  // randomized paths, isn't necessarily relevant to this worker's
+  // deterministic-ish one, and unlike them it has no restart to shake off
+  // a bad nudge if it turns out not to be.
+  SharedCrossingWeights shared_crossing_weights(grid.crossings().size());
+  if (num_threads > 1) {
+    for (unsigned i = 0; i + 1 < num_threads; ++i) {
+      solvers[i]->shared_crossing_weights_ = &shared_crossing_weights;
+    }
+  }
+
   std::atomic<bool> cancel{false};
   std::mutex result_mutex;
   std::optional<Solution> winning_solution;
@@ -218,20 +308,50 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
   std::vector<std::thread> threads;
   threads.reserve(num_threads);
   for (unsigned i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&, i]() {
-      auto solution = solvers[i]->Solve(static_cast<uint64_t>(i) * kAttemptStride, &cancel);
-      if (!solution) return;
-      // First solution to arrive here wins; cancel tells every other
-      // worker to unwind (checked once per node in Backtrack). A loser
-      // of this race still has a genuine solution, just not the one
-      // reported -- any solution is as good as any other, so it's
-      // simply discarded rather than compared.
+    // Dedicate exactly one worker (the last one, whenever there's more
+    // than one to spare) to unlimited_budget: a single continuous DFS
+    // that never restarts, trading the other workers' restart-based
+    // expected-case speedup for a guarantee of eventually reaching a
+    // genuine exhaustive conclusion (see Solve()'s unlimited_budget doc
+    // comment). Real, scraped grids exist (grid_072.txt, grid_217.txt)
+    // that no number of purely restart-based workers resolved in 90
+    // minutes of `SolveParallel` -- confirmed directly: a standalone
+    // unlimited_budget run on grid_072.txt proved it exhaustively
+    // UNSAT in 84 minutes with zero restarts, something the restart
+    // portfolio alone never achieved on either grid. `num_threads > 1`
+    // keeps a plain 1-thread call reproducing today's exact
+    // single-threaded sequence (see the "SolveParallel with 1 thread"
+    // test), rather than silently changing its meaning.
+    bool unlimited_budget = num_threads > 1 && i == num_threads - 1;
+    threads.emplace_back([&, i, unlimited_budget]() {
+      auto solution = solvers[i]->Solve(static_cast<uint64_t>(i) * kAttemptStride,
+                                         &cancel, unlimited_budget);
       bool expected = false;
-      if (cancel.compare_exchange_strong(expected, true)) {
-        std::lock_guard<std::mutex> lock(result_mutex);
-        winning_solution = std::move(solution);
-        winning_stats = solvers[i]->stats();
+      if (solution) {
+        // First solution to arrive here wins; cancel tells every other
+        // worker to unwind (checked once per node in Backtrack). A loser
+        // of this race still has a genuine solution, just not the one
+        // reported -- any solution is as good as any other, so it's
+        // simply discarded rather than compared.
+        if (cancel.compare_exchange_strong(expected, true)) {
+          std::lock_guard<std::mutex> lock(result_mutex);
+          winning_solution = std::move(solution);
+          winning_stats = solvers[i]->stats();
+        }
+        return;
       }
+      // A nullopt *not* itself forced by another worker's cancellation
+      // (the CAS below only succeeds the first time this happens) is a
+      // genuine, sound proof this grid has no solution: every worker's
+      // last attempt -- restart-based or unlimited_budget -- is a
+      // complete, uninterrupted DFS from the same root-propagated
+      // domains, so any one of them reaching that terminal state without
+      // being cut short settles the question for the whole grid. No
+      // need to wait for every other worker to separately rediscover the
+      // same fact -- the real payoff on a grid like grid_072.txt, where
+      // restart-based workers can run for 90+ minutes without ever
+      // reaching it on their own.
+      cancel.compare_exchange_strong(expected, true);
     });
   }
   for (std::thread& t : threads) t.join();
@@ -431,6 +551,9 @@ bool Solver::Propagate(std::vector<WordBitset>& domains,
       size_t new_count = neighbor_domain.AndAssignCount(filter);
       if (new_count == 0) {
         crossing_weights.Bump(sc.crossing_id);
+        if (shared_crossing_weights_ != nullptr) {
+          shared_crossing_weights_->Bump(sc.crossing_id);
+        }
         for (int t : touched) in_queue[static_cast<size_t>(t)] = false;
         return false;
       }
@@ -475,7 +598,15 @@ float Solver::SlotWeight(int slot, const CrossingWeights& crossing_weights,
   float total = 0.0f;
   for (const SlotCrossing& sc : crossings_by_slot_[static_cast<size_t>(slot)]) {
     if (!assigned[static_cast<size_t>(sc.neighbor)]) {
-      total += crossing_weights.Get(sc.crossing_id);
+      float w = crossing_weights.Get(sc.crossing_id);
+      // Both Get()s share the same baseline (1.0f means "never bumped"),
+      // so adding them raw would double-count it -- subtract one copy.
+      // Null for a plain single-threaded call (see shared_crossing_weights_'s
+      // comment in solver.hpp), so this is a no-op then.
+      if (shared_crossing_weights_ != nullptr) {
+        w += shared_crossing_weights_->Get(sc.crossing_id) - 1.0f;
+      }
+      total += w;
     }
   }
   return total > 0.0f ? total : 1.0f;
@@ -656,6 +787,14 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     return ExtractSolution(domains);
   }
 
+  // See kWordShuffleRestartThreshold: word-choice shuffling (the large-
+  // domain branch below) only kicks in once plain slot-choice
+  // randomization has already had a real chance to escape a stuck attempt
+  // and hasn't -- not on every restart, which would touch essentially
+  // every grid's very first branch decision.
+  bool shuffle_words = randomize_slot_choice_ &&
+                        (attempt_offset_ > 0 || stats_.restarts >= kWordShuffleRestartThreshold);
+
   int length = slot_length_[static_cast<size_t>(slot)];
   const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
 
@@ -742,10 +881,33 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     std::vector<size_t> ordered_candidates;
     ordered_candidates.reserve(domain_count);
     candidates.AppendSetBits(ordered_candidates, domain_count);
-    std::sort(ordered_candidates.begin(), ordered_candidates.end(),
-              [this, length](size_t a, size_t b) {
-                return dict_.ScoreRank(length, a) < dict_.ScoreRank(length, b);
-              });
+    // Gated on the *same* shuffle_words flag as the large-domain branch
+    // below, not unconditional -- an unconditional version of this
+    // regressed grid_328.txt from solved in 0.83s to a 20s timeout (see
+    // docs/design.md), because that grid never needed more than 3
+    // restarts and so never needed diversity here either. But gating this
+    // branch on shuffle_words specifically (not skipping it, as an
+    // earlier version of this fix did) turned out to matter: direct
+    // instrumentation on a real wide-open 7x7 grid (Hawksley's, no black
+    // squares) showed its live domains stay at or below
+    // kCandidateDirectThreshold for effectively the *entire* search --
+    // the large-domain branch below never fires at all -- so scoping word
+    // shuffling to only that branch left this grid's actual search path
+    // exactly as deterministic and stuck as the unmodified solver's,
+    // despite this project believing otherwise for a while. The
+    // restart-count/worker-offset gate in shuffle_words already protects
+    // grid_328.txt-like grids (few restarts needed, shuffle_words stays
+    // false for their whole solve) while still kicking in here for a
+    // grid that's demonstrably still stuck after many restarts, wherever
+    // its actual domains happen to live.
+    if (shuffle_words) {
+      std::shuffle(ordered_candidates.begin(), ordered_candidates.end(), rng_);
+    } else {
+      std::sort(ordered_candidates.begin(), ordered_candidates.end(),
+                [this, length](size_t a, size_t b) {
+                  return dict_.ScoreRank(length, a) < dict_.ScoreRank(length, b);
+                });
+    }
 
     for (size_t idx : ordered_candidates) {
       if (auto result = try_candidate(idx)) return result;
@@ -753,6 +915,36 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
       // budget exceeded) rather than genuinely exhausting its options --
       // stop trying sibling candidates and unwind immediately instead of
       // continuing to search a doomed attempt.
+      if (aborted_) return std::nullopt;
+    }
+  } else if (shuffle_words) {
+    // On a restart, when this slot's live domain is too large for the
+    // direct-lookup branch above (thousands of candidates -- the regime a
+    // wide-open, weakly-constrained grid produces), shuffle instead of
+    // taking dict_.ScoreOrder(length)'s strict best-first order. See the
+    // class comment's "restart" section: a slot's true solution word isn't
+    // necessarily top-scored, and strict best-first order meant *every*
+    // restart re-tried the same top-ranked words before ever reaching
+    // whatever word the real solution needed -- slot-choice diversity
+    // alone couldn't route around that, since word order at any slot was
+    // identical across all restarts. See docs/design.md, "Word-choice
+    // randomization on restarts", for the full derivation and the
+    // rejected cell-level-branching alternative: letter-at-a-time
+    // branching (mirroring orca's own architecture) was a genuine, clean
+    // win on the general 15x15 benchmark corpus, but consistently
+    // underperformed this simpler word-level shuffle on the specific
+    // motivating case (a real 7x7 with no black squares) across several
+    // independent, controlled comparisons -- reverted in favor of this,
+    // since meeting that concrete goal mattered more than the broader
+    // (but here counterproductive) architectural change.
+    std::vector<size_t> candidates;
+    candidates.reserve(domain_count);
+    for (size_t idx : dict_.ScoreOrder(length)) {
+      if (slot_domain.Test(idx) && !used->Test(idx)) candidates.push_back(idx);
+    }
+    std::shuffle(candidates.begin(), candidates.end(), rng_);
+    for (size_t idx : candidates) {
+      if (auto result = try_candidate(idx)) return result;
       if (aborted_) return std::nullopt;
     }
   } else {

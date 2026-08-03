@@ -137,12 +137,31 @@ struct ParallelSolveResult {
 // to escape a demonstrably-stuck search, not to second-guess a search that
 // hasn't shown any trouble yet.
 //
-// Word *candidate* choice within a slot deliberately stays plain
-// ScoreOrder iteration, never randomized -- ingrid_core also randomizes
-// word choice (RANDOM_WORD_WEIGHTS), but doing that here would fight this
-// project's explicit score-quality-first goal (see the "prefers the
-// higher-scored word" test) by sometimes trying a worse-scored word before
-// a better one is exhausted. ingrid_core's adaptive-branching "stickiness"
+// Word *candidate* choice within a slot stays plain, deterministic
+// ScoreOrder iteration in nearly every case, except one specific, narrow
+// one: once at least kWordShuffleRestartThreshold restarts have already
+// happened (real desperation, not just "this is a restart"), a branch
+// slot whose live domain is too large for Backtrack's direct-lookup path
+// (thousands of candidates) gets its word order shuffled instead. This was
+// added after benchmarking a real wide-open 7x7 grid (see docs/design.md,
+// "Word-choice randomization on restarts"): the true solution isn't
+// necessarily built from top-score words at every slot, and strict
+// best-first order meant *every* restart re-tried the same top-ranked
+// words before ever reaching whatever word the real solution needed --
+// slot-choice diversity alone couldn't route around that, since word order
+// at any slot was identical across all restarts. Two narrower gates were
+// tried and rejected first: shuffling on every restart regressed
+// grid_328.txt from solved in 0.83s to a 20s timeout, and gating purely on
+// domain size didn't help either -- every one of this dictionary's word
+// lengths has well over 1000 candidates, so a slot's very *first* branch in
+// a component routinely starts in the large-domain branch on any grid, not
+// just a wide-open one. Restart *count* is what actually distinguishes the
+// two cases: grid_328.txt (and other real corpus grids) solve within a
+// couple dozen restarts at most on the unmodified solver, while the
+// motivating wide-open case needed dozens more than that -- so the
+// threshold sits comfortably above ordinary restart counts and well before
+// where a genuinely stuck search would reach it. ingrid_core's
+// adaptive-branching "stickiness"
 // (stay on the previous slot if it's still nearly-best, to avoid
 // thrashing between near-tied slots) is also not ported: it's meaningful
 // in ingrid_core's iterative loop, where a slot can remain the current
@@ -180,15 +199,25 @@ class Solver {
   // valid solution found, or nullopt if none exists (or if `cancel` is
   // set by another thread first -- see SolveParallel, which is what
   // actually needs these two parameters; a single-threaded caller can
-  // ignore both).
+  // ignore both). `unlimited_budget`: never restart -- run attempt 0 to
+  // genuine completion no matter how long it takes, trading the usual
+  // restart-based expected-case speedup for a guarantee of eventually
+  // reaching a real exhaustive conclusion. See SolveParallel and
+  // docs/design.md.
   std::optional<Solution> Solve(uint64_t attempt_offset = 0,
-                                 const std::atomic<bool>* cancel = nullptr);
+                                 const std::atomic<bool>* cancel = nullptr,
+                                 bool unlimited_budget = false);
 
   // Runs num_threads independent Solve() calls concurrently (0 means
   // std::thread::hardware_concurrency(), falling back to 1 if that can't
   // be determined) and returns as soon as any of them finds a solution,
-  // or once all of them have independently proven there isn't one. See
-  // the class comment above for the design.
+  // or once any one of them has independently, genuinely proven there
+  // isn't one (which cancels the rest -- see solver.cpp). One worker
+  // (whenever there's more than one) runs with unlimited_budget instead
+  // of the usual restart portfolio, so the overall call is still
+  // guaranteed to reach a real exhaustive conclusion even on a grid
+  // where restart-based search alone never does. See the class comment
+  // above for the design.
   static ParallelSolveResult SolveParallel(const Grid& grid, const Dictionary& dict,
                                             unsigned num_threads = 0);
 
@@ -299,6 +328,49 @@ class Solver {
 
     std::vector<float> offset;
     float scale = 1.0f;
+  };
+
+  // A second, optional crossing-trouble signal shared *across*
+  // SolveParallel's workers, on top of (never instead of) each worker's
+  // own private CrossingWeights above. Each worker learns its own
+  // recency-weighted picture of which crossings have been troublesome
+  // *for its own search trajectory* -- but with N independent workers
+  // restarting independently, worker A's dead ends never inform worker
+  // B's branching, even though the underlying grid/dictionary constraint
+  // structure a crossing is troublesome *because of* is the same for
+  // everyone. This aggregates that: every worker bumps the same shared
+  // counter on every wipeout, and every worker's SlotWeight reads it
+  // too, so a crossing several workers have all struggled with gets
+  // deprioritized everywhere, not just in whichever worker happened to
+  // hit it.
+  //
+  // Deliberately simpler than CrossingWeights' lazy-decay scheme: that
+  // scheme's shared `scale` divisor makes every Bump() depend on every
+  // prior Bump()'s exact value, which is only race-free with a single
+  // writer. A shared, concurrently-written signal needs each crossing's
+  // update to be independent of every other crossing's and of update
+  // order -- a plain atomic increment. This also drops recency-weighting
+  // for the shared signal specifically: it aggregates the whole
+  // portfolio's *cumulative* experience over one bounded run rather than
+  // one search's own evolving trajectory, so decay matters less here
+  // than it does for the per-worker signal above. Bump/Get are relaxed
+  // (this is a heuristic tie-breaker, not a correctness-critical value —
+  // a torn or stale read only ever picks a slightly worse branch order,
+  // never an incorrect result), so this adds one relaxed atomic
+  // load/increment to the existing hot path, not a lock.
+  struct SharedCrossingWeights {
+    explicit SharedCrossingWeights(size_t n) : counts(n) {}
+
+    float Get(int id) const {
+      return 1.0f + static_cast<float>(
+                        counts[static_cast<size_t>(id)].load(std::memory_order_relaxed));
+    }
+
+    void Bump(int culprit) {
+      counts[static_cast<size_t>(culprit)].fetch_add(1, std::memory_order_relaxed);
+    }
+
+    std::vector<std::atomic<uint32_t>> counts;
   };
 
   // Saves `domains[slot]` onto the trail, but only if it hasn't already
@@ -576,6 +648,20 @@ class Solver {
   mutable std::mt19937_64 rng_{0};
   uint64_t attempt_backtracks_ = 0;
   uint64_t attempt_backtrack_limit_ = 0;
+  // This call's attempt_offset argument, stashed for Backtrack's
+  // kWordShuffleRestartThreshold gate: a SolveParallel worker with a
+  // nonzero offset is already diversifying from its own local attempt 0
+  // (see Solve()'s global_attempt), so it can start word-shuffling
+  // immediately too, rather than needing kWordShuffleRestartThreshold
+  // *local* restarts of its own first -- see solver.cpp for why gating
+  // every worker on its own local restart count wastes the portfolio's
+  // parallelism during exactly the phase that matters (every worker
+  // burning through the same guaranteed-unproductive warm-up together
+  // instead of the non-first workers exploring shuffled orders from the
+  // start). Worker 0 (offset 0, single-threaded-equivalent) still needs
+  // the restart-count gate, since that's the sequence this project's
+  // existing benchmarks were tuned and regression-tested against.
+  uint64_t attempt_offset_ = 0;
   bool aborted_ = false;
   // Set for the duration of one Solve() call from that call's `cancel`
   // parameter (null for an ordinary single-threaded call). Checked in
@@ -583,6 +669,13 @@ class Solver {
   // workers use this to unwind promptly once one of them finds a
   // solution, without any synchronization inside the search itself.
   const std::atomic<bool>* cancel_ = nullptr;
+  // Set only by SolveParallel, before launching any worker threads (see
+  // SharedCrossingWeights' comment above): every worker's SlotWeight adds
+  // this shared signal on top of its own private crossing_weights, and
+  // every wipeout bumps both. Null (the default) for a plain
+  // single-threaded Solve() call, which then behaves exactly as it
+  // always has -- this is strictly additive, not a replacement.
+  SharedCrossingWeights* shared_crossing_weights_ = nullptr;
   // Whether SelectBranchSlot should weighted-randomly pick among the top
   // few slots (true on restarts) or deterministically take the single
   // best one (false on the first attempt). Benchmarking showed always

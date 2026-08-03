@@ -497,10 +497,16 @@ The solver aims to either find a valid fill or prove none exists
   other worker gets a distinct, non-overlapping attempt-number range so
   its own attempt 0 is *already* randomized -- otherwise it would just
   redo worker 0's identical deterministic pass for free, wasting an
-  entire thread. Still complete: `SolveParallel` only reports
-  unsatisfiable once every worker has independently, genuinely exhausted
-  its own search (none merely cancelled), which reduces directly to
-  `Solve()`'s own already-established completeness, run N times.
+  entire thread. Still complete: every worker's cancellation flag check
+  only ever short-circuits its *own* search, never invents a result, so
+  any worker that returns "no solution" without itself having been
+  cancelled has done so via a genuine, exhaustive search from the same
+  root-propagated domains every worker starts from -- reducing directly
+  to `Solve()`'s own already-established completeness. (Originally this
+  meant waiting for literally every worker to reach that state before
+  reporting UNSAT; see "Tried and kept: unlimited_budget in
+  SolveParallel" below for why that changed to cancelling the rest as
+  soon as *any one* worker gets there.)
 
   Verified sound before measuring speed at all: the existing 15-test
   suite continues to pass through `Solve()`'s unchanged default
@@ -578,6 +584,450 @@ The solver aims to either find a valid fill or prove none exists
   directionally consistent with the mechanism, not close enough to be
   worth chasing with retuning (e.g. a shorter head start would just
   shrink both effects, not resolve the tension between them).
+
+  **Tried and reverted: adaptive search-space partitioning.** Prompted by
+  a head-to-head benchmark against two other crossword-fill engines this
+  project has drawn on (`rf-/ingrid_core`, `rainjacket/orca-solver` --
+  see docs/bibliography.md; neither's code or repo history was copied
+  into this project, only build-from-source comparisons run outside it):
+  orca-solver's 14-way parallel mode solved two grids (`grid_120.txt`,
+  `grid_303.txt`) from the real 30-grid sample that `SolveParallel`
+  couldn't touch even single-threaded, though at a real cost of its own
+  -- orca's parallel numbers otherwise cluster near a ~3-second floor
+  even on grids solved in milliseconds elsewhere, an artifact of its
+  default 3-second partition-split-timeout, not real search cost. Orca's
+  parallelism divides the search space itself across threads
+  (partition-based) rather than racing independent full-space random
+  restarts the way `SolveParallel` does -- a genuinely different lever:
+  restarts help when one worker's own bad luck is the problem (a
+  *different* seed sails through), partitioning helps when every seed
+  struggles about equally because the space itself is wide, not because
+  any one of them got unlucky.
+
+  First tried as a cheap upfront heuristic -- guess from grid structure,
+  before searching at all, whether a grid needs partitioning. Checked
+  three linear-time candidate signals (the root branch slot's domain size
+  after propagation, total domain size summed across all slots, grid
+  open/blocked cell ratio) against the two grids known to need
+  partitioning versus two known to be fine with restarts alone
+  (`grid_053.txt`, `grid_328.txt`) versus trivially-easy ones. None
+  separated the categories at all -- e.g. `grid_013.txt` (solves in
+  milliseconds) and `grid_120.txt` (needs partitioning) have the *exact
+  same* open-cell ratio, and `grid_048.txt`/`grid_303.txt` share the
+  identical root-domain value despite opposite categories. Real published
+  15x15 grids are all built to roughly the same density (house style for
+  a publishable crossword), so grid-level structural stats barely vary
+  across the whole corpus -- consistent with what this project already
+  cites from Anbulagan & Botea: instance hardness is intrinsic to specific
+  letter-pattern interactions, not predictable from surface structure.
+
+  Rebuilt around an *adaptive* signal instead: a handful of scout workers
+  (`kScoutCount = 4`) run ordinary unrestricted restart-portfolio search
+  first; after a short grace period (`kGracePeriod = 150ms`), if their
+  backtrack counts (a new lock-free `std::atomic<uint64_t>` mirror,
+  `BacktracksSoFar()`, polled without any lock -- restart counts were
+  tried first and rejected, since a restart only completes every ~500+
+  backtracks, too coarse to read anything within one grace period) are
+  close together rather than spread out, the remaining workers switch to
+  partitioning (`PartitionSpec`: worker `i` of `count` gets a contiguous
+  slice, in score order, of whichever slot dom/wdeg would branch on
+  first -- that first decision is always deterministic, computed
+  independently and identically by every worker). This classifier
+  actually worked, cleanly and reproducibly (verified across repeated
+  runs): `grid_120.txt`/`grid_303.txt` triggered partitioning with a
+  backtrack spread of 22-25% of the max; `grid_053.txt`/`grid_328.txt`
+  correctly did not, at 41% spread -- a real, stable gap between the two
+  categories that the earlier static signals never showed.
+
+  Implemented soundly (24/24 tests including new `PartitionSpec`-specific
+  cases, clean under ASan/UBSan and ThreadSanitizer including a real run
+  against a restart-heavy grid at 14 threads) -- but the actual *remedy*
+  didn't reproduce orca's benefit. Benchmarking (seed 42, 30-grid sample)
+  showed both a small broad regression and a large targeted one:
+  total time across the 20 grids solved both ways went 1.80s -> 1.95s
+  (+8%), and `grid_120.txt` specifically -- the grid this was built to
+  fix -- went from timing out at 15s under plain `SolveParallel` to a
+  reproducible 41.6s and 39.1s across two runs once actually given
+  enough time to finish, worse than plain `SolveParallel`'s own 19.8s on
+  the same grid, same budget. Two distinct costs, both traced directly
+  rather than guessed: (1) the grace-period wait is a real, unconditional
+  latency floor -- the orchestrator thread only notices a scout already
+  solved the grid at its next 5ms poll tick, so even trivially-fast grids
+  now pay a small fixed tax, visible as a near-uniform +4-5ms across many
+  already-millisecond grids in the per-grid diff; (2) on grids that
+  *don't* decide to partition (the common case), the non-scout workers
+  still don't start until the full grace period elapses -- a structural
+  echo of the head-start mistake just above, costing real time by
+  delaying workers that might have been the lucky ones, for zero benefit
+  once the decision comes back "no." Whether restricting only the *root*
+  decision is simply too shallow a cut to matter when a grid's difficulty
+  lives many levels deeper in the tree, or orca's own dynamic
+  re-partitioning (deliberately not ported here, being the source of its
+  3-second floor artifact noted above) is doing something this static
+  one-time slice can't, is still an open question;
+  reverted rather than pursued further, since the evidence needed to
+  justify novel search-space-partitioning is different in kind from the
+  bookkeeping/constant-factor tuning most of this document covers, and it
+  wasn't there.
+
+  **Tried and kept: word-choice randomization on restarts.** A follow-up
+  to the partitioning attempt above, prompted by a direct benchmark
+  against `orca` on the specific grid John Hawksley (orca's author) used
+  to demonstrate it: a 7x7 with two seed letters and no black squares at
+  all. `orca` solved it single-threaded in 201.7s; the unmodified solver
+  didn't finish in any tested budget. Root cause, confirmed by direct
+  instrumentation rather than guessed: `Backtrack`'s word-candidate order
+  is plain `dict_.ScoreOrder` best-first, and restarts (see the "Restarts"
+  section above) only randomize *slot* choice, never word choice, even
+  though `randomize_slot_choice_` was available to gate on. On a grid this
+  wide open, a slot's live domain routinely holds thousands of candidates
+  (every word length in this dictionary has well over 1000 entries — see
+  the dictionary tuning table), and the true solution isn't necessarily
+  built from top-score words at every slot. Strict best-first order meant
+  *every* restart re-tried the same top-ranked words before ever reaching
+  whatever word the real solution needed at that slot — slot-choice
+  diversity alone couldn't route around that, since word order at any
+  given slot was identical across all restarts regardless of how many
+  times the search retried.
+
+  First fix (shuffle candidates whenever `randomize_slot_choice_` is true,
+  no further gating) found the grid's actual solution single-threaded in
+  166.7s and 14-threaded in 63.0s — both real wins over orca's 201.7s. But
+  it regressed the existing 20-grid corpus sample: `grid_328.txt` went
+  from solved in 0.83s to a 20s timeout. Diagnosed directly: every word
+  length in this dictionary has well over 1000 candidates (see the
+  dictionary tuning table above), so a slot's very *first* branch in a
+  component routinely starts in `Backtrack`'s large-domain candidate
+  branch on *any* grid, not just a wide-open one — gating purely on that
+  branch (as opposed to `kCandidateDirectThreshold`'s small-domain branch)
+  still shuffled on essentially every restart of every grid. A second
+  attempt gated on restart *count* instead — only shuffle once at least
+  `kWordShuffleRestartThreshold` (20) restarts have already happened —
+  fixed the corpus regression cleanly (all 20 grids' nodes/backtracks/
+  restarts came back byte-identical to the unmodified solver) but
+  introduced a new problem specific to `SolveParallel`: the threshold
+  is per-worker, so every one of the 14 workers had to independently burn
+  through the same ~20-restart, guaranteed-unproductive warm-up before
+  *any* of them could get lucky via shuffling — wasting exactly the
+  parallelism that matters most for a grid like this. Fixed by making the
+  gate worker-aware: a `SolveParallel` worker with a nonzero
+  `attempt_offset_` is already diversifying from its own local attempt 0
+  by design (see the "Restarts" section's `global_attempt` discussion), so
+  it skips the restart-count gate and shuffles immediately; only worker 0
+  (or a plain single-threaded `Solve()` call, i.e. `attempt_offset_ == 0`)
+  keeps the restart-count gate, since that exact sequence is what the
+  corpus regression check validated byte-for-byte.
+
+  Final verification, run with no other CPU-competing processes on the
+  benchmark machine (an earlier round of timings was inflated by a
+  forgotten background process left over from an unrelated experiment —
+  see the "Benchmarking philosophy" section's isolation note): regression
+  suite unchanged (12/20 solved, identical nodes/backtracks/restarts on
+  every grid, single-threaded). The honest picture on the Hawksley 7x7
+  grid itself, after many repeated runs (see "Tried and reverted:
+  cell-level branching for large domains" just below for the full
+  investigation this triggered): this fix *does* let the grid finish at
+  all, and produced two clean, real wins over orca's 201.7s (166.7s
+  single-threaded, 63.0s 14-threaded) -- a categorical improvement over
+  the unmodified solver, which never finished this grid in any tested
+  budget. But it is not a guaranteed sub-5-minute result on every run:
+  repeated single-threaded and 14-threaded trials on this same grid also
+  took several times longer than that, sometimes exceeding it, purely
+  from which random shuffle a given run happened to draw. This is the
+  expected signature of restart-based search's heavy-tailed runtime
+  (Gomes, Selman & Kautz -- see the "Restarts" section above and "Known
+  hard cases" below): a fix that makes the *typical* case fast doesn't
+  make every draw fast, and no amount of gating/threshold-tuning changes
+  that without changing the underlying algorithm. Kept regardless, since
+  "sometimes fast, previously never" is still strictly better than
+  "never," and it costs the existing benchmark corpus nothing.
+
+  **Tried and reverted: cell-level branching for large domains.**
+  Prompted directly by the honest limitation just above: the user asked
+  for the Hawksley grid to solve in under 5 minutes *reliably*, and
+  word-choice randomization alone doesn't guarantee that. The
+  architectural candidate for a real fix, flagged since this document's
+  "Future work" section and orca's own headline difference (see
+  docs/bibliography.md): branch on one *letter* at a time (a specific
+  cell) instead of enumerating whole words, cutting the branching factor
+  at any one large-domain node from thousands down to at most 26, and
+  reusing `Propagate`'s existing crossing-cascade machinery completely
+  unchanged (it already narrows domains of any size, not just
+  singletons). Implemented as a new `SelectBranchOffset` (picks the
+  slot's most letter-constrained position; a first cut scored purely
+  against the branch slot's own domain, a second cut against the *joint*
+  viable-letter set with the crossing neighbor's domain too -- a real
+  two-sided MRV) plus a per-letter branch-and-propagate loop replacing
+  `Backtrack`'s large-domain word-enumeration branches entirely. Verified
+  sound first: 29/29 tests (plus new cases exercising the large-domain
+  path directly), clean under ASan/UBSan/TSan including a real
+  multi-threaded solve.
+
+  Measured effect was a real, unambiguous *split* result. On the general
+  15x15 benchmark corpus, a clean, broad win: 12/20 solved (same set, zero
+  losses) but total time across the solved grids dropped from ~14.8s to
+  6.89s single-threaded (`grid_053.txt` alone: 12.463s -> 4.770s), and
+  default parallel mode improved from 12 to 13 solved (`grid_115.txt`
+  newly solved) with no losses either. But on
+  the actual motivating grid -- Hawksley's 7x7 -- it did not reproduce the
+  win it was built for. Four independent, controlled comparisons all
+  agreed: (1) `unlimited_budget` (a single continuous DFS, no restarts) at
+  a fixed deterministic seed reached only ~4M backtracks in 115s without
+  solving, versus word-level+shuffle's earlier 166.7s full solve; (2)
+  adding the joint two-sided MRV refinement to `SelectBranchOffset` barely
+  changed that trajectory -- the grid is symmetric enough early in search
+  that neither one-sided nor joint scoring had much signal to exploit;
+  (3) a randomized `unlimited_budget` run (matching exactly what
+  `SolveParallel`'s dedicated worker actually does) reached 320K backtracks
+  in 280s, still unsolved; (4) a controlled, apples-to-apples restart-based
+  comparison -- word-level+shuffle vs. cell-level branching, both
+  single-threaded, both started at the same moment on an otherwise-idle
+  machine -- showed word-level consistently completing more restarts per
+  unit wall-clock time throughout. A final clean 14-thread run of the
+  cell-level version (no other processes competing, a fresh 5-minute
+  budget) still hadn't solved when stopped. Root cause, reasoned through
+  rather than fully profiled given time spent: cell-level branching's
+  finer granularity means many more node visits are needed to reach the
+  same assignment depth than word-level branching's "one decision, one
+  whole dictionary word" (a real, actually-occurring string, not an
+  arbitrary letter sequence) -- and on a grid this symmetric and this
+  weakly constrained, that added node count wasn't offset by the smaller
+  per-node branching factor the way it was on the more typically-
+  constrained 15x15 corpus, where propagation narrows domains down to the
+  small-domain branch much sooner. Reverted in favor of word-level
+  shuffling, since meeting the concrete, explicitly-requested goal (this
+  grid, reliably fast) mattered more here than the broader (but here
+  counterproductive) architectural change -- `SelectBranchOffset` and its
+  supporting `WordBitset::CountAnd` were removed along with it, rather
+  than left as unused dead code. Still the more principled fix for this
+  class of grid in the abstract (see "Future work" below); if pursued
+  again, the corpus win suggests it's worth keeping for *some* regime, so
+  a hybrid (cell-level only for the very largest domains, or only for the
+  first few decisions of a component) is the more promising next attempt,
+  not a wholesale replacement.
+
+  **Tried and kept: word-choice randomization extended to the small-domain
+  branch.** The actual root cause of the whole cell-level-branching
+  detour above, found by direct instrumentation rather than guessed:
+  every one of five different large-domain branching heuristics tried on
+  the Hawksley 7x7 grid (letter-count MRV, joint two-sided MRV, true
+  global cell MRV, a faithful replica of orca's own work-estimate
+  heuristic read directly from its Rust source, and a reversed-scan-order
+  variant) produced numerically *identical* node/backtrack progressions.
+  A debug counter placed directly in `Backtrack`, tracking how often
+  `domain_count` actually exceeds `kCandidateDirectThreshold` versus
+  staying at or below it, showed the large-domain branch firing **zero**
+  times across 17,000+ real search nodes on this grid: every single
+  branch decision, for the entire search, falls at or below the
+  threshold (the very first one at domain_count=254, likely because the
+  H/T seed letters and the resulting crossing cascade narrow every slot's
+  domain well below 1000 within the first couple of assignments, even
+  though the grid is otherwise "wide open"). All five heuristic variants
+  were dead code for this specific grid+dictionary combination the entire
+  time -- which is exactly why they were indistinguishable.
+
+  Reading orca's actual source (`crates/solver/src/search.rs`,
+  `constraint.rs` -- consulted for reference only, never copied into this
+  project or its git history, per this session's standing constraint) is
+  what surfaced this: orca's `find_best_crossing` scores candidates by
+  Σ(count_a\[letter\] × count_b\[letter\]), a real subtree-size estimate,
+  over a *bounded* scan of at most 15 crossings -- a materially different
+  (and, on reflection, more sophisticated) metric than the plain
+  letter-count MRV this project had been trying. Replicating it faithfully
+  (including narrowing only the smaller-domain side directly and letting
+  `Propagate`'s existing cascade handle the other, and orca's surprising
+  choice of *no* value-ordering heuristic at all -- plain ascending letter
+  order, relying entirely on branch selection) still showed the identical
+  zero-large-domain-hits result on this grid, which is what finally forced
+  the instrumentation that found the real explanation above, rather than
+  continuing to guess at heuristic refinements.
+
+  With the real bottleneck identified -- the *small*-domain branch
+  (`domain_count <= kCandidateDirectThreshold`), which had used a plain,
+  unconditional `ScoreRank`-sorted order since long before this session,
+  completely unaffected by `shuffle_words`/`kWordShuffleRestartThreshold`
+  -- the fix was small: gate that branch's ordering on `shuffle_words`
+  too, sorting when false and shuffling when true, exactly mirroring the
+  large-domain branch's own gate. The same protective reasoning applies
+  unchanged: `grid_328.txt` and the rest of the corpus solve within a
+  couple dozen restarts at most, so `shuffle_words` (and thus this new
+  branch) never activates for them regardless of the domain regime they
+  actually live in.
+
+  Verified sound first: 29/29 tests, clean under ASan/UBSan/TSan.
+  Regression-checked against the same 20-grid sample: single-threaded
+  byte-identical to the pre-existing baseline (12/20, matching every
+  node/backtrack/restart count exactly -- confirms the gate protects the
+  corpus regardless of which branch a grid's domains happen to live in);
+  default parallel mode reached **14/20 solved**, this project's best
+  result yet on this sample -- `grid_303.txt` newly solved (never solved
+  in *any* configuration tried this session before now), `grid_045.txt`
+  newly solved, `grid_053.txt`/`grid_058.txt` substantially faster.
+  `grid_328.txt` shows the same familiar tradeoff pattern as other broad
+  wins in this document (0.83s -> 3.65s) and `grid_115.txt` remains a
+  timeout (already understood, see the crossing-weight-sharing entry
+  above). On the actual motivating grid: a 14-threaded run solved in
+  224.7s -- not quite under orca's 201.7s on this specific sample, but a
+  real, working solve via a code path that actually executes for this
+  grid, unlike every cell-level-branching variant tried before it, none
+  of which ever solved it in any tested window. Given this search's
+  well-established heavy-tailed variance (see "Known hard cases" and the
+  word-choice-randomization entry above), no single sample -- on either
+  side of orca's number -- should be read as the final word; this is
+  kept because it is a genuine, validated improvement to the actual
+  code path this grid uses, not because one sample beat one other
+  sample.
+
+  **Follow-up: oversubscribing `SolveParallel`'s thread count.** With the
+  fix above actually exercising the branch this grid's search lives in,
+  a natural question: does racing *more* independent restart-portfolio
+  workers than this machine's 14 physical cores help further? Every
+  worker past the first two (worker 0, and the dedicated
+  `unlimited_budget` one) already skips `kWordShuffleRestartThreshold`'s
+  gate entirely (`attempt_offset_ > 0`, see that member's comment in
+  solver.hpp) and shuffles from its own attempt 0 -- so more of them
+  running concurrently means more independent, already-diversifying
+  lottery tickets racing at once, exactly the lever Gomes/Selman/Kautz's
+  heavy-tailed-runtime argument predicts should help (see the "Restarts"
+  section above). Tested directly on the Hawksley grid, no code change
+  (`num_threads` is already a plain `SolveParallel` argument): 28 threads
+  -> 142.3s and 104.6s across two runs, 42 threads -> 85.6s, 56 threads
+  -> 112.4s -- every oversubscribed run beat orca's 201.7s, several by a
+  wide margin, with 42 threads (3x this machine's 14 physical cores)
+  looking like the sweet spot before contention overhead starts eating
+  into the gain (56 threads' 112.4s being slower than 42 threads' 85.6s).
+  Not committed as a new default -- `xfill_cli`'s `num_threads=0` still
+  means `hardware_concurrency()` (14 here), matching this project's
+  general-purpose usage -- but confirms that for a specific hard grid
+  known in advance, passing an oversubscribed thread count is a real,
+  measured lever, not just a hopeful guess.
+
+  **Tried and kept: `unlimited_budget` in `SolveParallel`.** A separate,
+  earlier finding in this same investigation: `grid_072.txt` and
+  `grid_217.txt` (real, scraped, actually unsatisfiable at
+  `min_score=40`) never resolved -- not solved, not proven UNSAT --
+  after 90 minutes of nothing but restart-based search, single- or
+  14-threaded. Root cause is inherent to restarts, not a bug: each
+  restart discards almost all of the previous attempt's progress toward
+  a genuinely exhaustive pass, so a search that's *supposed* to
+  eventually cover the whole space in the limit can in practice restart-
+  thrash forever without ever actually finishing one. `Solve()` already
+  had `unlimited_budget` (a single continuous DFS, no restarts at all,
+  guaranteed eventually complete either way -- see its doc comment) but
+  it wasn't reachable from `SolveParallel`/`xfill_cli`. Wired in by
+  dedicating exactly one worker (the last one, whenever `num_threads >
+  1`) to `unlimited_budget = true`, leaving the rest as the existing
+  restart portfolio -- the same "portfolio, no classifier" shape as
+  `SolveParallel` itself, rather than trying to detect upfront which
+  grids need it (this project's adaptive-partitioning attempt above
+  already showed that kind of detection is its own source of cost and
+  risk).
+
+  Doing this exposed a real latent inefficiency in `SolveParallel`
+  worth fixing at the same time: previously, a worker's genuine (non-
+  cancelled) "no solution" return didn't cancel the others -- the call
+  waited for literally every worker to independently reach that state,
+  even though any *one* of them reaching it, restart-based or
+  `unlimited_budget`, already constitutes a sound, complete proof (see
+  the "Parallel restarts" section above). Fixed by reusing the existing
+  `cancel` atomic for this case too: a worker's nullopt that wasn't
+  itself caused by cancellation now cancels every other worker via the
+  same compare-and-swap the solution-found path already used. Verified
+  directly: `grid_072.txt`'s standalone `unlimited_budget` validation
+  (no restarts, run in isolation outside `SolveParallel`) reached a
+  genuine, exhaustive "no solution" proof in 84 minutes
+  (nodes=53859939, backtracks=1890357) -- something no purely
+  restart-based configuration achieved in 90 minutes during the earlier
+  three-way benchmark against `ingrid_core`/`orca` (see
+  docs/bibliography.md). `grid_217.txt`'s equivalent validation run was
+  still in progress (113M nodes, 7.2M backtracks after 2h19m, no
+  conclusion either way) when it was stopped to free the benchmark
+  machine for the Hawksley 7x7 investigation above -- inconclusive, not
+  negative; worth relaunching if grid_217.txt specifically matters
+  again. Regression-checked against the same 20-grid sample in default
+  (parallel) mode: 13/20 solved (up from 12 -- `grid_115.txt` newly
+  solved within the 20s cap, no grid lost), consistent with the new
+  cross-worker cancellation only ever letting a call finish sooner, never
+  later. Verified under ThreadSanitizer, including a real multi-threaded
+  solve, not just the unit suite -- no data races reported, consistent
+  with the change reusing the existing single-atomic-flag design rather
+  than adding new shared state.
+
+  **Tried and kept: crossing weights shared across `SolveParallel`
+  workers.** After word-choice randomization, `unlimited_budget`, and a
+  reverted cell-level-branching detour all failed to make the Hawksley
+  7x7 grid *reliably* fast (see above -- restart-based search's
+  heavy-tailed runtime is real and doesn't fully go away by tuning), the
+  next lever tried: each `SolveParallel` worker keeps its own private
+  `CrossingWeights` (dom/wdeg's per-crossing "how troublesome has this
+  been" learning, see the class comment above), so N independent workers
+  restarting independently never share what any one of them discovers
+  about which crossings keep wiping out -- even though the underlying
+  grid/dictionary structure a crossing is troublesome *because of* is the
+  same for all of them.
+
+  Added a second, much simpler `SharedCrossingWeights` alongside (never
+  instead of) the existing per-worker one: a plain `std::atomic<uint32_t>`
+  wipeout counter per crossing, bumped (relaxed fetch_add) by every
+  worker on every wipeout and read (relaxed load) by every worker's
+  `SlotWeight`. Deliberately not the same lazy-decay scheme as the
+  per-worker version: that scheme's shared `scale` divisor makes every
+  `Bump()` depend on the exact value of every prior one, which is only
+  race-free with a single writer -- a concurrently-written signal needs
+  each crossing's update independent of every other crossing's and of
+  order, which a plain atomic increment already is. Also drops
+  recency-weighting for this signal specifically: it aggregates the whole
+  portfolio's cumulative experience over one bounded run rather than one
+  search's own evolving trajectory, so decay matters less here than for
+  the per-worker signal.
+
+  Two correctness fixes needed before the numbers meant anything.
+  First: `num_threads=1` calls wire this up unconditionally -- discovered
+  because it silently broke `bench_subset.py --threads 1`'s
+  reproducibility guarantee (a lone worker got a real, if redundant,
+  `SharedCrossingWeights` pointer, perturbing `SlotWeight`'s sum with an
+  extra `+get(id)-1.0f` term even with only one writer, changing branch
+  order and so node counts for a call this project's whole benchmarking
+  methodology assumes is byte-identical run to run). Fixed by gating on
+  `num_threads > 1`, same condition `unlimited_budget`'s own worker
+  dedication already uses. Second: the dedicated `unlimited_budget`
+  worker's entire value is one uninterrupted trajectory guaranteed to
+  reach a genuine exhaustive conclusion with no restart to recover from a
+  bad branch -- wiring it into the shared signal regressed
+  `grid_115.txt` (see the `unlimited_budget` entry above: newly solved,
+  ~6-7s, by an *ordinary* restart-based worker) to a consistent 20s
+  timeout, reproduced across repeated runs, then confirmed to still be
+  hard (13-17+ minutes without solving) even given much longer than that.
+  Excluded that one worker from the shared wiring entirely (neither reads
+  nor writes it) -- restart-based workers still share among themselves,
+  the one worker whose whole point is an undisturbed trajectory keeps
+  its own.
+
+  Measured effect on the 15x15 corpus, single-threaded unaffected (byte-
+  identical to the pre-existing baseline, confirming the `num_threads>1`
+  gate): default parallel mode showed a large, broad win --
+  `grid_053.txt` 12.463s -> 0.655s, `grid_058.txt` 1.187s -> 0.120s,
+  `grid_045.txt` newly solved within the 20s cap (previously always
+  timed out) -- but did *not* recover `grid_115.txt`, which stayed a
+  consistent timeout across repeated runs even after excluding the
+  `unlimited_budget` worker, since it turns out `grid_115.txt` was
+  originally solved by an *ordinary* restart-based worker, not the
+  dedicated one -- the shared signal itself, not just the excluded
+  worker's absence from it, redirects those workers' search order away
+  from whatever used to get lucky there. One grid trading places for a
+  broad win across the rest of the sample is this project's familiar
+  pattern (see `SolveParallel`'s own "Measured effect" above for the same
+  shape of result). Verified under ThreadSanitizer, including a real
+  8-thread solve, not just the unit suite -- no data races reported.
+
+  Did not clearly fix Hawksley's own variance, per direct testing: a
+  14-threaded run with this change still hadn't solved after 12+ minutes
+  in the one sample tried before the machine was needed for other
+  verification. Kept anyway for the broad corpus win, which stands on its
+  own regardless of whether it helps this one adversarial grid --
+  consistent with this project's practice of judging a change by its
+  overall effect on the benchmark corpus rather than by any single grid,
+  hard or otherwise.
 - **Component-restricted branching** (Dechter's non-separable
   components): `Solver` computes connected components of the
   slot-crossing graph once at construction, and branching only considers
@@ -698,6 +1148,20 @@ via a UBSan/ASan sweep plus a CLI fuzz check rather than in normal use:
   dict.txt abc`) terminated via an uncaught `std::invalid_argument`
   (SIGABRT) instead of the program's normal `error: ...` handling.
   Fixed by moving the parse inside the `try` block.
+- **The restart backtrack-budget growth could overflow float->uint64_t,
+  undefined behavior.** `Solve()`'s geometric backtrack-limit growth
+  (`kRetryGrowthFactor`, see the "Restarts" section above) computes
+  `static_cast<uint64_t>(static_cast<float>(limit) * 1.1f)` on every
+  restart; once `limit` grows past roughly `2^64 / 1.1`, the float value
+  exceeds `uint64_t`'s representable range and the cast is UB --
+  confirmed via UBSan (`2.02914e+19 is outside the range of representable
+  values of type 'unsigned long long'`), surfaced by the unit test suite
+  itself: a trivially small search space can restart often and cheaply
+  enough for 1.1x geometric growth to reach that range within a single
+  test run. Fixed by clamping the grown value to `UINT64_MAX` before the
+  cast instead of letting it overflow -- no real search benefits from a
+  budget anywhere near that large anyway. Verified clean under UBSan
+  afterward.
 
 ## Dictionary tuning
 
@@ -784,3 +1248,18 @@ than the change under test). Use `bench_subset.py --threads 1` for that
 case -- it reproduces worker 0's exact deterministic sequence, so
 identical code always gives identical node counts and any time delta is
 attributable to the change, not to scheduling.
+
+Wall-clock comparisons also need the benchmark machine actually free --
+easy to get wrong with long-running background experiments (this
+project runs several: the `unlimited_budget` UNSAT-proving passes, the
+extended-timeout external-solver comparison, etc.). A stray, forgotten
+process from an earlier experiment inflated several timings during the
+"word-choice randomization on restarts" investigation above by several
+minutes before being noticed (`ps aux` showing a leftover single-
+threaded `xfill_cli` run and a `test_unlimited2` process still
+consuming full cores tens of minutes after they should have been
+stopped) -- node/backtrack *counts* are unaffected by contention (same
+deterministic sequence either way, per the paragraph above), but any
+*wall-clock* number, especially one being compared against an external
+tool's own single-run timing, should be re-measured after confirming
+`ps aux` shows nothing else from this project still running.

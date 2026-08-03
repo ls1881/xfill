@@ -83,6 +83,42 @@ TEST_CASE("Solver reports no solution for an isolated slot with no matching word
   REQUIRE_FALSE(solution.has_value());
 }
 
+TEST_CASE("A pre-filled letter narrows the slot to only matching words") {
+  // Both CAT and DOG fit an unconstrained 3-letter slot; seeding position
+  // 0 with 'D' must rule out CAT even though it scores higher.
+  auto grid = xfill::Grid::FromSpec({"D.."});
+  auto dict = WriteAndLoadDict("test_prefill_letter.dict", {"CAT;50", "DOG;10"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve();
+  REQUIRE(solution.has_value());
+  REQUIRE(solution->assignment.at(0) == "DOG");
+}
+
+TEST_CASE("A pre-filled letter with no matching word reports no solution") {
+  auto grid = xfill::Grid::FromSpec({"Z.."});
+  auto dict = WriteAndLoadDict("test_prefill_impossible.dict", {"CAT;50", "DOG;10"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve();
+  REQUIRE_FALSE(solution.has_value());
+}
+
+TEST_CASE("Pre-filled letters at a crossing must be mutually consistent") {
+  // 2x2 grid, top-left seeded 'A': the across slot (row 0) must start
+  // with A, and the down slot (col 0) must also start with A -- only
+  // AT/AN (down AN, TO... ) combinations consistent with both survive.
+  auto grid = xfill::Grid::FromSpec({"A.", ".."});
+  auto dict = WriteAndLoadDict("test_prefill_crossing.dict",
+                                {"AT;10", "NO;10", "AN;10", "TO;10"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve();
+  REQUIRE(solution.has_value());
+  REQUIRE(solution->assignment.at(0) == "AT");
+  REQUIRE(solution->assignment.at(2) == "AN");
+}
+
 TEST_CASE("SolveParallel with 1 thread finds the same solution as Solve()") {
   // num_threads=1 should be worker 0 alone, which is seeded to reproduce
   // today's single-threaded sequence exactly (attempt_offset=0).
@@ -133,4 +169,60 @@ TEST_CASE("SolveParallel with num_threads=0 uses hardware_concurrency") {
   auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/0);
   REQUIRE(result.solution.has_value());
   REQUIRE(result.num_threads >= 1);
+}
+
+TEST_CASE("Solve() with unlimited_budget still finds a solution") {
+  auto grid = xfill::Grid::FromSpec({"..", ".."});
+  auto dict = WriteAndLoadDict("test_unlimited_sat.dict",
+                                {"AT;10", "NO;10", "AN;10", "TO;10"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve(0, nullptr, /*unlimited_budget=*/true);
+  REQUIRE(solution.has_value());
+  REQUIRE(solution->assignment.at(0) == "AT");
+  REQUIRE(solution->assignment.at(1) == "NO");
+  REQUIRE(solution->assignment.at(2) == "AN");
+  REQUIRE(solution->assignment.at(3) == "TO");
+}
+
+TEST_CASE("Solve() with unlimited_budget still proves no solution, no restarts needed") {
+  auto grid = xfill::Grid::FromSpec({"...."});
+  auto dict = WriteAndLoadDict("test_unlimited_unsat.dict", {"CAT;10"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve(0, nullptr, /*unlimited_budget=*/true);
+  REQUIRE_FALSE(solution.has_value());
+  REQUIRE(solver.stats().restarts == 0);
+}
+
+TEST_CASE("Backtrack's large-domain word-shuffle branch still finds a valid solution") {
+  // Two non-crossing 3-letter slots, but with more filler words of that
+  // length than kCandidateDirectThreshold (1000) -- see solver.cpp's
+  // Backtrack -- so branching exercises the large-domain candidate path
+  // (a shuffled std::vector<size_t> extracted from dict_.ScoreOrder) rather
+  // than the small-domain direct-lookup path this project's other tests
+  // all stay under. attempt_offset=1 makes global_attempt=1 on Solve()'s
+  // very first (only) attempt, so randomize_slot_choice_ is true and
+  // attempt_offset_ > 0 skips kWordShuffleRestartThreshold's restart-count
+  // gate (see solver.hpp's attempt_offset_ comment) -- the shuffled branch
+  // runs from the start, not just after this solver instance has failed
+  // its way through 20 restarts.
+  auto grid = xfill::Grid::FromSpec({"...", "###", "..."});
+  std::vector<std::string> words;
+  words.reserve(1010);
+  for (int i = 0; i < 1010; ++i) {
+    std::string w;
+    w += static_cast<char>('A' + (i / 26 / 26) % 26);
+    w += static_cast<char>('A' + (i / 26) % 26);
+    w += static_cast<char>('A' + i % 26);
+    words.push_back(w + ";10");
+  }
+  auto dict = WriteAndLoadDict("test_large_domain_shuffle.dict", words);
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve(/*attempt_offset=*/1);
+  REQUIRE(solution.has_value());
+  // No crossings to satisfy here (row 1 is blocked) -- correctness just
+  // means the no-duplicate-words rule still held under the shuffled path.
+  REQUIRE(solution->assignment.at(0) != solution->assignment.at(1));
 }

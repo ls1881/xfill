@@ -33,7 +33,13 @@ intersection and a fast path when every letter is still viable, instead
 of a fixed rescan of every crossing until nothing changes. Not ported:
 Orca's branching on individual grid cells rather than whole word slots,
 its per-arc letter cache, and its SIMD/parallel/distributed search
-tiers — all larger rewrites than this project has taken on.
+tiers — all larger rewrites than this project has taken on. Its
+partition-based parallelism specifically *was* attempted, prompted by a
+head-to-head benchmark showing it solving two grids this project's own
+`SolveParallel` (a random-restart portfolio, not a partitioning scheme)
+couldn't touch — see docs/design.md's "adaptive search-space
+partitioning" entry for the (reverted) attempt and why restricting only
+the first branch decision didn't reproduce the benefit here.
 
 ### rf-/ingrid_core (GitHub, Rust)
 

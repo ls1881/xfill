@@ -31,7 +31,13 @@ class Grid {
  public:
   Grid(int width, int height);
 
-  // Loads a grid layout from a text spec: '.' = open cell, '#' = block.
+  // Loads a grid layout from a text spec: '.' = open cell, '#' = block,
+  // A-Z (case-insensitive) = an open cell pre-filled with that letter --
+  // a seeded/partial fill, e.g. a themed starting entry. A pre-filled
+  // cell is otherwise an ordinary cell: it still belongs to whatever
+  // across/down slot(s) cover it, just with that slot's domain
+  // pre-narrowed to words matching the letter at that position (see
+  // Solver::Solve).
   static Grid FromSpec(const std::vector<std::string>& rows);
 
   // Reads a grid spec from a file, one row per line (trailing blank
@@ -44,6 +50,15 @@ class Grid {
     return blocked_[static_cast<size_t>(row) * static_cast<size_t>(width_) +
                      static_cast<size_t>(col)];
   }
+  // 'A'-'Z' if this cell is seeded with a pre-filled letter, '\0' if not
+  // (including for a blocked cell, which is never pre-filled).
+  char PrefilledLetter(int row, int col) const {
+    return prefilled_[static_cast<size_t>(row) * static_cast<size_t>(width_) +
+                       static_cast<size_t>(col)];
+  }
+  // Same, but by the flat cell index (row * width + col) a Slot::cells
+  // entry already is -- avoids every caller re-deriving row/col from it.
+  char PrefilledLetter(int cell) const { return prefilled_[static_cast<size_t>(cell)]; }
 
   const std::vector<Slot>& slots() const { return slots_; }
   const Slot& SlotById(int id) const {
@@ -62,7 +77,8 @@ class Grid {
 
   int width_;
   int height_;
-  std::vector<bool> blocked_;  // size width_ * height_
+  std::vector<bool> blocked_;   // size width_ * height_
+  std::vector<char> prefilled_;  // size width_ * height_, '\0' = unseeded
 
   std::vector<Slot> slots_;
   std::vector<Crossing> crossings_;

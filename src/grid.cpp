@@ -1,5 +1,6 @@
 #include "xfill/grid.hpp"
 
+#include <cctype>
 #include <fstream>
 #include <stdexcept>
 #include <utility>
@@ -10,7 +11,9 @@ Grid::Grid(int width, int height)
     : width_(width),
       height_(height),
       blocked_(static_cast<size_t>(width) * static_cast<size_t>(height),
-               false) {}
+               false),
+      prefilled_(static_cast<size_t>(width) * static_cast<size_t>(height),
+                 '\0') {}
 
 Grid Grid::FromSpec(const std::vector<std::string>& rows) {
   if (rows.empty()) {
@@ -25,9 +28,14 @@ Grid Grid::FromSpec(const std::vector<std::string>& rows) {
       throw std::invalid_argument("all rows must have equal width");
     }
     for (int c = 0; c < width; ++c) {
-      grid.blocked_[static_cast<size_t>(r) * static_cast<size_t>(width) +
-                     static_cast<size_t>(c)] =
-          (rows[static_cast<size_t>(r)][static_cast<size_t>(c)] == '#');
+      char ch = rows[static_cast<size_t>(r)][static_cast<size_t>(c)];
+      size_t cell = static_cast<size_t>(r) * static_cast<size_t>(width) +
+                    static_cast<size_t>(c);
+      grid.blocked_[cell] = (ch == '#');
+      char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+      if (upper >= 'A' && upper <= 'Z') {
+        grid.prefilled_[cell] = upper;
+      }
     }
   }
 

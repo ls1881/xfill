@@ -43,3 +43,22 @@ TEST_CASE("Crossings are recorded for every cell shared by an across and down sl
   // down slot, so there should be exactly one crossing per cell.
   REQUIRE(grid.crossings().size() == 9);
 }
+
+TEST_CASE("A pre-filled letter is an ordinary open cell, not a block") {
+  auto grid = xfill::Grid::FromSpec({"A..", "...", "..."});
+  REQUIRE_FALSE(grid.IsBlocked(0, 0));
+  REQUIRE(grid.slots().size() == 6);  // same shape as a fully-open 3x3
+}
+
+TEST_CASE("Grid::PrefilledLetter reports the seeded letter, uppercased") {
+  auto grid = xfill::Grid::FromSpec({"a..", ".B.", "..."});
+  REQUIRE(grid.PrefilledLetter(0, 0) == 'A');
+  REQUIRE(grid.PrefilledLetter(1, 1) == 'B');
+  REQUIRE(grid.PrefilledLetter(2, 2) == '\0');
+}
+
+TEST_CASE("A blocked cell is never reported as pre-filled even if it looks like one") {
+  auto grid = xfill::Grid::FromSpec({"#.."});
+  REQUIRE(grid.IsBlocked(0, 0));
+  REQUIRE(grid.PrefilledLetter(0, 0) == '\0');
+}
