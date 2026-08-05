@@ -63,33 +63,90 @@ def solved_time(row, solver):
     return t if status == "SOLVED" else None
 
 
-# Figure 1: does each solver's success rate hold up as grid size grows?
-# This is the figure motivating why architecture (restarts/parallelism/
-# heuristics) matters at all -- if every solver scaled fine, the rest of
-# the paper's comparison would be moot.
+# Figure 1: on the curated size-graded set, does xfill's edge over
+# orca-solver survive as grid size grows, or is it only about which
+# grids get solved at all? A binary solved/not-solved view (an earlier
+# draft of this figure) hides the answer, since xfill, orca-solver, and
+# ingrid_core mostly succeed on the *same* grids here -- the real
+# difference is how long each takes to get there, sometimes by two to
+# three orders of magnitude, which only shows up once time is the axis.
 def fig_success_by_size(rows):
     curated = [r for r in rows if r["source"] == "curated"]
     curated.sort(key=lambda r: int(r["rows"]) * int(r["cols"]))
     sizes = [f"{r['rows']}x{r['cols']}" for r in curated]
     x = np.arange(len(sizes))
+    TIMEOUT_MARK = TIMEOUT_SECONDS  # plotted at the cap, marked hollow
 
-    fig, ax = plt.subplots(figsize=(6.2, 3.0))
-    width = 0.15
-    for i, solver in enumerate(SOLVERS):
-        solved = [1 if r[f"{solver}_status"] == "SOLVED" else 0 for r in curated]
-        ax.bar(x + (i - 2) * width, solved, width,
-               label=SOLVER_LABEL[solver], color=SOLVER_COLOR[solver])
+    fig, ax = plt.subplots(figsize=(6.4, 3.2))
+    for solver in ["xfill", "orca", "ingrid", "composer"]:  # savin never
+                                                             # solves anything
+                                                             # at any size here
+        ys, solved_mask = [], []
+        for r in curated:
+            status = r[f"{solver}_status"]
+            if status in ("SOLVED", "UNSAT"):
+                ys.append(max(float(r[f"{solver}_time"]), 1e-3))  # floor for log scale
+                solved_mask.append(True)
+            else:
+                ys.append(TIMEOUT_MARK)
+                solved_mask.append(False)
+        ax.plot(x, ys, "-", color=SOLVER_COLOR[solver], linewidth=1.4, zorder=2)
+        filled_x = [xi for xi, m in zip(x, solved_mask) if m]
+        filled_y = [yi for yi, m in zip(ys, solved_mask) if m]
+        hollow_x = [xi for xi, m in zip(x, solved_mask) if not m]
+        hollow_y = [yi for yi, m in zip(ys, solved_mask) if not m]
+        ax.scatter(filled_x, filled_y, color=SOLVER_COLOR[solver], s=26, zorder=3,
+                   label=SOLVER_LABEL[solver], edgecolors="black", linewidths=0.4)
+        ax.scatter(hollow_x, hollow_y, facecolors="none", edgecolors=SOLVER_COLOR[solver],
+                   s=40, zorder=3, marker="^", linewidths=1.2)
+    ax.axhline(TIMEOUT_SECONDS, color="#cccccc", linewidth=1, linestyle="--", zorder=1)
+    ax.set_yscale("log")
     ax.set_xticks(x)
-    ax.set_xticklabels(sizes, rotation=0)
-    ax.set_ylim(0, 1.15)
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["timeout/UNSAT", "solved"])
+    ax.set_xticklabels(sizes, rotation=0, fontsize=7)
     ax.set_xlabel(f"grid size (curated size-graded set, {TIMEOUT_SECONDS:.0f}s cap)")
-    ax.set_title("Solve success by grid size")
-    ax.legend(loc="lower left", ncol=3, fontsize=7, frameon=False)
+    ax.set_ylabel("time to solve or prove UNSAT (s, log scale)")
+    ax.set_title("Time to solve by grid size (open triangle = timed out)")
+    ax.legend(loc="upper left", ncol=2, fontsize=7, frameon=False)
+    fig.tight_layout()
     fig.savefig(FIG_DIR / "fig1_success_by_size.pdf")
     fig.savefig(FIG_DIR / "fig1_success_by_size.png")
     plt.close(fig)
+
+
+# Figure 1b: the aggregate version of the same point, across every grid
+# in the full 20-grid sample rather than just the 8 curated ones -- on
+# the 16 grids both xfill and orca-solver solved, how much faster is
+# xfill, not just whether it succeeds? This is the single most direct
+# "xfill is better" figure in the paper, and it is exactly the ratio of
+# two numbers already reported elsewhere, not a new measurement.
+def fig_speedup(rows):
+    ratios = []
+    for r in rows:
+        if r["xfill_status"] == "SOLVED" and r["orca_status"] == "SOLVED":
+            xt, ot = float(r["xfill_time"]), float(r["orca_time"])
+            if xt > 0:
+                ratios.append((r["grid"], ot / xt))
+    ratios.sort(key=lambda p: p[1])
+    names = [p[0] for p in ratios]
+    vals = [p[1] for p in ratios]
+
+    fig, ax = plt.subplots(figsize=(6.4, 3.4))
+    colors = ["#c0392b" if v < 1 else SOLVER_COLOR["xfill"] for v in vals]
+    ax.bar(range(len(names)), vals, color=colors)
+    ax.axhline(1, color="black", linewidth=0.8)
+    ax.set_yscale("log")
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6)
+    ax.set_ylabel("orca-solver time / xfill time\n(log scale; >1 means xfill faster)")
+    geomean = statistics.geometric_mean(vals)
+    ax.set_title(f"Per-grid speedup, xfill vs. orca-solver, where both solved "
+                 f"(n={len(vals)}, geometric mean {geomean:.0f}x)")
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig1b_speedup.pdf")
+    fig.savefig(FIG_DIR / "fig1b_speedup.png")
+    plt.close(fig)
+    print(f"\nspeedup: n={len(vals)}, median={statistics.median(vals):.1f}x, "
+          f"geomean={geomean:.1f}x, min={min(vals):.2f}x, max={max(vals):.1f}x")
 
 
 # Figure 2: on the 15x15 scale where a real crossword actually lives, how
@@ -235,6 +292,7 @@ def main():
     FIG_DIR.mkdir(parents=True, exist_ok=True)
     rows = load_rows()
     fig_success_by_size(rows)
+    fig_speedup(rows)
     fig_15x15_times(rows)
     fig_ablation_refined()
     fig_thread_scaling()
