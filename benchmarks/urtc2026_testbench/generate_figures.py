@@ -113,15 +113,19 @@ def fig_success_by_size(rows):
     plt.close(fig)
 
 
-# Figure 1b: the aggregate version of the same point, across every grid
-# in the full 20-grid sample rather than just the 8 curated ones -- on
-# the 16 grids both xfill and orca-solver solved, how much faster is
-# xfill, not just whether it succeeds? This is the single most direct
-# "xfill is better" figure in the paper, and it is exactly the ratio of
-# two numbers already reported elsewhere, not a new measurement.
+# Figure 1b: the aggregate version of the same point, restricted to the
+# scraped 15x15 corpus (real, previously published grids -- not the
+# curated size-graded set, which mixes in easy small grids that inflate
+# the ratio without telling us anything about realistic crossword scale).
+# On the scraped grids both xfill and orca-solver solved, how much
+# faster is xfill, not just whether it succeeds? This is the single most
+# direct "xfill is better" figure in the paper, and it is exactly the
+# ratio of two numbers already reported elsewhere, not a new measurement.
 def fig_speedup(rows):
     ratios = []
     for r in rows:
+        if r["source"] != "scraped":
+            continue
         if r["xfill_status"] == "SOLVED" and r["orca_status"] == "SOLVED":
             xt, ot = float(r["xfill_time"]), float(r["orca_time"])
             if xt > 0:
@@ -139,13 +143,13 @@ def fig_speedup(rows):
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6)
     ax.set_ylabel("orca-solver time / xfill time\n(log scale; >1 means xfill faster)")
     geomean = statistics.geometric_mean(vals)
-    ax.set_title(f"Per-grid speedup, xfill vs. orca-solver, where both solved "
-                 f"(n={len(vals)}, geometric mean {geomean:.0f}x)")
+    ax.set_title(f"Per-grid speedup, xfill vs. orca-solver, scraped 15x15 grids, "
+                 f"where both solved\n(n={len(vals)}, geometric mean {geomean:.0f}x)")
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig1b_speedup.pdf")
     fig.savefig(FIG_DIR / "fig1b_speedup.png")
     plt.close(fig)
-    print(f"\nspeedup: n={len(vals)}, median={statistics.median(vals):.1f}x, "
+    print(f"\nspeedup (scraped 15x15 only): n={len(vals)}, median={statistics.median(vals):.1f}x, "
           f"geomean={geomean:.1f}x, min={min(vals):.2f}x, max={max(vals):.1f}x")
 
 

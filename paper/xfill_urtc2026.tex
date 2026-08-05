@@ -10,17 +10,17 @@
 \title{Sharing Conflict Weights Without Partitioning: A Concurrent dom/wdeg Portfolio for Word-Level Crossword Filling}
 
 \author{
-\IEEEauthorblockN{1st Author Given Name Surname}
+\IEEEauthorblockN{Luke K. Schreiber}
 \IEEEauthorblockA{Department of Computer Science\\
-University Name\\
-City, Country\\
-email@university.edu}
+Princeton University\\
+Princeton, NJ, USA\\
+ls1881@princeton.edu}
 }
 
 \maketitle
 
 \begin{abstract}
-Parallel CSP solvers typically take one of two forms: partition the search space across workers, or run an undivided portfolio of independent restarts. When CSP workers share information at all, prior work treats that sharing as a one-time input to partitioning, gathered once and then spent. This paper describes a different mechanism: a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of dom/wdeg-style conflict weights throughout the search, with no manager and no synchronization phase. We implement it in xfill, a word-level CSP solver for crossword filling, and test it two ways. First, we establish that restart-portfolio search as a class occupies a genuinely different point in the design space than partition-based search, using orca-solver, an independently developed partition-based solver, as a concrete representative of the alternative: restart portfolios exploit heavy-tailed search-runtime distributions, so oversubscribing thread count past the physical core count improves xfill by roughly 65 times on one hard grid, while the partition-based solver improves only marginally and cannot solve it at all below 14 threads; on 16 real grids both solve, xfill is faster on 15, by a geometric mean of about 96 times. Partitioning, conversely, gives genuine non-overlapping coverage, a real advantage for proving unsatisfiability. Second, and more directly on point, we isolate the shared-weight mechanism itself, holding the solver and grid fixed and toggling only the mechanism, and find a more nuanced result than the architectural comparison above: consistent improvement on a broad corpus of moderate-difficulty grids, but higher variance rather than a reliable win on especially hard instances. A negative or mixed result for one's own mechanism is still evidence, so we present it alongside the positive one rather than in place of it. We also report a negative result from the same codebase: five independently plausible letter-level branching heuristics produced numerically identical output on our hardest benchmark grid, because a domain-size precondition meant none of them ever executed, caught only by direct execution-path instrumentation and not by comparing benchmark scores.
+Parallel CSP solvers typically take one of two forms: partition the search space across workers, or run an undivided portfolio of independent restarts. When CSP workers share information at all, prior work treats that sharing as a one-time input to partitioning, gathered once and then spent. This paper describes a different mechanism: a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of dom/wdeg-style conflict weights throughout the search, with no manager and no synchronization phase. We implement it in xfill, a word-level CSP solver for crossword filling, and test it two ways. First, we establish that restart-portfolio search as a class occupies a genuinely different point in the design space than partition-based search, using orca-solver, an independently developed partition-based solver, as a concrete representative of the alternative: restart portfolios exploit heavy-tailed search-runtime distributions, so oversubscribing thread count past the physical core count improves xfill by roughly 65 times on one hard grid, while the partition-based solver improves only marginally and cannot solve it at all below 14 threads; on a corpus of real, previously published 15x15 grids both solve, xfill is faster on 9 of 10, by a geometric mean of about 108 times. Partitioning, conversely, gives genuine non-overlapping coverage, a real advantage for proving unsatisfiability. Second, and more directly on point, we isolate the shared-weight mechanism itself, holding the solver and grid fixed and toggling only the mechanism, and find a more nuanced result than the architectural comparison above: consistent improvement on a broad corpus of moderate-difficulty grids, but higher variance rather than a reliable win on especially hard instances. A negative or mixed result for one's own mechanism is still evidence, so we present it alongside the positive one rather than in place of it. We also report a negative result from the same codebase: five independently plausible letter-level branching heuristics produced numerically identical output on our hardest benchmark grid, because a domain-size precondition meant none of them ever executed, caught only by direct execution-path instrumentation and not by comparing benchmark scores.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -70,11 +70,11 @@ The experiments below test two distinct claims, and we keep them in separate sub
 
 \textbf{Solvers.} xfill (this work); orca-solver, a partition-based parallel solver treated as a black box; ingrid\_core, a single-threaded reference solver; and, as naive baselines with no restarts, no learned heuristics, and no parallelism, crossword-composer (a static-constraint-order Rust backtracker) and savin\_crossword (a textbook AC-3-plus-backtracking Python implementation). All five run through a single fixed harness checked into this project's repository (\texttt{benchmarks/urtc2026\_testbench/}), against a dictionary derived deterministically from the repository's own freely available word list, with a fixed random seed and a uniform 30-second cap -- reproducible by re-running \texttt{run\_benchmark.py}.
 
-\textbf{Grid set.} A size-graded curated set ($5\times5$ through $21\times21$) plus a fixed-seed random sample of $15\times15$ grids from a real, previously scraped corpus, all committed to the repository.
+\textbf{Grid set.} A size-graded curated set ($5\times5$ through $21\times21$) plus a fixed-seed random sample of $15\times15$ grids scraped from a public corpus of real, previously published crossword layouts, crosswordgrids.com \cite{crosswordgrids}, all committed to the repository.
 
 \begin{table}[t]
 \centering
-\caption{Thread count vs.\ wall time on a known-hard $7\times7$ grid (single sample; a partition-based solver's published single-threaded baseline on this grid is 201.7s).}
+\caption{Thread count vs.\ wall time on a known-hard $7\times7$ grid (single sample; published single-threaded partition-based baseline: 201.7s).}
 \label{tab:threads}
 \begin{tabular}{@{}lr@{}}
 \toprule
@@ -117,12 +117,12 @@ Across all 20 grids, xfill solved 17 (1 correct UNSAT, 2 timeouts), orca-solver 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{../benchmarks/urtc2026_testbench/results/figures/fig1b_speedup.pdf}
-\caption{Per-grid speedup (orca-solver time / xfill time, log scale) on every grid in the full 20-grid sample both solvers solved. Bars above the line mean xfill is faster; only one of 16 falls below it.}
+\caption{Per-grid speedup (orca-solver time / xfill time, log scale) on the scraped $15\times15$ grids both solvers solved. Bars above the line mean xfill is faster; only one of 10 falls below it.}
 \label{fig:speedup}
 \end{figure}
 
 \subsection{Aggregate Speed Advantage Where Both Solve}
-Fig.~\ref{fig:speedup} quantifies the restart-portfolio/partition comparison across the full sample rather than the curated subset alone: of the 16 grids (of 20) both xfill and orca-solver solve, xfill is faster on 15, with a median speedup of $171\times$ and a geometric mean of $96\times$, driven by several $15\times15$ grids where xfill finishes in single-digit milliseconds against 3--13 seconds. The one exception, \texttt{grid\_479}, runs the other way (orca-solver $\sim\!3\times$ faster) -- a reminder that a lopsided aggregate is still not a universal one, consistent with \texttt{grid\_115} in Section~\ref{sec:scaling}. This sample also happens to be too easy to separate the two architectures on success alone -- both solve 16 of 20, agree on one correct UNSAT proof, and are jointly stuck on 2, with orca-solver never uniquely solving a grid xfill cannot -- which is exactly why Sections~\ref{sec:scaling} and~\ref{sec:ablation} use a harder, pre-existing grid list to find where the architectures actually diverge, rather than relying on this sample alone.
+Fig.~\ref{fig:speedup} quantifies the restart-portfolio/partition comparison on the scraped $15\times15$ corpus alone \cite{crosswordgrids} -- realistic-scale grids, rather than the curated size-graded set, which mixes in small grids that inflate the ratio. Of the 10 scraped grids (of 12) both xfill and orca-solver solve, xfill is faster on 9, with a median speedup of $428\times$ and a geometric mean of $108\times$, driven by grids where xfill finishes in single-digit milliseconds against 3--13 seconds for orca-solver. The one exception, \texttt{grid\_479}, runs the other way (orca-solver $\sim\!3\times$ faster) -- a reminder that a lopsided aggregate is still not a universal one, consistent with \texttt{grid\_115} in Section~\ref{sec:scaling}. Across the full 20-grid sample, both solve 16, agree on one correct UNSAT proof, and are jointly stuck on 2, with orca-solver never uniquely solving a grid xfill cannot -- this sample is too easy to separate the two architectures on success alone, which is exactly why Sections~\ref{sec:scaling} and~\ref{sec:ablation} use a harder, pre-existing grid list to find where the architectures actually diverge.
 
 \begin{figure}[t]
 \centering
@@ -156,12 +156,12 @@ The architectural comparison and the mechanism ablation point to the same underl
 
 All timing results are from one 14-core machine and one dictionary derived from a specific freely available word list; neither the thread-scaling numbers nor Section~\ref{sec:exhaustive}'s unsatisfiability result should be read as hardware- or dictionary-independent claims. Both principal solvers are actively developed software; exact commit hashes are recorded in the testbench README for reproducibility.
 
-This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent conflict-weight sharing across a restart portfolio that never partitions, occupying a gap that three adjacent lines of prior work leave open. The architectural comparison in Section~\ref{sec:experiments} supports that gap's importance rather than being the paper's subject -- restart portfolios and partitioned search are suited respectively to finding solutions quickly and to proving none exist, a pattern independent of any one solver. The mechanism itself, tested in isolation, is more modest than the architecture it sits inside: a real win on typical grids, a wash or worse on the hardest ones, reported as measured rather than as hoped. Nothing about it is specific to crossword filling -- it needs only a wdeg-style weight table and a restart loop, both already present in most CSP and lazy-clause-generation solvers, so the same concurrent, non-partitioning sharing scheme is directly testable in those settings. We also reported a negative result from the same codebase -- five heuristics rendered indistinguishable by a precondition that kept them from ever executing -- as a reusable caution for comparing branching heuristics by benchmark score alone.
+This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent conflict-weight sharing across a restart portfolio that never partitions, occupying a gap that three adjacent lines of prior work leave open. The architectural comparison in Section~\ref{sec:experiments} supports that gap's importance rather than being the paper's subject -- restart portfolios and partitioned search are suited respectively to finding solutions quickly and to proving none exist, a pattern independent of any one solver. The mechanism itself, tested in isolation, is more modest than the architecture it sits inside: a real win on typical grids, a wash or worse on the hardest ones, reported as measured rather than as hoped. Nothing about it is specific to crossword filling: it needs only a wdeg-style weight table and a restart loop, both already common in CSP and lazy-clause-generation solvers. We also reported a negative result from the same codebase -- five heuristics rendered indistinguishable by a precondition that kept them from ever executing -- as a reusable caution for comparing branching heuristics by benchmark score alone.
 
 \section*{Acknowledgment}
-[Add any advisor, funding, or collaborator acknowledgments here.]
+[Advisor/funding acknowledgments.]
 
-\begin{thebibliography}{11}
+\begin{thebibliography}{12}
 
 \bibitem{ginsberg2011} M. L. Ginsberg, ``Dr.Fill: crosswords and an implemented solver for singly weighted CSPs,'' \textit{Journal of Artificial Intelligence Research}, vol. 42, pp. 851--886, 2011.
 
@@ -184,6 +184,8 @@ This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent
 \bibitem{regin2016} J.-C. R\'egin, M. Rezgui, and A. Malapert, ``Embarrassingly parallel search in constraint programming,'' \textit{Journal of Artificial Intelligence Research}, vol. 57, pp. 421--464, 2016.
 
 \bibitem{gent2018} I. P. Gent, I. J. Miguel, P. W. Nightingale, C. McCreesh, P. Prosser, N. Moore, and C. Unsworth, ``A review of literature on parallel constraint solving,'' \textit{Theory and Practice of Logic Programming}, vol. 18, no. 5--6, pp. 725--758, 2018.
+
+\bibitem{crosswordgrids} Crosswordgrids.com, ``15x15 crossword grids.'' [Online]. Available: \url{https://crosswordgrids.com/15x15-crossword-grids/}. Accessed: Jul. 31, 2026.
 
 \end{thebibliography}
 
