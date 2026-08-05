@@ -8,6 +8,7 @@ Run after run_benchmark.py has produced results/results.csv:
     .venv/bin/python3 generate_figures.py
 """
 import csv
+import statistics
 from pathlib import Path
 
 import matplotlib
@@ -153,6 +154,96 @@ def fig_xfill_orca_overlap(rows):
     plt.close(fig)
 
 
+# Figure 4: the paper's core mechanism, isolated -- reported honestly.
+# Same solver, same dictionary, same threads, same grid; the only
+# variable is the XFILL_DISABLE_SHARED_WEIGHTS toggle. On this
+# specific "hardest grids" set, 6 trials per config show NOT a clean
+# win but a variance story: shared weights don't reliably move the
+# median here and on one grid produce a catastrophic outlier, while the
+# unshared baseline is consistently tighter. Drawn as individual trial
+# points (not bars of a single summary stat), because the spread is
+# the actual finding -- a bar chart of medians alone would hide it.
+def fig_ablation_refined():
+    path = TESTBENCH_DIR / "results" / "ablation_refined.csv"
+    if not path.exists():
+        return
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
+    grids = sorted(set(r["grid"] for r in rows), key=lambda g: [r["grid"] for r in rows].index(g))
+
+    fig, axes = plt.subplots(1, len(grids), figsize=(2.4 * len(grids), 3.0), sharey=False)
+    if len(grids) == 1:
+        axes = [axes]
+    for ax, grid in zip(axes, grids):
+        for i, config in enumerate(["without", "with"]):
+            times = [float(r["time"]) for r in rows if r["grid"] == grid and r["config"] == config]
+            color = "#b0b0b0" if config == "without" else SOLVER_COLOR["xfill"]
+            jitter = np.random.default_rng(0).uniform(-0.08, 0.08, size=len(times))
+            ax.scatter([i + j for j in jitter], times, color=color, s=22, zorder=3,
+                       edgecolors="black", linewidths=0.4)
+            ax.hlines(statistics.median(times), i - 0.15, i + 0.15, color=color, linewidth=2, zorder=2)
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["off", "on"], fontsize=8)
+        ax.set_title(grid, fontsize=9)
+    axes[0].set_ylabel("wall time to solve (s)")
+    fig.suptitle("Shared conflict weights: 6 trials per config, 14 threads "
+                 "(bar = median; grid 120 trial 6 timed out at 45s, off-scale)", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig4_ablation.pdf")
+    fig.savefig(FIG_DIR / "fig4_ablation.png")
+    plt.close(fig)
+
+    print("\nablation (6 trials, 14 threads):")
+    for grid in grids:
+        for config in ["without", "with"]:
+            times = [float(r["time"]) for r in rows if r["grid"] == grid and r["config"] == config]
+            print(f"  {grid:10s} {config:8s} median={statistics.median(times):.3f}s  "
+                  f"range=[{min(times):.3f}, {max(times):.3f}]")
+
+
+# Figure 5: the architectural claim in its clearest form -- xfill's
+# restart-portfolio keeps improving as threads are added well past the
+# physical core count, while orca-solver's partition-based search does
+# not scale the same way. One panel per grid so the comparison isn't
+# averaged away.
+def fig_thread_scaling():
+    path = TESTBENCH_DIR / "results" / "thread_scaling.csv"
+    if not path.exists():
+        return
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
+    grids = sorted(set(r["grid"] for r in rows), key=lambda g: [r["grid"] for r in rows].index(g))
+
+    fig, axes = plt.subplots(1, len(grids), figsize=(2.2 * len(grids), 2.8), sharey=False)
+    if len(grids) == 1:
+        axes = [axes]
+    for ax, grid in zip(axes, grids):
+        grows = [r for r in rows if r["grid"] == grid]
+        grows.sort(key=lambda r: int(r["threads"]))
+        threads = [int(r["threads"]) for r in grows]
+        xt = [float(r["xfill_time"]) if r["xfill_status"] == "SOLVED" else None for r in grows]
+        ot = [float(r["orca_time"]) if r["orca_status"] == "SOLVED" else None for r in grows]
+        if any(v is not None for v in xt):
+            ax.plot([t for t, v in zip(threads, xt) if v is not None],
+                    [v for v in xt if v is not None],
+                    "o-", color=SOLVER_COLOR["xfill"], label="xfill", linewidth=1.6, markersize=3)
+        if any(v is not None for v in ot):
+            ax.plot([t for t, v in zip(threads, ot) if v is not None],
+                    [v for v in ot if v is not None],
+                    "s-", color=SOLVER_COLOR["orca"], label="orca-solver", linewidth=1.6, markersize=3)
+        ax.axvline(14, color="#cccccc", linewidth=1, linestyle="--", zorder=0)
+        ax.set_title(grid, fontsize=9)
+        ax.set_xlabel("threads")
+    axes[0].set_ylabel("wall time (s)")
+    axes[0].legend(fontsize=7, frameon=False, loc="upper right")
+    fig.suptitle("Thread-count scaling: restart portfolio vs. partitioned search "
+                  "(dashed line = physical core count)", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(FIG_DIR / "fig5_thread_scaling.pdf")
+    fig.savefig(FIG_DIR / "fig5_thread_scaling.png")
+    plt.close(fig)
+
+
 def print_summary_table(rows):
     print("\nSummary (for Table in paper):")
     print(f"{'solver':22s} {'solved':>8s} {'timeout':>8s} {'unsat':>8s} {'error':>8s}")
@@ -171,6 +262,8 @@ def main():
     fig_success_by_size(rows)
     fig_15x15_times(rows)
     fig_xfill_orca_overlap(rows)
+    fig_ablation_refined()
+    fig_thread_scaling()
     print_summary_table(rows)
     print(f"\nfigures written to {FIG_DIR}")
 

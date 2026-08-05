@@ -287,8 +287,13 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
   // randomized paths, isn't necessarily relevant to this worker's
   // deterministic-ish one, and unlike them it has no restart to shake off
   // a bad nudge if it turns out not to be.
+  // XFILL_DISABLE_SHARED_WEIGHTS is a benchmarking-only escape hatch (for
+  // the URTC testbench's ablation, isolating this mechanism's effect from
+  // everything else SolveParallel does) -- unset, the default, changes
+  // nothing about normal behavior.
+  bool shared_weights_disabled = std::getenv("XFILL_DISABLE_SHARED_WEIGHTS") != nullptr;
   SharedCrossingWeights shared_crossing_weights(grid.crossings().size());
-  if (num_threads > 1) {
+  if (num_threads > 1 && !shared_weights_disabled) {
     for (unsigned i = 0; i + 1 < num_threads; ++i) {
       solvers[i]->shared_crossing_weights_ = &shared_crossing_weights;
     }

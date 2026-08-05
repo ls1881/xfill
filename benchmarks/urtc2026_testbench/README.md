@@ -87,8 +87,30 @@ git clone https://github.com/SavinRazvan/crossword.git savin_crossword
 cd ..
 python3 -m venv .venv && .venv/bin/pip install matplotlib numpy pypdf
 python3 run_benchmark.py            # writes results/results.csv
+python3 run_xfill_strengths.py      # writes results/ablation.csv, results/thread_scaling.csv
 .venv/bin/python3 generate_figures.py   # writes results/figures/*.{png,pdf}
 ```
+
+## Two additional experiments, specifically isolating xfill's contribution
+
+`run_benchmark.py`'s general sweep uses grids that mostly solve in well
+under a second for the sophisticated solvers -- too easy for either of
+the effects below to show up. `run_xfill_strengths.py` runs two more
+targeted experiments against a fixed "known hard" grid list reused from
+this project's own pre-existing development benchmarking (not cherry-
+picked for this paper):
+
+1. **Shared-conflict-weight ablation** (`results/ablation.csv`, Fig. 4):
+   xfill run twice per grid, identical in every respect except the
+   `XFILL_DISABLE_SHARED_WEIGHTS` environment variable (a benchmarking-
+   only hook in `SolveParallel`, see `src/solver.cpp` -- unset, the
+   default, changes nothing). This isolates the paper's actual mechanism
+   from every other difference a cross-solver comparison necessarily
+   carries (different language, dictionary handling, everything).
+2. **Thread-count scaling** (`results/thread_scaling.csv`, Fig. 5): xfill
+   and orca-solver on the same grids across thread counts from 1 to 3x
+   physical core count, showing the two architectures respond to added
+   parallelism in opposite ways (Section VI of the paper).
 
 ## Files
 

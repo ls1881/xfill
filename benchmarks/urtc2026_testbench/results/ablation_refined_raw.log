@@ -1,0 +1,23 @@
+[15:21:01] grid_053 trial 1/6: with=0.10s without=0.73s
+[15:21:02] grid_053 trial 2/6: with=0.07s without=0.74s
+[15:21:06] grid_053 trial 3/6: with=3.71s without=0.76s
+[15:21:11] grid_053 trial 4/6: with=3.51s without=0.70s
+[15:21:14] grid_053 trial 5/6: with=3.05s without=0.66s
+[15:21:18] grid_053 trial 6/6: with=2.48s without=0.67s
+[15:21:19] grid_058 trial 1/6: with=0.53s without=0.40s
+[15:21:19] grid_058 trial 2/6: with=0.06s without=0.42s
+[15:21:21] grid_058 trial 3/6: with=1.00s without=0.41s
+[15:21:22] grid_058 trial 4/6: with=0.36s without=0.43s
+[15:21:23] grid_058 trial 5/6: with=0.98s without=0.47s
+[15:21:24] grid_058 trial 6/6: with=0.16s without=0.47s
+[15:21:40] grid_120 trial 1/6: with=7.82s without=8.58s
+[15:21:52] grid_120 trial 2/6: with=2.75s without=8.69s
+[15:22:17] grid_120 trial 3/6: with=16.28s without=8.71s
+[15:22:32] grid_120 trial 4/6: with=6.49s without=8.46s
+[15:22:49] grid_120 trial 5/6: with=8.27s without=8.87s
+[15:23:43] grid_120 trial 6/6: with=45.00s without=8.36s
+
+=== summary (median of 6 trials) ===
+grid_053: WITH median=2.768s  WITHOUT median=0.715s  (with=[0.0696199, 0.102192, 2.48114, 3.05433, 3.50882, 3.70968], without=[0.65998, 0.668459, 0.704053, 0.726857, 0.737906, 0.762413])
+grid_058: WITH median=0.443s  WITHOUT median=0.426s  (with=[0.0598063, 0.164164, 0.359, 0.527975, 0.982629, 1.0001], without=[0.40073, 0.414615, 0.421983, 0.430398, 0.473333, 0.473533])
+grid_120: WITH median=8.043s  WITHOUT median=8.637s  (with=[2.74692, 6.48686, 7.81596, 8.2706, 16.2819, 45.0], without=[8.36013, 8.4573, 8.58195, 8.69217, 8.70924, 8.87096])

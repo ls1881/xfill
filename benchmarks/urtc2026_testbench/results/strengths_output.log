@@ -1,0 +1,38 @@
+[14:27:29] === ablation: shared conflict weights on/off, threads=14, 2 trials/config ===
+[14:29:49] grid_045   WITH shared-weights: TIMEOUT  median=24.79s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:29:57] grid_053   WITH shared-weights: SOLVED   median=2.79s  |  WITHOUT: SOLVED   median=1.30s
+[14:30:00] grid_058   WITH shared-weights: SOLVED   median=0.47s  |  WITHOUT: SOLVED   median=0.95s
+[14:33:00] grid_072   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:36:00] grid_115   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:37:25] grid_120   WITH shared-weights: SOLVED   median=28.61s  |  WITHOUT: SOLVED   median=13.56s
+[14:40:25] grid_217   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:43:06] grid_303   WITH shared-weights: TIMEOUT  median=35.35s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:46:06] grid_309   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:49:06] grid_347   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:52:06] grid_380   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:55:06] grid_457   WITH shared-weights: TIMEOUT  median=45.00s  |  WITHOUT: TIMEOUT  median=45.00s
+[14:55:06] wrote /Users/lukeschreiber/Downloads/crossword-filler/benchmarks/urtc2026_testbench/results/ablation.csv
+[14:55:06] === thread-count scaling: xfill vs orca-solver ===
+[14:56:36] grid_303   threads=  1  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[14:58:06] grid_303   threads=  4  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[14:59:15] grid_303   threads=  8  xfill=SOLVED   22.88s  orca=TIMEOUT  45.00s
+[15:00:27] grid_303   threads= 14  xfill=SOLVED   27.79s  orca=TIMEOUT  45.00s
+[15:01:57] grid_303   threads= 21  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:03:28] grid_303   threads= 28  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:04:51] grid_303   threads= 42  xfill=SOLVED   38.23s  orca=TIMEOUT  45.00s
+[15:06:21] grid_115   threads=  1  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:07:51] grid_115   threads=  4  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:09:21] grid_115   threads=  8  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:10:51] grid_115   threads= 14  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:12:21] grid_115   threads= 21  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:13:51] grid_115   threads= 28  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:15:21] grid_115   threads= 42  xfill=TIMEOUT  45.00s  orca=TIMEOUT  45.00s
+[15:16:34] grid_120   threads=  1  xfill=SOLVED   27.77s  orca=TIMEOUT  45.00s
+[15:17:28] grid_120   threads=  4  xfill=SOLVED    8.86s  orca=TIMEOUT  45.00s
+[15:18:17] grid_120   threads=  8  xfill=SOLVED    4.49s  orca=TIMEOUT  45.00s
+[15:18:58] grid_120   threads= 14  xfill=SOLVED   13.27s  orca=SOLVED   27.27s
+[15:19:21] grid_120   threads= 21  xfill=SOLVED    1.46s  orca=SOLVED   21.23s
+[15:19:42] grid_120   threads= 28  xfill=SOLVED    2.07s  orca=SOLVED   18.73s
+[15:20:00] grid_120   threads= 42  xfill=SOLVED    0.43s  orca=SOLVED   17.89s
+[15:20:00] wrote /Users/lukeschreiber/Downloads/crossword-filler/benchmarks/urtc2026_testbench/results/thread_scaling.csv
+[15:20:00] === ALL DONE ===
