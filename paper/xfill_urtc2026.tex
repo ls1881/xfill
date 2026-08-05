@@ -10,16 +10,22 @@
 \title{Sharing Conflict Weights Without Partitioning: A Concurrent dom/wdeg Portfolio for Word-Level Crossword Filling}
 
 \author{
-\IEEEauthorblockN{[Author Name(s)]}
-\IEEEauthorblockA{[Department], [University]\\
-\textit{Submitted to IEEE MIT URTC 2026}}
+\IEEEauthorblockN{1st Author Given Name Surname}
+\IEEEauthorblockA{Department of Computer Science\\
+University Name\\
+City, Country\\
+email@university.edu}
 }
 
 \maketitle
 
 \begin{abstract}
-Parallel CSP solvers typically take one of two forms: partition the search space across workers, or run an undivided portfolio of independent restarts. When CSP workers share information at all, prior work treats that sharing as a one-time input to partitioning, gathered once and then spent. This paper describes a different mechanism: a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of dom/wdeg-style conflict weights throughout the search, with no manager and no synchronization phase. We implement it in xfill, a word-level CSP solver for crossword filling, and test it two ways. First, we establish that restart-portfolio search as a class occupies a genuinely different point in the design space than partition-based search, using orca-solver (an independently developed partition-based solver) as a concrete representative of the alternative: restart portfolios exploit heavy-tailed search-runtime distributions, so oversubscribing thread count past the physical core count improves xfill by up to $65\times$ on one hard grid, while the partition-based solver improves only marginally and cannot solve it at all below 14 threads; on 16 real grids both solve, xfill is faster on 15, by a geometric mean of $96\times$. Partitioning, conversely, gives genuine non-overlapping coverage, a real advantage for proving unsatisfiability. Second, and more directly on point, we isolate the shared-weight mechanism itself -- same solver, same grid, only the mechanism toggled -- and find a more nuanced result than the architectural comparison above: consistent improvement on a broad corpus of moderate-difficulty grids, but higher variance rather than a reliable win on especially hard instances. We report this honestly rather than selectively, since a negative or mixed result for one's own mechanism is still evidence. We also report a negative result from the same codebase: five independently plausible letter-level branching heuristics produced numerically identical output on our hardest benchmark grid, because a domain-size precondition meant none of them ever executed -- caught only by direct execution-path instrumentation, not by comparing benchmark scores.
+Parallel CSP solvers typically take one of two forms: partition the search space across workers, or run an undivided portfolio of independent restarts. When CSP workers share information at all, prior work treats that sharing as a one time input to partitioning, gathered once and then spent. This paper describes a different mechanism: a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of dom or wdeg style conflict weights throughout the search, with no manager and no synchronization phase. We implement it in xfill, a word level CSP solver for crossword filling, and test it two ways. First, we establish that restart portfolio search as a class occupies a genuinely different point in the design space than partition based search, using orca-solver, an independently developed partition based solver, as a concrete representative of the alternative: restart portfolios exploit heavy tailed search runtime distributions, so oversubscribing thread count past the physical core count improves xfill by roughly 65 times on one hard grid, while the partition based solver improves only marginally and cannot solve it at all below 14 threads; on 16 real grids both solve, xfill is faster on 15, by a geometric mean of about 96 times. Partitioning, conversely, gives genuine non overlapping coverage, a real advantage for proving unsatisfiability. Second, and more directly on point, we isolate the shared weight mechanism itself, holding the solver and grid fixed and toggling only the mechanism, and find a more nuanced result than the architectural comparison above: consistent improvement on a broad corpus of moderate difficulty grids, but higher variance rather than a reliable win on especially hard instances. We report this honestly rather than selectively, since a negative or mixed result for one's own mechanism is still evidence. We also report a negative result from the same codebase: five independently plausible letter level branching heuristics produced numerically identical output on our hardest benchmark grid, because a domain size precondition meant none of them ever executed, caught only by direct execution path instrumentation and not by comparing benchmark scores.
 \end{abstract}
+
+\begin{IEEEkeywords}
+constraint satisfaction, parallel search, restart portfolios, dom/wdeg heuristic, crossword generation
+\end{IEEEkeywords}
 
 \section{Introduction}
 
@@ -151,32 +157,32 @@ All timing results are from one 14-core machine and one dictionary derived from 
 
 This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent conflict-weight sharing across a restart portfolio that never partitions, occupying a gap that three adjacent lines of prior work leave open. The architectural comparison in Section~\ref{sec:experiments} is supporting evidence for why that gap is worth occupying, not the paper's subject -- restart portfolios and partitioned search are suited respectively to finding solutions quickly and to proving none exist, a pattern independent of any one solver. The mechanism itself, tested in isolation, is more modest than the architecture it sits inside: a real win on typical grids, a wash or worse on the hardest ones, reported as measured rather than as hoped. We also reported a negative result -- five heuristics rendered indistinguishable by a precondition that kept them from ever executing -- as a reusable caution for comparing branching heuristics by benchmark score alone.
 
-\section*{Acknowledgments}
+\section*{Acknowledgment}
 [Add any advisor, funding, or collaborator acknowledgments here.]
 
 \begin{thebibliography}{11}
 
-\bibitem{ginsberg2011} M. L. Ginsberg, ``Dr.Fill: Crosswords and an Implemented Solver for Singly Weighted CSPs,'' \textit{Journal of Artificial Intelligence Research}, vol. 42, pp. 851--886, 2011.
+\bibitem{ginsberg2011} M. L. Ginsberg, ``Dr.Fill: crosswords and an implemented solver for singly weighted CSPs,'' \textit{Journal of Artificial Intelligence Research}, vol. 42, pp. 851--886, 2011.
 
-\bibitem{gomes1998} C. P. Gomes, B. Selman, and H. Kautz, ``Boosting Combinatorial Search Through Randomization,'' in \textit{Proc. AAAI}, 1998, pp. 431--437.
+\bibitem{gomes1998} C. P. Gomes, B. Selman, and H. Kautz, ``Boosting combinatorial search through randomization,'' in \textit{Proc. AAAI}, 1998, pp. 431--437.
 
 \bibitem{gomes2000} C. P. Gomes, B. Selman, N. Crato, and H. Kautz, ``Heavy-tailed phenomena in satisfiability and constraint satisfaction problems,'' \textit{Journal of Automated Reasoning}, vol. 24, pp. 67--100, 2000.
 
 \bibitem{boussemart2004} F. Boussemart, F. Hemery, C. Lecoutre, and L. Sais, ``Boosting systematic search by weighting constraints,'' in \textit{Proc. ECAI}, 2004, pp. 146--150.
 
-\bibitem{grimes2007} D. Grimes and R. J. Wallace, ``Sampling Strategies and Variable Selection in Weighted Degree Heuristics,'' in \textit{Proc. CP}, LNCS vol. 4741, 2007, pp. 831--838.
+\bibitem{grimes2007} D. Grimes and R. J. Wallace, ``Sampling strategies and variable selection in weighted degree heuristics,'' in \textit{Proc. CP}, LNCS vol. 4741, 2007, pp. 831--838.
 
-\bibitem{hamadi2009} Y. Hamadi, S. Jabbour, and L. Sais, ``ManySAT: a Parallel SAT Solver,'' \textit{J. Satisfiability, Boolean Modeling and Computation}, vol. 6, pp. 245--262, 2009.
+\bibitem{hamadi2009} Y. Hamadi, S. Jabbour, and L. Sais, ``ManySAT: a parallel SAT solver,'' \textit{J. Satisfiability, Boolean Modeling and Computation}, vol. 6, pp. 245--262, 2009.
 
-\bibitem{ehlers2016} T. Ehlers and P. J. Stuckey, ``Parallelizing Constraint Programming with Learning,'' in \textit{Proc. CPAIOR}, LNCS vol. 9676, Banff, Canada, 2016.
+\bibitem{ehlers2016} T. Ehlers and P. J. Stuckey, ``Parallelizing constraint programming with learning,'' in \textit{Proc. CPAIOR}, LNCS vol. 9676, Banff, Canada, 2016.
 
-\bibitem{yun2012} X. Yun and S. L. Epstein, ``Adaptive Parallelization for Constraint Satisfaction Search,'' in \textit{Proc. SoCS}, 2012, pp. 145--152.
+\bibitem{yun2012} X. Yun and S. L. Epstein, ``Adaptive parallelization for constraint satisfaction search,'' in \textit{Proc. SoCS}, 2012, pp. 145--152.
 
-\bibitem{yun2012hybrid} X. Yun and S. L. Epstein, ``A Hybrid Paradigm for Adaptive Parallel Search,'' in \textit{Proc. CP}, LNCS vol. 7514, 2012, pp. 720--736.
+\bibitem{yun2012hybrid} X. Yun and S. L. Epstein, ``A hybrid paradigm for adaptive parallel search,'' in \textit{Proc. CP}, LNCS vol. 7514, 2012, pp. 720--736.
 
-\bibitem{regin2016} J.-C. R\'egin, M. Rezgui, and A. Malapert, ``Embarrassingly Parallel Search in Constraint Programming,'' \textit{Journal of Artificial Intelligence Research}, vol. 57, pp. 421--464, 2016.
+\bibitem{regin2016} J.-C. R\'egin, M. Rezgui, and A. Malapert, ``Embarrassingly parallel search in constraint programming,'' \textit{Journal of Artificial Intelligence Research}, vol. 57, pp. 421--464, 2016.
 
-\bibitem{gent2018} I. P. Gent, I. J. Miguel, P. W. Nightingale, C. McCreesh, P. Prosser, N. Moore, and C. Unsworth, ``A Review of Literature on Parallel Constraint Solving,'' \textit{Theory and Practice of Logic Programming}, vol. 18, no. 5--6, pp. 725--758, 2018.
+\bibitem{gent2018} I. P. Gent, I. J. Miguel, P. W. Nightingale, C. McCreesh, P. Prosser, N. Moore, and C. Unsworth, ``A review of literature on parallel constraint solving,'' \textit{Theory and Practice of Logic Programming}, vol. 18, no. 5--6, pp. 725--758, 2018.
 
 \end{thebibliography}
 
