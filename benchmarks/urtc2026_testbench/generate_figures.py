@@ -117,41 +117,16 @@ def fig_15x15_times(rows):
     plt.close(fig)
 
 
-# Figure 3: the paper's actual claim about xfill/orca specifically --
-# they succeed on different, only partially-overlapping subsets, which a
-# single "solver A beats solver B" framing would hide. Drawn as a 2x2
-# outcome grid (both / xfill-only / orca-only / neither) rather than a
-# bar chart, since the *overlap structure* is the point being made.
-def fig_xfill_orca_overlap(rows):
-    both = xfill_only = orca_only = both_unsat = neither = 0
-    for r in rows:
-        xstat, ostat = r["xfill_status"], r["orca_status"]
-        xs, os_ = xstat == "SOLVED", ostat == "SOLVED"
-        if xs and os_:
-            both += 1
-        elif xs:
-            xfill_only += 1
-        elif os_:
-            orca_only += 1
-        elif xstat == "UNSAT" and ostat == "UNSAT":
-            both_unsat += 1  # a success (agreeing proof), not a failure -- kept
-                              # separate from genuine timeouts below
-        else:
-            neither += 1
-
-    fig, ax = plt.subplots(figsize=(5.2, 3.2))
-    cats = ["both\nsolve", "xfill\nonly", "orca-solver\nonly", "both prove\nUNSAT", "neither\nresolved"]
-    vals = [both, xfill_only, orca_only, both_unsat, neither]
-    colors = ["#4a4a4a", SOLVER_COLOR["xfill"], SOLVER_COLOR["orca"], "#2e7d4f", "#c7c7c7"]
-    bars = ax.bar(cats, vals, color=colors)
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width() / 2, v + 0.2, str(v),
-                 ha="center", va="bottom", fontsize=9)
-    ax.set_ylabel(f"number of grids (of {len(rows)})")
-    ax.set_title("xfill vs. orca-solver: outcome overlap")
-    fig.savefig(FIG_DIR / "fig3_xfill_orca_overlap.pdf")
-    fig.savefig(FIG_DIR / "fig3_xfill_orca_overlap.png")
-    plt.close(fig)
+# NOTE: an earlier version of this script also produced a
+# fig3_xfill_orca_overlap bar chart (both-solve/xfill-only/orca-only/
+# etc. counts). It was removed: on this particular 20-grid sample the
+# two solvers are close enough (16 both, 1 xfill-only, 0 orca-only) that
+# the chart mostly restated the summary counts already given in the
+# paper's prose, rather than showing a trend, distribution, or
+# relationship a reader couldn't get from one sentence -- see the
+# "Real Grids" subsection in paper/xfill_urtc2026.tex for how that
+# near-total overlap is instead used as a (textual) motivation for why
+# Sections V-C/V-G turn to a deliberately harder grid list.
 
 
 # Figure 4: the paper's core mechanism, isolated -- reported honestly.
@@ -261,7 +236,6 @@ def main():
     rows = load_rows()
     fig_success_by_size(rows)
     fig_15x15_times(rows)
-    fig_xfill_orca_overlap(rows)
     fig_ablation_refined()
     fig_thread_scaling()
     print_summary_table(rows)

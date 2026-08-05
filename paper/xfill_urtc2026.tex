@@ -95,29 +95,22 @@ Table~\ref{tab:threads} is one grid; Fig.~\ref{fig:scaling} repeats the experime
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{../benchmarks/urtc2026_testbench/results/figures/fig1_success_by_size.pdf}
-\caption{Solve success on the size-graded curated grid set, 30s cap. crossword-composer succeeds intermittently; savin\_crossword (bar height 0 throughout, per-node cost dominated by dictionary size rather than grid size) never appears.}
+\caption{Solve success on the size-graded curated grid set, 30s cap -- making the point that the two naive baselines fail for structurally \textit{different} reasons, not merely "worse": crossword-composer succeeds intermittently regardless of size (an instance-specific failure), while savin\_crossword (bar height 0 throughout) never appears at any size at all (a dictionary-scale failure). Neither pattern would be visible from a single summary number.}
 \label{fig:size}
 \end{figure}
+
+\subsection{Scaling and Naive Baselines}
+Across all 20 grids, xfill solved 17 (1 correct UNSAT, 2 timeouts), orca-solver 16 (1 UNSAT, 3 timeouts), ingrid\_core 12, crossword-composer 5, and savin\_crossword \textit{0} -- it timed out on every single grid, including the trivial $5\times5$. Fig.~\ref{fig:size} makes the mechanism behind that gap visible rather than just the outcome: crossword-composer's failures are instance-specific (it solves some $15\times15$s and small grids alike, timing out unpredictably elsewhere), consistent with having no restart to recover from a single bad static variable-ordering choice computed once up front. savin\_crossword's uniform failure is not about grid size at all -- its least-constraining-value step recomputes an $O(|\text{domain}|^2)$ score from scratch at every node, which our $\sim$184{,}000-word dictionary makes prohibitive regardless of grid size, since domain sizes before any grid-driven narrowing are already large. Both are real, unmodified, independently authored solvers; the gap is what restarts, adaptive heuristics, and (for xfill/orca-solver) parallelism buy at dictionary and grid sizes that matter in practice.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{../benchmarks/urtc2026_testbench/results/figures/fig2_15x15_cumulative.pdf}
-\caption{Cumulative fraction of real 15$\times$15 grids solved by wall time (log scale), 30s cap.}
+\caption{Cumulative fraction of real 15$\times$15 grids solved by wall time (log scale), 30s cap. The point is the horizontal gap between curves, not the final height: xfill's curve is shifted roughly two orders of magnitude left of ingrid\_core's and orca-solver's, meaning it is not just eventually as successful but reaches the same solved fraction far sooner across the entire distribution, not only in a best-case tail.}
 \label{fig:cumulative}
 \end{figure}
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\linewidth]{../benchmarks/urtc2026_testbench/results/figures/fig3_xfill_orca_overlap.pdf}
-\caption{Outcome overlap between xfill and orca-solver across the full grid set: the two architectures are complementary, not uniformly ordered.}
-\label{fig:overlap}
-\end{figure}
-
-\subsection{Scaling and Naive Baselines}
-Across all 20 grids, xfill solved 17 (1 correct UNSAT, 2 timeouts), orca-solver 16 (1 UNSAT, 3 timeouts), ingrid\_core 12, crossword-composer 5, and savin\_crossword \textit{0} -- it timed out on every single grid, including the trivial $5\times5$. Fig.~\ref{fig:size} shows why the two naive baselines fail for different reasons, not the same one: crossword-composer's failures are instance-specific rather than size-specific (it solves some $15\times15$s and small grids alike, timing out unpredictably elsewhere), consistent with having no restart to recover from a single bad static variable-ordering choice computed once up front. savin\_crossword's uniform failure is not about grid size at all -- its least-constraining-value step recomputes an $O(|\text{domain}|^2)$ score from scratch at every node, which our $\sim$184{,}000-word dictionary makes prohibitive regardless of grid size, since domain sizes before any grid-driven narrowing are already large. Both are real, unmodified, independently authored solvers; the gap is what restarts, adaptive heuristics, and (for xfill/orca-solver) parallelism buy at dictionary and grid sizes that matter in practice.
-
 \subsection{Real Grids}
-Fig.~\ref{fig:cumulative} shows cumulative solve rate on the 15$\times$15 sample for solvers that finish at all. Fig.~\ref{fig:overlap} breaks down xfill vs.\ orca-solver precisely: both solve 16 of 20, xfill alone solves 1 more, both correctly \textit{prove} 1 grid has no solution (not a failure for either), and 2 remain unresolved by both within the cap -- the two sophisticated architectures are complementary, not one strictly dominating, consistent with Section VI's explanation.
+On this specific 20-grid sample, orca-solver never uniquely solves a grid xfill fails on, while xfill uniquely solves one orca-solver cannot within the cap (both also agree on 16 solves and one correct UNSAT proof, and are jointly stuck on 2). That near-total overlap is itself informative: it shows this particular sample is not hard enough to separate the two architectures, which is exactly why Sections V-C and V-G instead use a deliberately harder, pre-existing grid list to find where they actually diverge, rather than relying on this sample alone to make that case.
 
 \subsection{Exhaustive Case Study}
 To test proof capability rather than only positive results, we constructed by hand a grid designed to be maximally constrained: five mutually crossing 15-letter entries, verified cell-by-cell against both solvers' own parsers. Run to completion with no time limit, both solvers independently concluded no solution exists: xfill exhausted 2.16 billion nodes over 791 restarts in 76 minutes; orca-solver reported search exhausted after enumerating 224 partitions in 25 minutes -- roughly $3\times$ faster, consistent with partitioning's non-overlapping coverage being a more direct route to a proof than restart-based search's redundant one.
