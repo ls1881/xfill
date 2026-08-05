@@ -119,38 +119,55 @@ def fig_success_by_size(rows):
 # the ratio without telling us anything about realistic crossword scale).
 # On the scraped grids both xfill and orca-solver solved, how much
 # faster is xfill, not just whether it succeeds? This is the single most
-# direct "xfill is better" figure in the paper, and it is exactly the
-# ratio of two numbers already reported elsewhere, not a new measurement.
+# direct "xfill is better" figure in the paper. Drawn as paired
+# absolute-time bars (not a single ratio bar) so a reader can see how
+# each solver actually did on each grid, not just the abstracted ratio
+# between them -- the ratio is still there as an annotation, derived
+# from the same two numbers, not a separate measurement.
 def fig_speedup(rows):
-    ratios = []
+    data = []
     for r in rows:
         if r["source"] != "scraped":
             continue
         if r["xfill_status"] == "SOLVED" and r["orca_status"] == "SOLVED":
             xt, ot = float(r["xfill_time"]), float(r["orca_time"])
             if xt > 0:
-                ratios.append((r["grid"], ot / xt))
-    ratios.sort(key=lambda p: p[1])
-    names = [p[0] for p in ratios]
-    vals = [p[1] for p in ratios]
+                data.append((r["grid"], xt, ot, ot / xt))
+    data.sort(key=lambda p: p[3])
+    names = [p[0] for p in data]
+    xt_vals = [p[1] for p in data]
+    ot_vals = [p[2] for p in data]
+    ratios = [p[3] for p in data]
 
-    fig, ax = plt.subplots(figsize=(6.4, 3.4))
-    colors = ["#c0392b" if v < 1 else SOLVER_COLOR["xfill"] for v in vals]
-    ax.bar(range(len(names)), vals, color=colors)
-    ax.axhline(1, color="black", linewidth=0.8)
+    fig, ax = plt.subplots(figsize=(6.8, 3.6))
+    x = np.arange(len(names))
+    width = 0.38
+    ax.bar(x - width / 2, xt_vals, width, color=SOLVER_COLOR["xfill"], label="xfill")
+    ax.bar(x + width / 2, ot_vals, width, color=SOLVER_COLOR["orca"], label="orca-solver")
     ax.set_yscale("log")
-    ax.set_xticks(range(len(names)))
+    ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6)
-    ax.set_ylabel("orca-solver time / xfill time\n(log scale; >1 means xfill faster)")
-    geomean = statistics.geometric_mean(vals)
-    ax.set_title(f"Per-grid speedup, xfill vs. orca-solver, scraped 15x15 grids, "
-                 f"where both solved\n(n={len(vals)}, geometric mean {geomean:.0f}x)")
+    ax.set_ylabel("wall time to solve (s, log scale)")
+    ax.legend(fontsize=7, frameon=False, loc="upper right")
+
+    ymax = max(xt_vals + ot_vals)
+    for xi, xt, ot, ratio in zip(x, xt_vals, ot_vals, ratios):
+        label = f"{ratio:.0f}x" if ratio >= 1 else f"1/{1 / ratio:.1f}x"
+        color = SOLVER_COLOR["xfill"] if ratio >= 1 else SOLVER_COLOR["orca"]
+        ax.text(xi, max(xt, ot) * 1.35, label, ha="center", va="bottom",
+                 fontsize=6.5, color=color, fontweight="bold")
+    ax.set_ylim(top=ymax * 6)
+
+    geomean = statistics.geometric_mean(ratios)
+    ax.set_title(f"Wall time per grid, xfill vs. orca-solver, scraped 15x15 grids, "
+                 f"where both solved\n(n={len(ratios)}; label = orca time / xfill time; "
+                 f"geometric mean {geomean:.0f}x)")
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig1b_speedup.pdf")
     fig.savefig(FIG_DIR / "fig1b_speedup.png")
     plt.close(fig)
-    print(f"\nspeedup (scraped 15x15 only): n={len(vals)}, median={statistics.median(vals):.1f}x, "
-          f"geomean={geomean:.1f}x, min={min(vals):.2f}x, max={max(vals):.1f}x")
+    print(f"\nspeedup (scraped 15x15 only): n={len(ratios)}, median={statistics.median(ratios):.1f}x, "
+          f"geomean={geomean:.1f}x, min={min(ratios):.2f}x, max={max(ratios):.1f}x")
 
 
 # Figure 2: on the 15x15 scale where a real crossword actually lives, how
