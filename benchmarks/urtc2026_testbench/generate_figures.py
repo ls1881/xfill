@@ -113,55 +113,75 @@ def fig_success_by_size(rows):
     plt.close(fig)
 
 
-# Figure 1b: the aggregate version of the same point, restricted to the
-# scraped 15x15 corpus (real, previously published grids -- not the
-# curated size-graded set, which mixes in easy small grids that inflate
-# the ratio without telling us anything about realistic crossword scale).
-# On the scraped grids both xfill and orca-solver solved, how much
-# faster is xfill, not just whether it succeeds? This is the single most
-# direct "xfill is better" figure in the paper. Drawn as paired
-# absolute-time bars (not a single ratio bar) so a reader can see how
-# each solver actually did on each grid, not just the abstracted ratio
-# between them -- the ratio is still there as an annotation, derived
-# from the same two numbers, not a separate measurement.
+# Figure 1b: the same point (xfill vs. orca-solver, scraped 15x15 grids,
+# both absolute time per grid), now with all five solvers shown side by
+# side rather than just the two sophisticated ones -- so the naive
+# baselines' near-total absence from the solved bars isn't just a count
+# reported in prose (Section V-C), it is directly visible, grid by grid,
+# next to the two solvers that do compete. Solvers that time out on a
+# given grid are drawn as hatched, hollow bars at the timeout cap rather
+# than omitted, matching the "hollow triangle = timed out" convention
+# already used in Fig. 1. xfill/orca-solver speedup ratio is kept as a
+# label above those two bars, unchanged from the previous version.
 def fig_speedup(rows):
-    data = []
-    for r in rows:
-        if r["source"] != "scraped":
-            continue
+    scraped = [r for r in rows if r["source"] == "scraped"]
+
+    def sort_key(r):
+        if r["xfill_status"] in ("SOLVED", "UNSAT"):
+            return (0, float(r["xfill_time"]))
+        return (1, 0.0)
+
+    scraped.sort(key=sort_key)
+    names = [r["grid"] for r in scraped]
+    x = np.arange(len(names))
+    n = len(SOLVERS)
+    width = 0.8 / n
+
+    fig, ax = plt.subplots(figsize=(7.8, 2.3))
+    for i, solver in enumerate(SOLVERS):
+        offsets = x + (i - (n - 1) / 2) * width
+        solid_x, solid_y, hollow_x, hollow_y = [], [], [], []
+        for xi, r in zip(offsets, scraped):
+            status = r[f"{solver}_status"]
+            if status in ("SOLVED", "UNSAT"):
+                solid_x.append(xi)
+                solid_y.append(max(float(r[f"{solver}_time"]), 1e-3))
+            else:
+                hollow_x.append(xi)
+                hollow_y.append(TIMEOUT_SECONDS)
+        ax.bar(solid_x, solid_y, width, color=SOLVER_COLOR[solver])
+        ax.bar(hollow_x, hollow_y, width, facecolor="none",
+               edgecolor=SOLVER_COLOR[solver], hatch="////", linewidth=0.5)
+    ax.axhline(TIMEOUT_SECONDS, color="#cccccc", linewidth=1, linestyle="--", zorder=0)
+
+    # xfill/orca-solver speedup label, kept from the previous version of
+    # this figure, computed only where both actually solved.
+    ratios = []
+    for xi, r in zip(x, scraped):
         if r["xfill_status"] == "SOLVED" and r["orca_status"] == "SOLVED":
             xt, ot = float(r["xfill_time"]), float(r["orca_time"])
             if xt > 0:
-                data.append((r["grid"], xt, ot, ot / xt))
-    data.sort(key=lambda p: p[3])
-    names = [p[0] for p in data]
-    xt_vals = [p[1] for p in data]
-    ot_vals = [p[2] for p in data]
-    ratios = [p[3] for p in data]
+                ratio = ot / xt
+                ratios.append(ratio)
+                label = f"{ratio:.0f}x" if ratio >= 1 else f"1/{1 / ratio:.1f}x"
+                color = SOLVER_COLOR["xfill"] if ratio >= 1 else SOLVER_COLOR["orca"]
+                ax.text(xi, max(xt, ot) * 1.6, label, ha="center", va="bottom",
+                         fontsize=6, color=color, fontweight="bold")
 
-    fig, ax = plt.subplots(figsize=(6.8, 3.6))
-    x = np.arange(len(names))
-    width = 0.38
-    ax.bar(x - width / 2, xt_vals, width, color=SOLVER_COLOR["xfill"], label="xfill")
-    ax.bar(x + width / 2, ot_vals, width, color=SOLVER_COLOR["orca"], label="orca-solver")
     ax.set_yscale("log")
+    ax.set_ylim(top=TIMEOUT_SECONDS * 12)
     ax.set_xticks(x)
-    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6)
-    ax.set_ylabel("wall time to solve (s, log scale)")
-    ax.legend(fontsize=7, frameon=False, loc="upper right")
+    ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6.5)
+    ax.set_ylabel(f"wall time to solve (s, log scale; {TIMEOUT_SECONDS:.0f}s cap)")
 
-    ymax = max(xt_vals + ot_vals)
-    for xi, xt, ot, ratio in zip(x, xt_vals, ot_vals, ratios):
-        label = f"{ratio:.0f}x" if ratio >= 1 else f"1/{1 / ratio:.1f}x"
-        color = SOLVER_COLOR["xfill"] if ratio >= 1 else SOLVER_COLOR["orca"]
-        ax.text(xi, max(xt, ot) * 1.35, label, ha="center", va="bottom",
-                 fontsize=6.5, color=color, fontweight="bold")
-    ax.set_ylim(top=ymax * 6)
+    import matplotlib.patches as mpatches
+    handles = [mpatches.Patch(facecolor=SOLVER_COLOR[s], label=SOLVER_LABEL[s]) for s in SOLVERS]
+    handles.append(mpatches.Patch(facecolor="white", edgecolor="black", hatch="////",
+                                   label="timed out"))
+    ax.legend(handles=handles, fontsize=6, frameon=False, ncol=3, loc="upper center")
 
     geomean = statistics.geometric_mean(ratios)
-    ax.set_title(f"Wall time per grid, xfill vs. orca-solver, scraped 15x15 grids, "
-                 f"where both solved\n(n={len(ratios)}; label = orca time / xfill time; "
-                 f"geometric mean {geomean:.0f}x)")
+    ax.set_title(f"Wall time per grid, all five solvers, scraped 15x15 grids (geomean {geomean:.0f}x)")
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig1b_speedup.pdf")
     fig.savefig(FIG_DIR / "fig1b_speedup.png")
