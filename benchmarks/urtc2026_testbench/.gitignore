@@ -1,0 +1,7 @@
+external_solvers/
+.venv/
+results/dict_min40.dict
+results/dict_min40_plain.txt
+results/scratch_grids/
+__pycache__/
+output/

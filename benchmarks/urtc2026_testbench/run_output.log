@@ -1,0 +1,24 @@
+dictionary: 183587 entries (score >= 40), derived from spreadthewordlist_caps.txt
+grids: 8 curated + 12 scraped (seed=20260807) = 20 total
+[ 1/20] sample_11x11             11x11 xfill=SOLVED    0.00s  orca=SOLVED    0.49s  ingrid=SOLVED    0.98s  composer=SOLVED    7.73s  savin=TIMEOUT  30.00s
+[ 2/20] sample_13x13             13x13 xfill=TIMEOUT  30.00s  orca=TIMEOUT  30.00s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[ 3/20] sample_15x15             15x15 xfill=SOLVED    1.32s  orca=SOLVED   13.44s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[ 4/20] sample_15x15_interlock   15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.25s  ingrid=SOLVED    1.04s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[ 5/20] sample_21x21             21x21 xfill=UNSAT     0.05s  orca=UNSAT     0.09s  ingrid=UNSAT     1.40s  composer=UNSAT     1.19s  savin=TIMEOUT  30.00s
+[ 6/20] sample_5x5                5x5  xfill=SOLVED    0.00s  orca=SOLVED    0.14s  ingrid=SOLVED    0.12s  composer=SOLVED    0.05s  savin=TIMEOUT  30.00s
+[ 7/20] sample_7x7                7x7  xfill=SOLVED    0.00s  orca=SOLVED    0.16s  ingrid=SOLVED    0.33s  composer=SOLVED    0.06s  savin=TIMEOUT  30.00s
+[ 8/20] sample_9x9                9x9  xfill=SOLVED    0.00s  orca=SOLVED    0.19s  ingrid=SOLVED    2.67s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[ 9/20] grid_018                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.28s  ingrid=SOLVED    1.04s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[10/20] grid_030                 15x15 xfill=SOLVED    0.48s  orca=SOLVED    5.21s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[11/20] grid_149                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.22s  ingrid=SOLVED    0.99s  composer=SOLVED    0.58s  savin=TIMEOUT  30.00s
+[12/20] grid_161                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.41s  ingrid=SOLVED    1.00s  composer=SOLVED    8.00s  savin=TIMEOUT  30.00s
+[13/20] grid_170                 15x15 xfill=SOLVED    0.02s  orca=SOLVED    3.82s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[14/20] grid_186                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.21s  ingrid=SOLVED    0.88s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[15/20] grid_222                 15x15 xfill=SOLVED    0.00s  orca=SOLVED    3.09s  ingrid=SOLVED    0.62s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[16/20] grid_229                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    0.18s  ingrid=SOLVED    1.36s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[17/20] grid_244                 15x15 xfill=SOLVED    0.01s  orca=SOLVED    3.44s  ingrid=SOLVED    1.19s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[18/20] grid_395                 15x15 xfill=SOLVED    6.09s  orca=TIMEOUT  30.00s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[19/20] grid_423                 15x15 xfill=TIMEOUT  30.00s  orca=TIMEOUT  30.00s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+[20/20] grid_479                 15x15 xfill=SOLVED   24.15s  orca=SOLVED    7.99s  ingrid=TIMEOUT  30.00s  composer=TIMEOUT  30.00s  savin=TIMEOUT  30.00s
+
+wrote /Users/lukeschreiber/Downloads/crossword-filler/benchmarks/urtc2026_testbench/results/results.csv
