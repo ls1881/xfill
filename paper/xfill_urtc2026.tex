@@ -33,7 +33,7 @@ Crossword filling -- assigning a dictionary word to every slot in a grid so ever
 
 This paper is not about crossword filling. It uses crossword filling as a setting to answer one question about parallel constraint search: when multiple workers run concurrently, is there value in sharing \textit{soft} heuristic statistics -- information that biases search order without asserting anything logically -- continuously, without ever partitioning the problem those workers are solving? Section~\ref{sec:relwork} shows this combination does not exist in prior work; Section~\ref{sec:arch} implements it; Section~\ref{sec:experiments} measures its effect, both in isolation and against the broader architectural backdrop that makes it worth measuring at all.
 
-\textbf{Contributions:} (1) a concurrent, decentralized conflict-weight-sharing mechanism for restart-portfolio CSP search, positioned precisely against the closest prior work; (2) a reproducible four-solver testbench that separates two claims -- restart-portfolio search as an architectural class versus this specific mechanism within it -- rather than conflating them; and (3) a methodological negative result about confirming a heuristic under test actually executes before trusting a benchmark comparison of it.
+\textbf{Contributions:} (1) a concurrent, decentralized conflict-weight-sharing mechanism for restart-portfolio CSP search, positioned precisely against the closest prior work; (2) a reproducible four-solver testbench that separates two claims -- restart-portfolio search as an architectural class versus this specific mechanism within it -- rather than conflating them; and (3) a methodological negative result about confirming a heuristic executes before trusting its benchmark comparison.
 
 \section{Background and Related Work}
 \label{sec:relwork}
@@ -66,7 +66,7 @@ All five produced numerically identical node and backtrack counts -- too strong 
 \label{sec:experiments}
 
 \subsection{Setup}
-The experiments below -- which depend on the restart-randomization fix Section~\ref{sec:negative} motivated -- test two distinct claims, and we keep them in separate subsections rather than blending them. Sections~\ref{sec:oversub}--\ref{sec:exhaustive} test whether restart-portfolio search, as an architectural class, occupies a genuinely different point in the design space than partition-based search -- using orca-solver as a concrete, independently developed representative of that alternative, and an unmodified naive backtracker to show the comparison is not trivial. This establishes why the mechanism is worth building at all. Section~\ref{sec:ablation} then isolates the mechanism itself, holding architecture fixed, which is this paper's actual contribution.
+The experiments below -- enabled by Section~\ref{sec:negative}'s fix -- test two distinct claims, and we keep them in separate subsections rather than blending them. Sections~\ref{sec:oversub}--\ref{sec:exhaustive} test whether restart-portfolio search, as an architectural class, occupies a genuinely different point in the design space than partition-based search -- using orca-solver as a concrete, independently developed representative of that alternative, and an unmodified naive backtracker to show the comparison is not trivial. This establishes why the mechanism is worth building at all. Section~\ref{sec:ablation} then isolates the mechanism itself, holding architecture fixed, which is this paper's actual contribution.
 
 \textbf{Solvers.} xfill (this work); orca-solver, a partition-based parallel solver treated as a black box; ingrid\_core, a single-threaded reference solver; and, as a naive baseline with no restarts, no learned heuristics, and no parallelism, crossword-composer (a static-constraint-order Rust backtracker). A second naive baseline, savin\_crossword, was tested but is excluded below: it timed out on all 20 grids at both a 120s and a 300s cap, including trivial $5\times5$/$7\times7$ ones (Section~\ref{sec:naive}). The remaining four run through a single fixed harness (\texttt{benchmarks/urtc2026\_testbench/}), against a dictionary derived deterministically from the repository's own freely available word list, with a fixed seed and a 300-second cap, reproducible via \texttt{run\_benchmark.py}; every timeout was re-tested at 600s via \texttt{rerun\_timeouts.py} to rule out an under-provisioned cap (Section~\ref{sec:naive}). xfill and orca-solver race independent workers, so wall time varies run to run; each runs 5 times per grid, median reported, every trial logged. ingrid\_core and crossword-composer are single-threaded and deterministic, so each runs once.
 
@@ -159,7 +159,7 @@ This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent
 
 \bibitem{gent2018} I. P. Gent, I. J. Miguel, P. W. Nightingale, C. McCreesh, P. Prosser, N. Moore, and C. Unsworth, ``A review of literature on parallel constraint solving,'' \textit{Theory and Practice of Logic Programming}, vol. 18, no. 5--6, pp. 725--758, 2018.
 
-\bibitem{crosswordgrids} Crosswordgrids.com, \url{crosswordgrids.com/15x15-crossword-grids}
+\bibitem{crosswordgrids} \url{crosswordgrids.com/15x15-crossword-grids}
 
 \end{thebibliography}
 
