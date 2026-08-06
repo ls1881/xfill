@@ -64,15 +64,20 @@ anyone who clones the repo, with no paid content required.
 
 ## Timeout and trials
 
-300 seconds per (solver, grid) pair (`TIMEOUT_SECONDS`), enforced by
-killing the subprocess. This was raised from an earlier 30s/120s cap
-specifically to check whether solvers that were timing out just needed
-more budget; some did (e.g. xfill and orca-solver both newly solve grids
-at 300s that neither could reach at 120s), and some clearly do not
-(savin_crossword, above). It is **not** the same as this project's other,
-uncapped multi-hour benchmarks documented in `docs/design.md`, which
-exist for a different purpose (finding the true limits of one specific
-hard grid, not producing a reproducible multi-solver comparison).
+`results.csv` was built in two passes: `run_benchmark.py` first swept
+every grid at a 300-second cap, then every (solver, grid) pair that
+timed out was re-tested at 600s via `rerun_timeouts.py` (`TIMEOUT_SECONDS`
+in both scripts is now 600, matching the second pass). This two-stage
+process exists specifically to check whether a timeout meant "needed more
+budget" or "genuinely stuck," and the two are not the same: of 18 pairs
+re-tested at double the cap, exactly one changed — ingrid_core went on to
+solve `grid_479` in 325s. Every other timeout, including all 11 of
+crossword-composer's and the one grid no solver resolves at either cap
+(`sample_13x13`), held at 600s too. This cap is **not** the same as this
+project's other, uncapped multi-hour benchmarks documented in
+`docs/design.md`, which exist for a different purpose (finding the true
+limits of one specific hard grid, not producing a reproducible
+multi-solver comparison).
 
 xfill and orca-solver both race independent workers internally (a
 restart portfolio and a partition-based search, respectively), so wall

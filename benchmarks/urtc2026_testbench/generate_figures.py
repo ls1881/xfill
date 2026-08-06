@@ -20,7 +20,7 @@ import numpy as np
 TESTBENCH_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = TESTBENCH_DIR / "results" / "results.csv"
 FIG_DIR = TESTBENCH_DIR / "results" / "figures"
-TIMEOUT_SECONDS = 300.0
+TIMEOUT_SECONDS = 600.0
 
 # Shared, restrained publication style: no gridlines competing with data,
 # a single accent color reused consistently per solver across all figures.
