@@ -20,7 +20,7 @@ import numpy as np
 TESTBENCH_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = TESTBENCH_DIR / "results" / "results.csv"
 FIG_DIR = TESTBENCH_DIR / "results" / "figures"
-TIMEOUT_SECONDS = 30.0
+TIMEOUT_SECONDS = 300.0
 
 # Shared, restrained publication style: no gridlines competing with data,
 # a single accent color reused consistently per solver across all figures.
@@ -35,21 +35,24 @@ plt.rcParams.update({
     "savefig.bbox": "tight",
 })
 
+# savin_crossword is excluded from every figure here (and from
+# results.csv itself, see run_benchmark.py): it timed out on all 20
+# grids, including trivial 5x5/7x7 ones, at both a 120s and a 300s cap,
+# ruling out "the cap was too short." Its color/label are kept only
+# because generate_figures.py's docstring/comments still reference it.
 SOLVER_COLOR = {
     "xfill": "#1b5e8f",       # blue -- this project
     "orca": "#c0392b",        # red -- closest sophisticated competitor
     "ingrid": "#7f8c8d",      # grey -- reference baseline
     "composer": "#e08e2b",    # orange -- naive-but-real backtracker
-    "savin": "#8e44ad",       # purple -- textbook CS50-style baseline
 }
 SOLVER_LABEL = {
     "xfill": "xfill",
     "orca": "orca-solver",
     "ingrid": "ingrid_core",
     "composer": "crossword-composer",
-    "savin": "savin_crossword",
 }
-SOLVERS = ["xfill", "orca", "ingrid", "composer", "savin"]
+SOLVERS = ["xfill", "orca", "ingrid", "composer"]
 
 
 def load_rows():
@@ -114,15 +117,22 @@ def fig_success_by_size(rows):
 
 
 # Figure 1b: the same point (xfill vs. orca-solver, scraped 15x15 grids,
-# both absolute time per grid), now with all five solvers shown side by
-# side rather than just the two sophisticated ones -- so the naive
-# baselines' near-total absence from the solved bars isn't just a count
+# both absolute time per grid), now with all four solvers shown side by
+# side rather than just the two sophisticated ones -- so ingrid_core's
+# and crossword-composer's gap from xfill/orca-solver isn't just a count
 # reported in prose (Section V-C), it is directly visible, grid by grid,
 # next to the two solvers that do compete. Solvers that time out on a
 # given grid are drawn as hatched, hollow bars at the timeout cap rather
 # than omitted, matching the "hollow triangle = timed out" convention
 # already used in Fig. 1. xfill/orca-solver speedup ratio is kept as a
 # label above those two bars, unchanged from the previous version.
+#
+# savin_crossword is excluded from SOLVERS entirely (see the comment
+# above SOLVER_COLOR): it timed out on every single grid, including
+# trivial 5x5/7x7 ones, at both a 120s and a 300s cap, ruling out "the
+# cap was too short." A bar that would be 100% hatched on every single
+# grid carries no information a reader doesn't already get from the
+# one-sentence count in prose, so it would just be clutter here.
 def fig_speedup(rows):
     scraped = [r for r in rows if r["source"] == "scraped"]
 
@@ -181,7 +191,7 @@ def fig_speedup(rows):
     ax.legend(handles=handles, fontsize=6, frameon=False, ncol=3, loc="upper center")
 
     geomean = statistics.geometric_mean(ratios)
-    ax.set_title(f"Wall time per grid, all five solvers, scraped 15x15 grids (geomean {geomean:.0f}x)")
+    ax.set_title(f"Wall time per grid, four solvers, scraped 15x15 grids (geomean {geomean:.0f}x)")
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig1b_speedup.pdf")
     fig.savefig(FIG_DIR / "fig1b_speedup.png")
