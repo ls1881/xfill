@@ -99,6 +99,7 @@ def fig_success_by_size(rows):
     ax.axhline(TIMEOUT_SECONDS, color="#cccccc", linewidth=1, linestyle="--", zorder=1)
     ax.set_yscale("log")
     ax.set_ylim(top=1000)
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, numticks=15))
     ax.set_xticks(x)
     ax.set_xticklabels(sizes, rotation=0, fontsize=7)
     ax.set_xlabel(f"grid size (curated size-graded set, {TIMEOUT_SECONDS:.0f}s cap)")
@@ -175,6 +176,7 @@ def fig_speedup(rows):
 
     ax.set_yscale("log")
     ax.set_ylim(top=1000)
+    ax.yaxis.set_major_locator(mticker.LogLocator(base=10.0, numticks=15))
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6.5)
     ax.set_ylabel(f"wall time to solve (s, log scale; {TIMEOUT_SECONDS:.0f}s cap)")
