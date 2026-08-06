@@ -60,12 +60,6 @@ def load_rows():
         return list(csv.DictReader(f))
 
 
-def solved_time(row, solver):
-    status = row[f"{solver}_status"]
-    t = float(row[f"{solver}_time"])
-    return t if status == "SOLVED" else None
-
-
 # Figure 1: on the curated size-graded set, does xfill's edge over
 # orca-solver survive as grid size grows, or is it only about which
 # grids get solved at all? A binary solved/not-solved view (an earlier
@@ -104,6 +98,7 @@ def fig_success_by_size(rows):
                    s=40, zorder=3, marker="^", linewidths=1.2)
     ax.axhline(TIMEOUT_SECONDS, color="#cccccc", linewidth=1, linestyle="--", zorder=1)
     ax.set_yscale("log")
+    ax.set_ylim(top=1000)
     ax.set_xticks(x)
     ax.set_xticklabels(sizes, rotation=0, fontsize=7)
     ax.set_xlabel(f"grid size (curated size-graded set, {TIMEOUT_SECONDS:.0f}s cap)")
@@ -179,7 +174,7 @@ def fig_speedup(rows):
                          fontsize=6, color=color, fontweight="bold")
 
     ax.set_yscale("log")
-    ax.set_ylim(top=TIMEOUT_SECONDS * 12)
+    ax.set_ylim(top=1000)
     ax.set_xticks(x)
     ax.set_xticklabels(names, rotation=60, ha="right", fontsize=6.5)
     ax.set_ylabel(f"wall time to solve (s, log scale; {TIMEOUT_SECONDS:.0f}s cap)")
@@ -200,29 +195,18 @@ def fig_speedup(rows):
           f"geomean={geomean:.1f}x, min={min(ratios):.2f}x, max={max(ratios):.1f}x")
 
 
-# Figure 2: on the 15x15 scale where a real crossword actually lives, how
-# do wall times compare among the solvers that finish at all? Naive
-# baselines are expected to be nearly absent from this figure by 15x15 --
-# that absence *is* the point, not a flaw in the figure.
-def fig_15x15_times(rows):
-    fifteens = [r for r in rows if r["rows"] == "15" and r["cols"] == "15"]
-    fig, ax = plt.subplots(figsize=(6.2, 3.2))
-    for i, solver in enumerate(SOLVERS):
-        times = sorted(t for r in fifteens if (t := solved_time(r, solver)) is not None)
-        if not times:
-            continue
-        y = np.arange(1, len(times) + 1) / len(fifteens)
-        ax.step(times, y, where="post", label=SOLVER_LABEL[solver],
-                 color=SOLVER_COLOR[solver], linewidth=1.6)
-    ax.set_xscale("log")
-    ax.set_xlabel("wall time to solve (s, log scale)")
-    ax.set_ylabel(f"fraction of {len(fifteens)} 15x15 grids solved")
-    ax.set_ylim(0, 1.02)
-    ax.set_title("Cumulative solve rate on 15x15 grids")
-    ax.legend(fontsize=7, frameon=False)
-    fig.savefig(FIG_DIR / "fig2_15x15_cumulative.pdf")
-    fig.savefig(FIG_DIR / "fig2_15x15_cumulative.png")
-    plt.close(fig)
+# NOTE: this script previously also produced fig2_15x15_cumulative.{pdf,
+# png} (a cumulative-solve-rate-by-time curve over the same 12-14 15x15
+# grids Fig. 3 already shows per-grid). It was removed: once Fig. 3 shows
+# every one of those grids individually, with speedup ratios, a
+# cumulative-distribution view of the same underlying numbers made the
+# same point again rather than a new one -- exactly the kind of
+# redundancy this testbench tries to avoid (see the fig3_xfill_orca_
+# overlap removal note below for the same reasoning applied earlier).
+# The vertical figure budget it used went to fig_ablation_combined
+# instead, which answers a real open question the paper had -- does the
+# ablation finding generalize past one curated grid list -- rather than
+# re-illustrating one already covered twice.
 
 
 # NOTE: an earlier version of this script also produced a
@@ -237,47 +221,74 @@ def fig_15x15_times(rows):
 # Sections V-C/V-G turn to a deliberately harder grid list.
 
 
-# Figure 4: the paper's core mechanism, isolated -- reported honestly.
-# Same solver, same dictionary, same threads, same grid; the only
-# variable is the XFILL_DISABLE_SHARED_WEIGHTS toggle. On this
-# specific "hardest grids" set, 6 trials per config show NOT a clean
-# win but a variance story: shared weights don't reliably move the
-# median here and on one grid produce a catastrophic outlier, while the
-# unshared baseline is consistently tighter. Drawn as individual trial
-# points (not bars of a single summary stat), because the spread is
-# the actual finding -- a bar chart of medians alone would hide it.
-def fig_ablation_refined():
-    path = TESTBENCH_DIR / "results" / "ablation_refined.csv"
-    if not path.exists():
+# Figure 4: the paper's core mechanism, isolated -- reported honestly, on
+# two independent grid sets rather than one. Same solver, same
+# dictionary, same threads, same grid; the only variable is the
+# XFILL_DISABLE_SHARED_WEIGHTS toggle. The first three panels are the
+# "known hard" list (ablation_refined.csv, 6 trials each, 45s cap); the
+# last three are three grids from the paper's own main scraped-15x15
+# corpus (ablation_standard.csv, 5 trials each, 300s cap) that turned out
+# to have real signal (the other 9 of that 12-grid corpus solve in well
+# under a second regardless of the toggle, and are omitted as
+# uninformative). Both sets independently land on the same three
+# patterns -- a clean win, a wash with wider spread, and a reliability
+# trade-off -- which is the point: this is not an artifact of one curated
+# grid list. Drawn as individual trial points, not bars of a single
+# summary stat, because the spread is the actual finding; open markers
+# mark a trial that hit its cap.
+def fig_ablation_combined():
+    refined_path = TESTBENCH_DIR / "results" / "ablation_refined.csv"
+    standard_path = TESTBENCH_DIR / "results" / "ablation_standard.csv"
+    if not refined_path.exists() or not standard_path.exists():
         return
-    with open(path) as f:
-        rows = list(csv.DictReader(f))
-    grids = sorted(set(r["grid"] for r in rows), key=lambda g: [r["grid"] for r in rows].index(g))
 
-    fig, axes = plt.subplots(1, len(grids), figsize=(2.4 * len(grids), 3.0), sharey=False)
-    if len(grids) == 1:
-        axes = [axes]
-    for ax, grid in zip(axes, grids):
+    with open(refined_path) as f:
+        refined_rows = list(csv.DictReader(f))
+    refined_grids = sorted(set(r["grid"] for r in refined_rows),
+                            key=lambda g: [r["grid"] for r in refined_rows].index(g))
+    refined_cap = 45.0
+
+    with open(standard_path) as f:
+        standard_rows = list(csv.DictReader(f))
+    # Only the standard-corpus grids with real signal; the other 9 solve
+    # in well under a second either way and add nothing to look at.
+    standard_grids = ["grid_395", "grid_423", "grid_479"]
+    standard_cap = 300.0
+
+    panels = [(g, refined_rows, refined_cap) for g in refined_grids] + \
+             [(g, standard_rows, standard_cap) for g in standard_grids]
+
+    fig, axes = plt.subplots(1, len(panels), figsize=(2.05 * len(panels), 2.9), sharey=False)
+    for ax, (grid, rows, cap) in zip(axes, panels):
         for i, config in enumerate(["without", "with"]):
             times = [float(r["time"]) for r in rows if r["grid"] == grid and r["config"] == config]
             color = "#b0b0b0" if config == "without" else SOLVER_COLOR["xfill"]
+            capped = [t >= cap for t in times]
             jitter = np.random.default_rng(0).uniform(-0.08, 0.08, size=len(times))
-            ax.scatter([i + j for j in jitter], times, color=color, s=22, zorder=3,
+            xs = [i + j for j in jitter]
+            solid_x = [xv for xv, c in zip(xs, capped) if not c]
+            solid_y = [t for t, c in zip(times, capped) if not c]
+            hollow_x = [xv for xv, c in zip(xs, capped) if c]
+            hollow_y = [t for t, c in zip(times, capped) if c]
+            ax.scatter(solid_x, solid_y, color=color, s=22, zorder=3,
                        edgecolors="black", linewidths=0.4)
+            ax.scatter(hollow_x, hollow_y, facecolors="none", edgecolors=color,
+                       s=26, zorder=3, linewidths=1.2)
             ax.hlines(statistics.median(times), i - 0.15, i + 0.15, color=color, linewidth=2, zorder=2)
         ax.set_xticks([0, 1])
         ax.set_xticklabels(["off", "on"], fontsize=8)
         ax.set_title(grid, fontsize=9)
     axes[0].set_ylabel("wall time to solve (s)")
-    fig.suptitle("Shared conflict weights: 6 trials per config, 14 threads "
-                 "(bar = median; grid 120 trial 6 timed out at 45s, off-scale)", fontsize=8)
+    fig.suptitle("Shared conflict weights, off vs.\\ on: known-hard grids (left three, 6 trials, "
+                 "45s cap) and the paper's own scraped-15x15 corpus (right three, 5 trials, 300s "
+                 "cap). Bar = median; hollow point = hit the cap.", fontsize=8)
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig4_ablation.pdf")
     fig.savefig(FIG_DIR / "fig4_ablation.png")
     plt.close(fig)
 
-    print("\nablation (6 trials, 14 threads):")
-    for grid in grids:
+    print("\nablation (combined):")
+    for grid, rows, cap in panels:
         for config in ["without", "with"]:
             times = [float(r["time"]) for r in rows if r["grid"] == grid and r["config"] == config]
             print(f"  {grid:10s} {config:8s} median={statistics.median(times):.3f}s  "
@@ -344,8 +355,7 @@ def main():
     rows = load_rows()
     fig_success_by_size(rows)
     fig_speedup(rows)
-    fig_15x15_times(rows)
-    fig_ablation_refined()
+    fig_ablation_combined()
     fig_thread_scaling()
     print_summary_table(rows)
     print(f"\nfigures written to {FIG_DIR}")

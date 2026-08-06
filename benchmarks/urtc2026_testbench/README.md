@@ -134,28 +134,41 @@ python3 -m venv .venv && .venv/bin/pip install matplotlib numpy pypdf
 .venv/bin/python3 generate_figures.py       # writes results/figures/*.{png,pdf}
 ```
 
-## Two additional experiments, specifically isolating xfill's contribution
+## Three additional experiments, specifically isolating xfill's contribution
 
 `run_benchmark.py`'s general sweep uses grids that mostly solve in well
-under a second for the sophisticated solvers -- too easy for either of
-the effects below to show up. `run_xfill_strengths.py` runs two more
-targeted experiments against a fixed "known hard" grid list reused from
-this project's own pre-existing development benchmarking (not cherry-
-picked for this paper):
+under a second for the sophisticated solvers -- too easy for the effects
+below to show up. `run_xfill_strengths.py` runs three more targeted
+experiments:
 
-1. **Shared-conflict-weight ablation** (`results/ablation.csv`, the
-   shared-weight ablation figure): xfill run twice per grid, identical in
-   every respect except the `XFILL_DISABLE_SHARED_WEIGHTS` environment
-   variable (a benchmarking-only hook in `SolveParallel`, see
-   `src/solver.cpp` -- unset, the default, changes nothing). This
+1. **Shared-conflict-weight ablation, known-hard grids**
+   (`results/ablation.csv`, `ablation()`): xfill run twice per grid,
+   identical in every respect except the `XFILL_DISABLE_SHARED_WEIGHTS`
+   environment variable (a benchmarking-only hook in `SolveParallel`, see
+   `src/solver.cpp` -- unset, the default, changes nothing), on
+   `HARD_GRIDS`, a fixed list reused from this project's own pre-existing
+   development benchmarking (not cherry-picked for this paper). This
    isolates the paper's actual mechanism from every other difference a
    cross-solver comparison necessarily carries (different language,
    dictionary handling, everything).
-2. **Thread-count scaling** (`results/thread_scaling.csv`, the
-   thread-scaling figure): xfill and orca-solver on the same grids across
-   thread counts from 1 to 3x physical core count, showing the two
-   architectures respond to added parallelism in opposite ways (Section
-   V-C/Discussion of the paper).
+2. **The same ablation, on `STANDARD_GRIDS`**
+   (`results/ablation_standard.csv`, `ablation_standard_corpus()`): the
+   exact same toggle, but on the same 12-grid scraped-15x15 sample every
+   other scraped-grid figure in the paper uses, rather than the
+   separately-curated `HARD_GRIDS` list. This closes a real gap --
+   `HARD_GRIDS` was never tested against the paper's own main corpus --
+   and shows the first ablation's regime-dependent finding (a real win on
+   some grids, a wash or worse on others) is not an artifact of that one
+   curated list: the same three patterns reappear independently on
+   `grid_395`, `grid_423`, and `grid_479` (the other 9 of the 12 solve in
+   well under a second regardless of the toggle and carry no signal).
+   Both ablations are combined into one figure by `fig_ablation_combined`
+   in `generate_figures.py`.
+3. **Thread-count scaling** (`results/thread_scaling.csv`,
+   `thread_scaling()`): xfill and orca-solver on `HARD_GRIDS` subset
+   `SCALING_GRIDS`, across thread counts from 1 to 3x physical core
+   count, showing the two architectures respond to added parallelism in
+   opposite ways (Section V-C/Discussion of the paper).
 
 ## Files
 
@@ -164,7 +177,12 @@ picked for this paper):
   pairs at a new cap and merges the results back in; see "Timeout and
   trials" above.
 - `generate_figures.py` — builds the figures used in the paper; each
-  function's docstring states which specific claim the figure backs.
+  function's docstring states which specific claim the figure backs. An
+  earlier version also produced a cumulative-solve-rate-by-time figure
+  and a xfill/orca-solver overlap-count figure; both were removed once
+  another figure already in the paper covered the same underlying
+  numbers from a different angle -- see the `NOTE:` comments in this
+  file for the specific reasoning behind each removal.
 - `external_adapters/crossword_composer_cli.rs` — a headless CLI wrapper
   we wrote for crossword-composer (upstream only ships a hardcoded demo
   `main.rs` and a browser UI). Original code, MIT-compatible with the
@@ -173,4 +191,6 @@ picked for this paper):
   numbers, committed for inspection without re-running anything.
 - `results/results_trials.csv` — every individual trial for xfill and
   orca-solver (5 per grid), the raw data `results.csv`'s medians summarize.
+- `results/ablation_standard.csv` — per-trial data for the second ablation
+  above (`grid_395`/`grid_423`/`grid_479`, 5 trials per config).
 - `results/figures/` — the generated figures, committed alongside the CSVs.
