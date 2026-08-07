@@ -64,20 +64,21 @@ anyone who clones the repo, with no paid content required.
 
 ## Timeout and trials
 
-`results.csv` was built in two passes: `run_benchmark.py` first swept
+`results.csv` was built in three passes: `run_benchmark.py` first swept
 every grid at a 300-second cap, then every (solver, grid) pair that
-timed out was re-tested at 600s via `rerun_timeouts.py` (`TIMEOUT_SECONDS`
-in both scripts is now 600, matching the second pass). This two-stage
-process exists specifically to check whether a timeout meant "needed more
-budget" or "genuinely stuck," and the two are not the same: of 18 pairs
-re-tested at double the cap, exactly one changed — ingrid_core went on to
-solve `grid_479` in 325s. Every other timeout, including all 11 of
-crossword-composer's and the one grid no solver resolves at either cap
-(`sample_13x13`), held at 600s too. This cap is **not** the same as this
-project's other, uncapped multi-hour benchmarks documented in
-`docs/design.md`, which exist for a different purpose (finding the true
-limits of one specific hard grid, not producing a reproducible
-multi-solver comparison).
+timed out was re-tested at 600s, then re-tested again at 1000s, both via
+`rerun_timeouts.py` (`TIMEOUT_SECONDS` in both scripts is now 1000,
+matching the final pass). This staged escalation exists specifically to
+check whether a timeout meant "needed more budget" or "genuinely stuck,"
+and the two are not always the same: of 18 pairs re-tested at double the
+original cap (300s to 600s), exactly one changed — ingrid_core went on to
+solve `grid_479` in 325s. Escalating further, from 600s to 1000s, changed
+none: every remaining timeout, including all 11 of crossword-composer's
+and the one grid no solver resolves at any cap tested (`sample_13x13`),
+held. This cap is **not** the same as this project's other, uncapped
+multi-hour benchmarks documented in `docs/design.md`, which exist for a
+different purpose (finding the true limits of one specific hard grid, not
+producing a reproducible multi-solver comparison).
 
 xfill and orca-solver both race independent workers internally (a
 restart portfolio and a partition-based search, respectively), so wall

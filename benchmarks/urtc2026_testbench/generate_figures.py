@@ -20,7 +20,7 @@ import numpy as np
 TESTBENCH_DIR = Path(__file__).resolve().parent
 RESULTS_CSV = TESTBENCH_DIR / "results" / "results.csv"
 FIG_DIR = TESTBENCH_DIR / "results" / "figures"
-TIMEOUT_SECONDS = 600.0
+TIMEOUT_SECONDS = 1000.0
 
 # Shared, restrained publication style: no gridlines competing with data,
 # a single accent color reused consistently per solver across all figures.
@@ -260,7 +260,7 @@ def fig_ablation_combined():
     panels = [(g, refined_rows, refined_cap) for g in refined_grids] + \
              [(g, standard_rows, standard_cap) for g in standard_grids]
 
-    fig, axes = plt.subplots(1, len(panels), figsize=(2.05 * len(panels), 2.9), sharey=False)
+    fig, axes = plt.subplots(1, len(panels), figsize=(2.05 * len(panels), 2.3), sharey=False)
     for ax, (grid, rows, cap) in zip(axes, panels):
         for i, config in enumerate(["without", "with"]):
             times = [float(r["time"]) for r in rows if r["grid"] == grid and r["config"] == config]

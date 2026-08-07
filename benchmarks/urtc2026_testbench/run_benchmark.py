@@ -66,7 +66,7 @@ SAVIN_DIR = EXTERNAL / "savin_crossword"
 
 SOURCE_WORDLIST = REPO / "data" / "spreadthewordlist_caps.txt"
 MIN_SCORE = 40
-TIMEOUT_SECONDS = 600.0
+TIMEOUT_SECONDS = 1000.0
 RANDOM_SEED = 20260807  # URTC 2026 submission deadline, used as a fixed,
                         # documented seed rather than an arbitrary one
 N_SCRAPED_SAMPLE = 12

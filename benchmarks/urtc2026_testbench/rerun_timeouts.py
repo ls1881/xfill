@@ -19,7 +19,7 @@ import sys
 
 import run_benchmark as rb
 
-RERUN_TIMEOUT_SECONDS = 600.0
+RERUN_TIMEOUT_SECONDS = 1000.0
 rb.TIMEOUT_SECONDS = RERUN_TIMEOUT_SECONDS
 
 RESULTS_CSV = rb.OUT_DIR / "results.csv"
