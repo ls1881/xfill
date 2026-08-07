@@ -44,7 +44,7 @@ SOLVER_COLOR = {
     "xfill": "#1b5e8f",       # blue -- this project
     "orca": "#c0392b",        # red -- closest sophisticated competitor
     "ingrid": "#7f8c8d",      # grey -- reference baseline
-    "composer": "#e08e2b",    # orange -- naive-but-real backtracker
+    "composer": "#7b3294",    # purple -- naive-but-real backtracker (was orange; too close to orca's red for red-green colorblind readers)
 }
 SOLVER_LABEL = {
     "xfill": "xfill",
