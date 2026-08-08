@@ -4,6 +4,9 @@
 \usepackage{url}
 \usepackage{cite}
 \usepackage{amsmath}
+\usepackage{newtxtext}
+
+\renewcommand{\IEEEkeywordsname}{Keywords}
 
 \begin{document}
 
@@ -20,7 +23,7 @@ ls1881@princeton.edu}
 \maketitle
 
 \begin{abstract}
-Parallel CSP solvers typically partition the search space across workers or run an undivided portfolio of independent restarts; prior work treats any sharing between workers as a one-time input to partitioning. This paper describes a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of per-constraint conflict weights, with no manager and no synchronization phase. We implement it in xfill, a word-level CSP solver for crossword filling, and test it two ways. First, we show restart-portfolio search occupies a genuinely different point in the design space than partition-based search, represented by orca-solver, an independently developed alternative: oversubscribing thread count improves xfill roughly 65 times on one hard grid, while orca-solver improves only marginally and cannot solve it below 14 threads; on 12 real, previously published 15x15 grids, xfill solves every one, and is faster on 9 of the 11 where orca-solver also succeeds, by a geometric mean of 107 times. Partitioning, conversely, gives non-overlapping coverage useful for proving unsatisfiability. Second---this paper's actual contribution---we isolate the mechanism itself, holding solver and grid fixed: a consistent win on moderate-difficulty grids, but higher variance rather than a reliable one on the hardest instances, reported honestly alongside the positive result. We also report a negative result: five plausible branching heuristics produced identical output because a domain-size precondition meant none of them ever executed---caught only by direct instrumentation, not benchmark comparison.
+\textbf{Parallel CSP solvers typically partition the search space across workers or run an undivided portfolio of independent restarts; prior work treats any sharing between workers as a one-time input to partitioning. This paper describes a restart portfolio whose workers never partition the problem, but continuously and concurrently update a shared pool of per-constraint conflict weights, with no manager and no synchronization phase. We implement it in xfill, a word-level CSP solver for crossword filling, and test it two ways. First, we show restart-portfolio search occupies a genuinely different point in the design space than partition-based search, represented by orca-solver, an independently developed alternative: oversubscribing thread count improves xfill roughly 65 times on one hard grid, while orca-solver improves only marginally and cannot solve it below 14 threads; on 12 real, previously published 15x15 grids, xfill solves every one, and is faster on 9 of the 11 where orca-solver also succeeds, by a geometric mean of 107 times. Partitioning, conversely, gives non-overlapping coverage useful for proving unsatisfiability. Second---this paper's actual contribution---we isolate the mechanism itself, holding solver and grid fixed: a consistent win on moderate-difficulty grids, but higher variance rather than a reliable one on the hardest instances, reported honestly alongside the positive result. We also report a negative result: five plausible branching heuristics produced identical output because a domain-size precondition meant none of them ever executed---caught only by direct instrumentation, not benchmark comparison.}
 \end{abstract}
 
 \begin{IEEEkeywords}
