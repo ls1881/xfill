@@ -112,7 +112,23 @@ Fig.~\ref{fig:scaling}'s result splits three ways, showing this is a property of
 
 \subsection{Naive Backtracking Is Not a Baseline Worth Beating}
 \label{sec:naive}
-Zooming out from thread scaling on a few hand-picked hard grids to the full sweep across all four solvers and every curated grid size (Fig.~\ref{fig:size}), the same advantage holds broadly, letting us test directly whether crossword-composer's losses are a genuine baseline failure or just an under-provisioned time budget. Across all 20 grids, xfill resolved 19 (18 solved, 1 UNSAT; 1 timeout), orca-solver 18 (17 solved, 1 UNSAT; 2 timeouts), ingrid\_core 17 (16 solved, 1 UNSAT; 3 timeouts), and crossword-composer 9 (8 solved, 1 UNSAT; 11 timeouts)---a real, unmodified, independently authored solver, not a strawman built to lose. Escalating the cap from 300s to 600s changed exactly one outcome: ingrid\_core went on to solve \texttt{grid\_479} in 325s. A further escalation to 1000s (the cap these figures use) changed none: every remaining timeout, all 11 of crossword-composer's plus \texttt{sample\_13x13}, the one grid no solver resolves at any cap tested, held again: evidence these are hard, not under-budgeted. The point for this paper's thesis is narrower than ``xfill wins'': at the grid and dictionary sizes crossword filling actually requires, restarts, adaptive heuristics, and parallelism are not optional refinements; they are the premise on which the rest of this section, and the mechanism this paper contributes, depend.
+Zooming out from thread scaling on a few hand-picked hard grids to the full sweep across all four solvers and every curated grid size (Fig.~\ref{fig:size}), the same advantage holds broadly, letting us test directly whether crossword-composer's losses are a genuine baseline failure or just an under-provisioned time budget. Table~\ref{tab:outcomes} summarizes the outcome: across all 20 grids, xfill resolved 19, orca-solver 18, ingrid\_core 17, and crossword-composer, a real, unmodified, independently authored solver and not a strawman built to lose, only 9.
+
+\begin{table}[t]
+\centering
+\caption{Solve Outcomes Across All 20 Grids, 1000s Cap}
+\label{tab:outcomes}
+\begin{tabular}{lcccc}
+\toprule
+Solver & Solved & UNSAT & Timeout & Resolved \\
+\midrule
+xfill & 18 & 1 & 1 & 19 \\
+orca-solver & 17 & 1 & 2 & 18 \\
+ingrid\_core & 16 & 1 & 3 & 17 \\
+crossword-composer & 8 & 1 & 11 & 9 \\
+\bottomrule
+\end{tabular}
+\end{table} Escalating the cap from 300s to 600s changed exactly one outcome: ingrid\_core went on to solve \texttt{grid\_479} in 325s. A further escalation to 1000s (the cap these figures use) changed none: every remaining timeout, all 11 of crossword-composer's plus \texttt{sample\_13x13}, the one grid no solver resolves at any cap tested, held again: evidence these are hard, not under-budgeted. The point for this paper's thesis is narrower than ``xfill wins'': at the grid and dictionary sizes crossword filling actually requires, restarts, adaptive heuristics, and parallelism are not optional refinements; they are the premise on which the rest of this section, and the mechanism this paper contributes, depend.
 
 \begin{figure*}[t]
 \centering
@@ -136,6 +152,8 @@ The negative result in Section~\ref{sec:negative} follows the same discipline. F
 All timing results are from one 14-core machine and one dictionary derived from a specific freely available word list; the thread-scaling numbers should not be read as hardware- or dictionary-independent claims. The architectural comparison also rests on one partition-based representative, orca-solver, chosen for being fast, open-source, and actively maintained rather than through a systematic survey of partition-based solvers; results may not generalize to every implementation of that approach. Both principal solvers are actively developed; exact commit hashes are recorded in the testbench README.
 
 This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent conflict-weight sharing across a restart portfolio that never partitions, occupying a gap that three adjacent lines of prior work leave open. The architectural comparison in Section~\ref{sec:experiments} supports that gap's importance rather than being the paper's subject, as restart portfolios and partitioned search are suited respectively to finding solutions quickly and to proving none exist, a pattern independent of any one solver. The mechanism itself, tested in isolation, is more modest than the architecture it sits inside: a real win on typical grids, a wash or worse on the hardest ones, reported as measured rather than as hoped. We also reported a negative result from the same codebase in that five heuristics rendered indistinguishable by a precondition that kept them from ever executing, illustrating a reusable caution for comparing branching heuristics by benchmark score alone. Although xfill itself is built for crossword filling, its mechanism is not: it needs only a dom/wdeg-style weight table and a restart loop, both already common in CSP and lazy-clause-generation solvers, so the same approach could extend to other CSPs, exactly the ingredients Section~\ref{sec:relwork} found no prior system combining this way.
+
+Future work could test that extension directly, in a non-crossword CSP domain such as graph coloring or scheduling, where a wdeg-style solver already exists and only the shared-weight array would need to be added. It could also broaden the architectural comparison beyond orca-solver to other partition-based solvers, and re-run the ablation on a genuinely independent machine and dictionary, to separate what is specific to this setup from what generalizes.
 
 \section*{Acknowledgment}
 This work received no external funding or advisor supervision. The author used Claude Code (Anthropic), an AI coding assistant, throughout the project: to help implement and test the xfill solver, to build the benchmarking infrastructure and run the experiments reported here, to generate the figures, and to draft and revise this manuscript. The author reviewed, verified, and takes full responsibility for all code, experimental results, and conclusions in this paper.
