@@ -70,7 +70,11 @@ def load_rows():
 def fig_success_by_size(rows):
     curated = [r for r in rows if r["source"] == "curated"]
     curated.sort(key=lambda r: int(r["rows"]) * int(r["cols"]))
-    sizes = [f"{r['rows']}x{r['cols']}" for r in curated]
+    # Two curated grids share the 15x15 size (sample_15x15 and the
+    # denser sample_15x15_interlock) -- distinguish them so the x-axis
+    # doesn't show "15x15" twice with no indication they're different grids.
+    sizes = [f"{r['rows']}x{r['cols']}" + (" (b)" if "interlock" in r["grid"] else "")
+             for r in curated]
     x = np.arange(len(sizes))
     TIMEOUT_MARK = TIMEOUT_SECONDS  # plotted at the cap, marked hollow
 
@@ -281,9 +285,6 @@ def fig_ablation_combined():
         ax.set_xticklabels(["off", "on"], fontsize=8)
         ax.set_title(grid, fontsize=9)
     axes[0].set_ylabel("wall time to solve (s)")
-    fig.suptitle("Shared conflict weights, off vs.\\ on: known-hard grids (left three, 6 trials, "
-                 "45s cap) and the paper's own scraped-15x15 corpus (right three, 5 trials, 300s "
-                 "cap). Bar = median; hollow point = hit the cap.", fontsize=8)
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig4_ablation.pdf")
     fig.savefig(FIG_DIR / "fig4_ablation.png")
@@ -308,7 +309,12 @@ def fig_thread_scaling():
         return
     with open(path) as f:
         rows = list(csv.DictReader(f))
-    grids = sorted(set(r["grid"] for r in rows), key=lambda g: [r["grid"] for r in rows].index(g))
+    # grid_115 times out for both solvers at every thread count tested
+    # (see thread_scaling.csv) -- an empty panel with no data to plot,
+    # not a finding. The V-D prose still reports the grid_115 result
+    # ("neither solver succeeds at any thread count") without the figure.
+    grids = sorted(set(r["grid"] for r in rows if r["grid"] != "grid_115"),
+                    key=lambda g: [r["grid"] for r in rows].index(g))
 
     fig, axes = plt.subplots(1, len(grids), figsize=(2.2 * len(grids), 2.8), sharey=False)
     if len(grids) == 1:
@@ -332,8 +338,6 @@ def fig_thread_scaling():
         ax.set_xlabel("threads")
     axes[0].set_ylabel("wall time (s)")
     axes[0].legend(fontsize=7, frameon=False, loc="upper right")
-    fig.suptitle("Thread-count scaling: restart portfolio vs. partitioned search "
-                  "(dashed line = physical core count)", fontsize=9)
     fig.tight_layout()
     fig.savefig(FIG_DIR / "fig5_thread_scaling.pdf")
     fig.savefig(FIG_DIR / "fig5_thread_scaling.png")
