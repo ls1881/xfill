@@ -11,8 +11,8 @@ a fixed grid set, dictionary, and timeout.
 |---|---|---|
 | **xfill** | restart-portfolio, dom/wdeg branching, concurrent shared conflict weights (this repo) | `build/xfill_cli` |
 | **orca-solver** | partition-based parallel search | https://github.com/rainjacket/orca-solver (v0.3.0 used here) |
-| **ingrid_core** | single-threaded reference solver | https://github.com/szunami/ingrid |
-| **crossword-composer** | static-order recursive backtracker, no restarts, no parallelism | https://github.com/paulgb/crossword-composer, commit `5655a3b` |
+| **ingrid_core** | single-threaded reference solver | https://github.com/rf-/ingrid_core (v1.3.1 used here) |
+| **crossword-composer** | static-order recursive backtracker, no restarts, no parallelism | https://github.com/paulgb/crossword-composer, commit `912c5ee` |
 
 crossword-composer is included as an **unmodified naive baseline** — a
 real, working, independently authored solver, but with no restart
@@ -112,7 +112,7 @@ cd benchmarks/urtc2026_testbench/external_solvers
 git clone https://github.com/rainjacket/orca-solver.git
 (cd orca-solver && cargo build --release)
 
-git clone https://github.com/szunami/ingrid.git ingrid_core
+git clone https://github.com/rf-/ingrid_core.git
 (cd ingrid_core && cargo build --release)
 
 git clone https://github.com/paulgb/crossword-composer.git
