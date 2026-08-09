@@ -113,15 +113,15 @@ This further test splits three ways, showing this is a property of the architect
 
 \subsection{Naive Backtracking Is Not a Baseline Worth Beating}
 \label{sec:naive}
-Zooming out to the full sweep across all four solvers and every curated grid size (Fig.~\ref{fig:size}), the same advantage holds broadly, testing directly whether crossword-composer's losses are a genuine baseline failure or just an under-provisioned time budget. Table~\ref{tab:outcomes} summarizes the outcome: across all 20 grids, xfill resolved 19, orca-solver 18, ingrid\_core 17, and crossword-composer only 9 -- a real, unmodified, independently authored solver, not a strawman built to lose.
+Zooming out to the full sweep across all four solvers and every curated grid size (Fig.~\ref{fig:size}), the same advantage holds broadly, testing directly whether crossword-composer's losses are a genuine baseline failure or just an under-provisioned time budget. Table~\ref{tab:outcomes} summarizes the outcome: across all 20 grids, xfill decided 19, orca-solver 18, ingrid\_core 17, and crossword-composer only 9 -- a real, unmodified, independently authored solver, not a strawman built to lose.
 
 \begin{table}[t]
 \centering
-\caption{Solve Outcomes Across All 20 Grids, 1000s Cap (Resolved = Solved + UNSAT, i.e.\ not timed out)}
+\caption{Solve Outcomes Across All 20 Grids, 1000s Cap (Decided = Solved + UNSAT)}
 \label{tab:outcomes}
 \begin{tabular}{lcccc}
 \toprule
-Solver & Solved & UNSAT & Timeout & Resolved \\
+Solver & Solved & UNSAT & Timeout & Decided \\
 \midrule
 xfill & 18 & 1 & 1 & 19 \\
 orca-solver & 17 & 1 & 2 & 18 \\
@@ -140,7 +140,7 @@ crossword-composer & 8 & 1 & 11 & 9 \\
 
 \subsection{Aggregate Speed Advantage Where Both Solve}
 \label{sec:speedup}
-Fig.~\ref{fig:speedup} quantifies the restart-portfolio/partition comparison on the scraped $15\times15$ corpus alone \cite{crosswordgrids}, using realistic-scale grids, rather than the curated size-graded set, which mixes in small grids that inflate the ratio. Of the 11 scraped grids (of 12) both xfill and orca-solver solve, xfill is faster on 9 and slower on 2 (\texttt{grid\_395} and \texttt{grid\_479}, by $5.4\times$ and $1.6\times$); across all 11, the median speedup is $494\times$ and the geometric mean $107\times$. This is consistent with \texttt{grid\_115} in Section~\ref{sec:scaling}: not every grid favors either architecture. \texttt{grid\_423}, the twelfth scraped grid, sharpens this in the opposite direction: xfill solves it in 270s where orca-solver cannot, even at this paper's full 1000s cap, thus representing a completion advantage, not just a speed one (revisited in Section~\ref{sec:ablation}). Across the full 20-grid sample, xfill resolves 19, orca-solver 18, both agree on the sample's one correct UNSAT proof, and xfill's one failure (\texttt{sample\_13x13}) is a subset of orca-solver's two, \texttt{grid\_423} being the other. There is a narrower gap on success alone than on speed, which is why Sections~\ref{sec:scaling} and~\ref{sec:ablation} both turn to a harder, pre-existing grid list for a more demanding test.
+Fig.~\ref{fig:speedup} quantifies the restart-portfolio/partition comparison on the scraped $15\times15$ corpus alone \cite{crosswordgrids}, using realistic-scale grids, rather than the curated size-graded set, which mixes in small grids that inflate the ratio. Of the 11 scraped grids (of 12) both xfill and orca-solver solve, xfill is faster on 9 and slower on 2 (\texttt{grid\_395} and \texttt{grid\_479}, by $5.4\times$ and $1.6\times$); across all 11, the median speedup is $494\times$ and the geometric mean $107\times$. This is consistent with \texttt{grid\_115} in Section~\ref{sec:scaling}: not every grid favors either architecture. \texttt{grid\_423}, the twelfth scraped grid, sharpens this in the opposite direction: xfill solves it in 270s where orca-solver cannot, even at this paper's full 1000s cap, thus representing a completion advantage, not just a speed one (revisited in Section~\ref{sec:ablation}). Across the full 20-grid sample, xfill decides 19, orca-solver 18, both agree on the sample's one correct UNSAT proof, and xfill's one failure (\texttt{sample\_13x13}) is a subset of orca-solver's two, \texttt{grid\_423} being the other. There is a narrower gap on success alone than on speed, which is why Sections~\ref{sec:scaling} and~\ref{sec:ablation} both turn to a harder, pre-existing grid list for a more demanding test.
 
 \section{Discussion}
 
