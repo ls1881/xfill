@@ -1,4 +1,4 @@
-# crossword-filler
+# xfill
 
 A high-performance crossword grid autofill engine, written in C++20.
 
@@ -36,7 +36,6 @@ reasoning and citations behind each piece, see
    shared letter. Domains are `WordBitset`s — one bit per word of that
    length — so intersecting/narrowing a domain is a handful of `uint64_t`
    operations rather than a loop over strings.
-
 2. **Propagation.** After every assignment, `Propagate` runs queue-based
    AC-3: only slots whose domain actually shrank get re-examined (not a
    fixed rescan of every crossing), and it skips a narrowing step
@@ -57,7 +56,6 @@ reasoning and citations behind each piece, see
    buffer across calls instead of reallocating it per node -- came
    directly out of `sample`-profiling real (scraped, not synthetic) 15x15s
    that were timing out.
-
 3. **Branching.** `SelectBranchSlot` picks which slot to guess next using
    `dom/wdeg`: (masked domain size) ÷ (summed weight of this slot's
    crossings to still-unassigned neighbors), lowest first. Crossing
@@ -79,13 +77,11 @@ reasoning and citations behind each piece, see
    threshold" split step 2 uses for letter viability, applied here to word
    selection; see `docs/design.md` for the measured effect and a
    correctness bug this surfaced and fixed along the way.
-
 4. **Backtracking.** Trail-based: assigning a slot snapshots only the
    domains that assignment actually touches (once per decision level),
    so undoing a decision restores exactly what changed rather than
    copying every slot's domain at every search node. (Source:
    `rainjacket/orca-solver`.)
-
 5. **Restarts.** The whole search in steps 2-4 runs inside a retry loop.
    The first attempt is fully deterministic (greedy `dom/wdeg`). If an
    attempt racks up more dead ends than its budget (starts at 500, grows
@@ -102,12 +98,10 @@ reasoning and citations behind each piece, see
    Randomization," for *why* it helps — backtracking search runtimes are
    often heavy-tailed, so an attempt that's had a demonstrably unlucky
    run is better abandoned than waited out.)
-
 6. **Duplicate words.** A slot's effective domain is always masked
    against a global "words of this length already used elsewhere" bitset,
    rather than writing exclusions into every sibling domain on each
    assignment — so no word is ever placed twice in one fill.
-
 7. **Component-restricted branching.** `Solver` computes the connected
    components of the slot-crossing graph once at construction time (one
    BFS pass), and branching only ever considers the lowest-indexed
@@ -123,7 +117,6 @@ reasoning and citations behind each piece, see
    `benchmarks/grids/synthetic/disconnected_15x15.txt`, one of two
    purpose-built edge-case grids alongside `rectangular_9x5.txt`, which
    tests a non-square grid).
-
 8. **Parallel restarts.** `Solver::SolveParallel` runs several independent
    restart sequences at once (`hardware_concurrency()` threads by
    default, `xfill_cli`'s default) instead of steps 2-6's single retry
