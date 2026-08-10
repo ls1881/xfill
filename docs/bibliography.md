@@ -3,7 +3,7 @@
 Sources that shaped the solver as it exists today. For each: what it is,
 and what this project took from it (or explicitly didn't, and why).
 
-## Sources behind the current implementation
+## Sources
 
 ### Beacham, Chen, Sillito, van Beek — "Constraint Programming Lessons Learned from Crossword Puzzles" (Canadian AI 2001)
 
