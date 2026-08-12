@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the figures used in paper/xfill_urtc2026.md from
+"""Generate the figures used in paper/xfill_urtc2026.tex from
 results/results.csv. Each figure is built to make one specific point the
 paper actually argues, not a generic "solver X vs solver Y" dump -- see
 the comment above each function for which claim it backs.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Reproducible multi-solver crossword-filling benchmark for the URTC 2026
-paper (paper/xfill_urtc2026.md). See README.md in this directory for full
+paper (paper/xfill_urtc2026.tex). See README.md in this directory for full
 methodology, solver provenance (versions/commit hashes), and how to
 re-obtain each external solver.
 

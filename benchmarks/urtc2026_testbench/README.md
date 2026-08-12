@@ -129,7 +129,7 @@ git clone https://github.com/SavinRazvan/crossword.git savin_crossword
 
 # 3. Run
 cd ..
-python3 -m venv .venv && .venv/bin/pip install matplotlib numpy pypdf
+python3 -m venv .venv && .venv/bin/pip install matplotlib numpy
 .venv/bin/python3 run_benchmark.py          # writes results/results.csv, results/results_trials.csv
 .venv/bin/python3 run_xfill_strengths.py    # writes results/ablation.csv, results/thread_scaling.csv
 .venv/bin/python3 generate_figures.py       # writes results/figures/*.{png,pdf}

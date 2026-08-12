@@ -14,9 +14,9 @@ for the papers/codebases each technique below is drawn from.
 ✅ Slot detection, crossing computation, no-duplicate-words enforcement,
 queue-based AC-3 propagation, `dom/wdeg` branching, randomized restarts,
 and a parallel-restart portfolio search (`Solver::SolveParallel`, `xfill_cli`'s
-default) are all implemented and tested (20/20 tests passing). Small and
+default) are all implemented and tested (29/29 tests passing). Small and
 medium grids (tested up to 15x15 with real block patterns, against a real
-~280k-entry dictionary at `min_score=40`) solve in well under a second;
+~184k-entry dictionary at `min_score=40`) solve in well under a second;
 some genuinely dense grids remain intractable, which is a documented,
 expected limit (see "Known limits" below and
 [`docs/design.md`](docs/design.md)'s "Known hard cases" section for more),
@@ -125,20 +125,39 @@ reasoning and citations behind each piece, see
    same search often finishes fast, running several simultaneously
    should find one that does sooner in wall-clock time. Each worker gets
    its own private `Solver` (own domains, trail, crossing weights,
-   nogoods, RNG — nothing search-related is shared, so nothing needs
-   synchronizing beyond one `std::atomic<bool>` cancellation flag,
-   checked once per node); worker 0 reproduces today's exact
-   single-threaded sequence, every other worker's own first attempt is
+   nogoods, RNG); synchronization is one `std::atomic<bool>` cancellation
+   flag, checked once per node. Worker 0 reproduces today's exact
+   single-threaded sequence; every other worker's own first attempt is
    already randomized so it doesn't just redo worker 0's deterministic
-   pass for free. Still complete — unsatisfiable is only reported once
-   every worker has independently exhausted its own search. Real, large
-   net win on the real benchmark set (three 30-grid samples: -43.6%
-   total time, two previously-timing-out grids newly solved, zero lost),
-   but not uniform: a handful of grids that were already close to
-   worker 0's best case get *slower* from added thread contention with
-   no compensating benefit — see `docs/design.md` for the full numbers
-   and `docs/bibliography.md`'s Gomes, Selman & Kautz entry. Pass an
-   explicit `num_threads` of 1 for the old single-threaded behavior.
+   pass for free. Base portfolio effect, measured before either addition
+   below: a real, large net win on the real benchmark set but not a
+   uniform one (three 30-grid samples: -43.6% total time, two
+   previously-timing-out grids newly solved, zero lost; a handful of
+   grids already close to worker 0's best case get *slower* from added
+   thread contention with no compensating benefit) — see `docs/design.md`
+   for the full numbers and `docs/bibliography.md`'s Gomes, Selman &
+   Kautz entry.
+
+   Two things layered on top since. One worker (whenever there's more
+   than one) is dedicated to a single uninterrupted exhaustive search
+   (`unlimited_budget`), guaranteeing the whole call eventually reaches a
+   genuine conclusion even on grids where restart-based search alone
+   never does (see `docs/design.md`'s "Tried and kept: `unlimited_budget`
+   in `SolveParallel`"). And every *restart* worker (not the dedicated
+   one) also reads and bumps one shared array of plain atomic counters
+   (`SharedCrossingWeights`) on top of its own private weights — a
+   crossing several workers have all struggled with gets deprioritized
+   everywhere, not just wherever it was first hit (see `docs/design.md`'s
+   "Tried and kept: crossing weights shared across `SolveParallel`
+   workers" for the measured effect, which is real but regime-dependent,
+   not uniform). Completeness works differently from the base version
+   above as a result: the first worker to reach a genuine (not itself
+   cancelled) conclusion — solution found, or an exhaustive proof there
+   isn't one — cancels every other worker immediately; it does not wait
+   for all of them to finish.
+
+   Pass an explicit `num_threads` of 1 for the old single-threaded
+   behavior.
 
 ### Known limits
 
@@ -153,11 +172,13 @@ leading up to it -- restarts (and, by the same logic, more of them at
 once) fix a search that got *unlucky*, but can't turn a genuinely hard
 instance easy. `sample_15x15.txt` (the original,
 fully-open-interior 15x15, as opposed to `sample_15x15_interlock.txt`
-which solves quickly) is not in that category: it solves in about 4.7s at
-`min_score=40` -- much faster than the ~158s this took earlier in the
-project's history, thanks to the propagation and restart optimizations
-in `docs/design.md`'s "Implementation summary" -- it just needs a
-less-restricted dictionary, not a fundamentally harder search.
+which solves quickly) is not in that category: single-threaded, it solves
+in about 15.1s at `min_score=40` -- much faster than the ~158s this took
+earlier in the project's history, thanks to the propagation and restart
+optimizations in `docs/design.md`'s "Implementation summary" (with
+default parallel restarts it drops to roughly 1-2s, varying run to run)
+-- it just needs a less-restricted dictionary, not a fundamentally
+harder search.
 `sample_21x21.txt` is different again: it's proven unsatisfiable in
 microseconds, because it has a fully-open 21-cell row and the dictionary
 has no words that long even at `min_score=0` (max length 15) -- not a
