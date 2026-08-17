@@ -27,29 +27,7 @@ below is backed by a measurement, not an assumption: see
   <img src="benchmarks/urtc2026_testbench/results/figures/fig1b_speedup.png" alt="Wall time to solve per grid, four solvers compared: xfill is 17x to 924x faster than orca-solver where both succeed" width="820">
 </p>
 
-<p align="center"><sub>Wall time per grid, four independent solvers, log scale — full methodology in the paper below.</sub></p>
-
-## The research
-
-*"Sharing Without Splitting: Concurrent Conflict Weights for Parallel
-Crossword Filling,"* submitted to MIT's Undergraduate Research
-Technology Conference (URTC) 2026. Its core contribution: a restart
-portfolio where independent workers never partition the search space,
-but continuously and concurrently update a shared pool of per-constraint
-conflict weights — a combination the paper shows doesn't exist in prior
-parallel-CSP work (SPREAD, ManySAT, and others), positioned precisely
-against each.
-
-📄 [Read the paper (PDF)](paper/xfill_urtc2026.pdf) ·
-[DOCX](paper/xfill_urtc2026.docx) ·
-[Reproducible benchmark suite](benchmarks/urtc2026_testbench/)
-
-The paper also reports its results honestly rather than selectively: the
-mechanism's own isolated ablation shows a *regime-dependent* effect
-(reliable win on typical grids, a wash or worse on the hardest ones), and
-a negative result from the same codebase — five branching heuristics
-that looked interchangeable turned out to be dead code the whole time,
-caught only by direct instrumentation, not benchmark comparison.
+<p align="center"><sub>Wall time per grid, four independent solvers, log scale — full methodology in the <a href="benchmarks/urtc2026_testbench/">reproducible benchmark suite</a>.</sub></p>
 
 ## Contents
 
