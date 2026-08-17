@@ -1,13 +1,67 @@
 # xfill
 
-A high-performance crossword grid autofill engine, written in C++20.
+**A parallel crossword-fill engine, and the research behind it.**
 
-Crossword filling is modeled as a constraint satisfaction problem
-(across/down slots as variables, dictionary words as domains, crossing
-letters as constraints) and solved with constraint propagation and a
-heuristic-guided backtracking search. See [`docs/design.md`](docs/design.md)
-for architecture and future work, and [`docs/bibliography.md`](docs/bibliography.md)
-for the papers/codebases each technique below is drawn from.
+[![CI](https://github.com/ls1881/xfill/actions/workflows/ci.yml/badge.svg)](https://github.com/ls1881/xfill/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![C++](https://img.shields.io/badge/C%2B%2B-20-00599C.svg)](https://en.cppreference.com/w/cpp/20)
+
+`xfill` fills crossword grids by modeling them as a constraint
+satisfaction problem — across/down slots as variables, dictionary words
+as domains, crossing letters as constraints — solved with AC-3
+propagation, `dom/wdeg` branching, and a parallel restart portfolio whose
+workers continuously share conflict-weight signals without ever
+partitioning the problem or needing a manager. Every design decision
+below is backed by a measurement, not an assumption: see
+[`docs/design.md`](docs/design.md) for the full development log and
+[`docs/bibliography.md`](docs/bibliography.md) for sources.
+
+## Results
+
+- **65×** faster on a hard grid purely from oversubscribing thread count (1 → 42 threads)
+- **107×** geometric-mean speedup over [orca-solver](https://github.com/rainjacket/orca-solver), an independently developed partition-based competitor, on realistic 15×15 grids
+- **19 of 20** benchmark grids solved or definitively ruled out, vs. 18, 17, and 9 for three comparison solvers
+- **29/29** unit tests passing, CI green on every push
+
+<p align="center">
+  <img src="benchmarks/urtc2026_testbench/results/figures/fig1b_speedup.png" alt="Wall time to solve per grid, four solvers compared: xfill is 17x to 924x faster than orca-solver where both succeed" width="820">
+</p>
+
+<p align="center"><sub>Wall time per grid, four independent solvers, log scale — full methodology in the paper below.</sub></p>
+
+## The research
+
+*"Sharing Without Splitting: Concurrent Conflict Weights for Parallel
+Crossword Filling,"* submitted to MIT's Undergraduate Research
+Technology Conference (URTC) 2026. Its core contribution: a restart
+portfolio where independent workers never partition the search space,
+but continuously and concurrently update a shared pool of per-constraint
+conflict weights — a combination the paper shows doesn't exist in prior
+parallel-CSP work (SPREAD, ManySAT, and others), positioned precisely
+against each.
+
+📄 [Read the paper (PDF)](paper/xfill_urtc2026.pdf) ·
+[DOCX](paper/xfill_urtc2026.docx) ·
+[Reproducible benchmark suite](benchmarks/urtc2026_testbench/)
+
+The paper also reports its results honestly rather than selectively: the
+mechanism's own isolated ablation shows a *regime-dependent* effect
+(reliable win on typical grids, a wash or worse on the hardest ones), and
+a negative result from the same codebase — five branching heuristics
+that looked interchangeable turned out to be dead code the whole time,
+caught only by direct instrumentation, not benchmark comparison.
+
+## Contents
+
+- [Status](#status)
+- [How the algorithm works](#how-the-algorithm-works)
+  - [Known limits](#known-limits)
+- [Dictionary format](#dictionary-format)
+- [Grid format](#grid-format)
+- [Building](#building)
+- [Running](#running)
+- [Benchmarking](#benchmarking)
+- [License](#license)
 
 ## Status
 
