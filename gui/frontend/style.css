@@ -14,6 +14,7 @@
   --cell-text: #1a1a1a;
   --good: #4caf82;
   --warn: #e0a94c;
+  --issue-red: #e0393e;
   font-size: 15px;
 }
 
@@ -96,6 +97,15 @@ button.primary:hover { background: var(--accent); }
 .dropdown-menu button:hover { background: var(--accent-dim); }
 
 .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-dim); }
+.select-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-dim); }
+.select-label select {
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 0.85rem;
+}
 
 #status-line {
   margin-left: auto;
@@ -147,7 +157,31 @@ button.primary:hover { background: var(--accent); }
 }
 .cell.block { background: var(--cell-block); cursor: pointer; }
 .cell.in-word { background: var(--cell-word); }
+/* A selected OPEN cell fills solid yellow. A selected BLOCK cell must stay
+   visibly black -- filling it yellow (an earlier bug here) made a freshly
+   placed block look unplaced until you clicked elsewhere. So the block
+   case gets an inset yellow ring instead of a background swap; this rule
+   is listed after (and is more specific than) the plain .selected rule,
+   so it wins for cells that are both. */
 .cell.selected { background: var(--cell-selected) !important; }
+.cell.selected.block {
+  background: var(--cell-block) !important;
+  box-shadow: inset 0 0 0 4px var(--cell-selected);
+}
+.cell.style-issue {
+  box-shadow: inset 0 0 0 3px var(--issue-red);
+}
+.cell.selected.style-issue {
+  box-shadow: inset 0 0 0 4px var(--cell-selected), inset 0 0 0 7px var(--issue-red);
+}
+/* Same combination, but the cell is also a block -- listed explicitly
+   (rather than left to same-specificity source-order tie-breaking between
+   the two rules above) so the yellow-ring-over-black-fill treatment and
+   the red issue ring are guaranteed to compose together. */
+.cell.selected.block.style-issue {
+  background: var(--cell-block) !important;
+  box-shadow: inset 0 0 0 4px var(--cell-selected), inset 0 0 0 7px var(--issue-red);
+}
 .cell .num {
   position: absolute;
   top: 1px;

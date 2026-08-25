@@ -14,6 +14,11 @@ let dictSelections = {
   across: { path: "", minScore: 0 },
   down: { path: "", minScore: 0 },
 };
+let symmetryMode = "rotational180";
+let americanStyle = true;
+let pendingBlockToggle = null; // setTimeout id, used to disambiguate a click from the first half of a double-click
+let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots response arriving after a newer one
+let optionsRequestSeq = 0; // same, for /api/options
 
 const EMPTY = "-";
 
@@ -63,7 +68,13 @@ async function newPuzzle(width, height) {
 }
 
 async function refreshSlotsAndStats() {
+  // Typing fast (or toggling several blocks quickly) can have more than
+  // one of these in flight; only the most recently *issued* one's
+  // response should ever get applied, regardless of which one's response
+  // happens to land first over the network.
+  const seq = ++slotsRequestSeq;
   const data = await apiJson("/api/puzzle/slots", puzzle);
+  if (seq !== slotsRequestSeq) return;
   slots = data.slots;
   stats = data.stats;
   renderGrid();
@@ -72,23 +83,92 @@ async function refreshSlotsAndStats() {
   updateOptionsPanel();
 }
 
+// Mirror position for the currently selected symmetry mode, or null for
+// "none" / out-of-bounds (the two diagonal modes only make sense on a
+// square grid; the select disables them otherwise, but this guards
+// against a stale selection surviving a resize).
+function symmetryMirror(r, c) {
+  const w = puzzle.width, h = puzzle.height;
+  let mr, mc;
+  switch (symmetryMode) {
+    case "rotational180": mr = h - 1 - r; mc = w - 1 - c; break;
+    case "horizontal": mr = r; mc = w - 1 - c; break;
+    case "vertical": mr = h - 1 - r; mc = c; break;
+    case "diagonal-main": mr = c; mc = r; break;
+    case "diagonal-anti": mr = w - 1 - c; mc = h - 1 - r; break;
+    default: return null;
+  }
+  if (mr < 0 || mr >= h || mc < 0 || mc >= w) return null;
+  return [mr, mc];
+}
+
 function toggleBlockAt(r, c) {
-  const symmetric = document.getElementById("chk-symmetric").checked;
   const newState = !puzzle.blocks[r][c];
   puzzle.blocks[r][c] = newState;
   puzzle.letters[r][c] = EMPTY;
-  if (symmetric) {
-    const sr = puzzle.height - 1 - r;
-    const sc = puzzle.width - 1 - c;
-    puzzle.blocks[sr][sc] = newState;
-    puzzle.letters[sr][sc] = EMPTY;
+  const mirror = symmetryMirror(r, c);
+  if (mirror) {
+    const [mr, mc] = mirror;
+    puzzle.blocks[mr][mc] = newState;
+    puzzle.letters[mr][mc] = EMPTY;
   }
+  // Render immediately with the local mutation -- don't wait on the
+  // slots/stats round trip just to show the block that was just placed
+  // (that used to be the only redraw path, so a toggle looked like it did
+  // nothing until the network response landed a beat later).
+  renderGrid();
   refreshSlotsAndStats();
 }
 
 function setLetterAt(r, c, ch) {
   if (puzzle.blocks[r][c]) return;
   puzzle.letters[r][c] = ch || EMPTY;
+}
+
+// American-style construction rules: every open cell must be checked
+// (crossed) both across and down, and no entry may be shorter than 3
+// letters. compute_slots() already only creates slots for runs of length
+// >= 2, so a length-1 run simply produces no slot at all in that
+// direction -- naturally falling out of the "not covered" check below
+// without needing to special-case it.
+function computeStyleIssues() {
+  const issues = new Set();
+  if (!americanStyle) return issues;
+  const coverage = new Map(); // "r,c" -> Set(direction)
+  for (const s of slots) {
+    for (const [r, c] of s.cells) {
+      const key = `${r},${c}`;
+      if (!coverage.has(key)) coverage.set(key, new Set());
+      coverage.get(key).add(s.direction);
+      if (s.length <= 2) issues.add(key);
+    }
+  }
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      if (puzzle.blocks[r][c]) continue;
+      const dirs = coverage.get(`${r},${c}`);
+      if (!dirs || !dirs.has("across") || !dirs.has("down")) {
+        issues.add(`${r},${c}`);
+      }
+    }
+  }
+  return issues;
+}
+
+function computeSymmetryDiscrepancies() {
+  const bad = new Set();
+  if (symmetryMode === "none") return bad;
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      const mirror = symmetryMirror(r, c);
+      if (!mirror) continue;
+      const [mr, mc] = mirror;
+      if (puzzle.blocks[r][c] !== puzzle.blocks[mr][mc]) {
+        bad.add(`${r},${c}`);
+      }
+    }
+  }
+  return bad;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,15 +205,19 @@ function renderGrid() {
   const numbers = slotStartNumbers();
   const active = currentSlot();
   const activeCells = new Set((active ? active.cells : []).map(([r, c]) => `${r},${c}`));
+  const styleIssues = computeStyleIssues();
+  const symmetryIssues = computeSymmetryDiscrepancies();
 
   for (let r = 0; r < puzzle.height; r++) {
     for (let c = 0; c < puzzle.width; c++) {
       const cell = document.createElement("div");
       cell.className = "cell";
       const blocked = puzzle.blocks[r][c];
+      const key = `${r},${c}`;
       if (blocked) cell.classList.add("block");
-      if (activeCells.has(`${r},${c}`)) cell.classList.add("in-word");
+      if (activeCells.has(key)) cell.classList.add("in-word");
       if (selected && selected.row === r && selected.col === c) cell.classList.add("selected");
+      if (styleIssues.has(key) || symmetryIssues.has(key)) cell.classList.add("style-issue");
 
       if (!blocked) {
         const num = numbers.get(`${r},${c}`);
@@ -150,17 +234,39 @@ function renderGrid() {
       }
 
       cell.addEventListener("click", () => onCellClick(r, c));
+      cell.addEventListener("dblclick", () => onCellDoubleClick(r, c));
       grid.appendChild(cell);
     }
   }
 }
 
+// A plain click on the already-selected cell toggles its block -- but
+// that same click is also the first half of a double-click, which instead
+// changes direction (onCellDoubleClick). The two can't be told apart from
+// a single click event alone, so the toggle is delayed briefly; if a
+// dblclick follows, it cancels the pending toggle before it fires.
 function onCellClick(r, c) {
   if (selected && selected.row === r && selected.col === c) {
-    toggleBlockAt(r, c);
+    if (pendingBlockToggle) clearTimeout(pendingBlockToggle);
+    pendingBlockToggle = setTimeout(() => {
+      pendingBlockToggle = null;
+      toggleBlockAt(r, c);
+    }, 250);
     return;
   }
   selected = { row: r, col: c };
+  renderGrid();
+  updateOptionsPanel();
+  highlightActiveClue();
+}
+
+function onCellDoubleClick(r, c) {
+  if (pendingBlockToggle) {
+    clearTimeout(pendingBlockToggle);
+    pendingBlockToggle = null;
+  }
+  selected = { row: r, col: c };
+  direction = direction === "across" ? "down" : "across";
   renderGrid();
   updateOptionsPanel();
   highlightActiveClue();
@@ -196,7 +302,19 @@ function advanceInDirection(step) {
 }
 
 document.addEventListener("keydown", (e) => {
-  if (!puzzle || !selected) return;
+  if (!puzzle) return;
+
+  // Cmd+F (Mac) / Ctrl+F (elsewhere) fills the puzzle -- checked before
+  // any other bailout, so it works even without a selected cell and even
+  // while a clue/dictionary input has focus, matching how a browser's own
+  // Ctrl/Cmd+F "Find" shortcut is global rather than field-scoped.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+    e.preventDefault();
+    runFill();
+    return;
+  }
+
+  if (!selected) return;
   const tag = (document.activeElement && document.activeElement.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
@@ -204,18 +322,18 @@ document.addEventListener("keydown", (e) => {
   if (e.key === ".") {
     e.preventDefault();
     toggleBlockAt(row, col);
-  } else if (e.key === "ArrowUp") {
+  } else if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    // Arrow keys change direction too: a perpendicular arrow (vertical,
+    // here) switches into "down" as well as moving, the same convention
+    // most crossword solving apps use -- so pressing it always both
+    // orients and moves, rather than requiring Space first.
     e.preventDefault();
-    moveSelection(-1, 0);
-  } else if (e.key === "ArrowDown") {
+    direction = "down";
+    moveSelection(e.key === "ArrowUp" ? -1 : 1, 0);
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
     e.preventDefault();
-    moveSelection(1, 0);
-  } else if (e.key === "ArrowLeft") {
-    e.preventDefault();
-    moveSelection(0, -1);
-  } else if (e.key === "ArrowRight") {
-    e.preventDefault();
-    moveSelection(0, 1);
+    direction = "across";
+    moveSelection(0, e.key === "ArrowLeft" ? -1 : 1);
   } else if (e.key === " ") {
     e.preventDefault();
     direction = direction === "across" ? "down" : "across";
@@ -356,6 +474,7 @@ async function updateOptionsPanel() {
     listEl.innerHTML = '<div class="hint">Select a dictionary in the Dictionaries tab.</div>';
     return;
   }
+  const seq = ++optionsRequestSeq;
   try {
     const data = await apiJson("/api/options", {
       pattern: s.pattern,
@@ -363,6 +482,7 @@ async function updateOptionsPanel() {
       min_score: sel.minScore,
       limit: 50,
     });
+    if (seq !== optionsRequestSeq) return; // a newer selection has since superseded this request
     if (!data.candidates.length) {
       listEl.innerHTML = '<div class="hint">No matches.</div>';
       return;
@@ -374,6 +494,7 @@ async function updateOptionsPanel() {
       row.addEventListener("click", () => applyWordToSlot(s, row.getAttribute("data-word")));
     });
   } catch (err) {
+    if (seq !== optionsRequestSeq) return;
     listEl.innerHTML = `<div class="hint">${err.message}</div>`;
   }
 }
@@ -532,34 +653,72 @@ function wireToolbar() {
     });
   });
 
-  document.getElementById("btn-fill").addEventListener("click", async () => {
-    if (!dictSelections.across.path || !dictSelections.down.path) {
-      setStatus("Select across/down dictionaries first (Dictionaries tab)", "error");
-      return;
+  document.getElementById("btn-fill").addEventListener("click", runFill);
+}
+
+let filling = false;
+
+// Shared by the Fill button and the Cmd+F / Ctrl+F shortcut.
+async function runFill() {
+  if (!puzzle || filling) return;
+  if (!dictSelections.across.path || !dictSelections.down.path) {
+    setStatus("Select across/down dictionaries first (Dictionaries tab)", "error");
+    return;
+  }
+  filling = true;
+  setStatus("Filling…");
+  try {
+    const data = await apiJson("/api/fill", {
+      puzzle,
+      across_dict_path: dictSelections.across.path,
+      across_min_score: dictSelections.across.minScore,
+      down_dict_path: dictSelections.down.path,
+      down_min_score: dictSelections.down.minScore,
+      threads: 0,
+    });
+    puzzle = data.puzzle;
+    await refreshSlotsAndStats();
+    renderGrid();
+    const st = data.stats;
+    if (data.solved) {
+      setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
+    } else {
+      setStatus(`No solution found (${st.time_seconds.toFixed(2)}s)`, "error");
     }
-    setStatus("Filling…");
-    try {
-      const data = await apiJson("/api/fill", {
-        puzzle,
-        across_dict_path: dictSelections.across.path,
-        across_min_score: dictSelections.across.minScore,
-        down_dict_path: dictSelections.down.path,
-        down_min_score: dictSelections.down.minScore,
-        threads: 0,
-      });
-      puzzle = data.puzzle;
-      await refreshSlotsAndStats();
-      renderGrid();
-      const st = data.stats;
-      if (data.solved) {
-        setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
-      } else {
-        setStatus(`No solution found (${st.time_seconds.toFixed(2)}s)`, "error");
-      }
-    } catch (err) {
-      setStatus(`Fill failed: ${err.message}`, "error");
-    }
+  } catch (err) {
+    setStatus(`Fill failed: ${err.message}`, "error");
+  } finally {
+    filling = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Style controls: American-style highlighting + symmetry mode
+// ---------------------------------------------------------------------------
+
+function wireStyleControls() {
+  document.getElementById("chk-american-style").addEventListener("change", (e) => {
+    americanStyle = e.target.checked;
+    renderGrid();
   });
+  document.getElementById("symmetry-select").addEventListener("change", (e) => {
+    symmetryMode = e.target.value;
+    renderGrid();
+  });
+}
+
+// The two diagonal modes only make sense on a square grid -- disable them
+// otherwise rather than silently no-op-ing a selection that can't apply.
+function updateSymmetryOptionAvailability() {
+  const select = document.getElementById("symmetry-select");
+  const square = puzzle && puzzle.width === puzzle.height;
+  for (const opt of select.options) {
+    if (opt.value.startsWith("diagonal-")) opt.disabled = !square;
+  }
+  if (!square && symmetryMode.startsWith("diagonal-")) {
+    symmetryMode = "rotational180";
+    select.value = symmetryMode;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +741,7 @@ function wireTabs() {
 // ---------------------------------------------------------------------------
 
 function renderAll() {
+  updateSymmetryOptionAvailability();
   renderGrid();
   renderClues();
   renderInfo();
@@ -594,6 +754,7 @@ async function main() {
   wireTabs();
   wireDictTab();
   wireInfoTab();
+  wireStyleControls();
   await loadDictionaries();
   await newPuzzle(15, 15);
 }

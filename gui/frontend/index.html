@@ -26,8 +26,19 @@
     </div>
 
     <div class="toolbar-group">
-      <label class="checkbox-label"><input type="checkbox" id="chk-symmetric" checked /> Symmetric blocks</label>
-      <button id="btn-fill" class="primary">Fill ▶</button>
+      <label class="checkbox-label"><input type="checkbox" id="chk-american-style" checked /> American style</label>
+      <label class="select-label">
+        Symmetry
+        <select id="symmetry-select">
+          <option value="rotational180" selected>180° rotational</option>
+          <option value="horizontal">Horizontal (left-right)</option>
+          <option value="vertical">Vertical (top-bottom)</option>
+          <option value="diagonal-main">Diagonal (\)</option>
+          <option value="diagonal-anti">Diagonal (/)</option>
+          <option value="none">None</option>
+        </select>
+      </label>
+      <button id="btn-fill" class="primary" title="⌘F / Ctrl+F">Fill ▶</button>
     </div>
 
     <div id="status-line"></div>
@@ -38,7 +49,7 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it; click the selected cell again (or press “.”) to toggle a block. Type letters to fill. Space toggles across/down.</div>
+      <div id="grid-hint">Click a cell to select it; click the selected cell again (or press “.”) to toggle a block on/off. Type letters to fill. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle.</div>
     </section>
 
     <aside id="side-panel">
