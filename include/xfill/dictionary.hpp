@@ -188,7 +188,26 @@ class Dictionary {
   // a missing/unparseable score defaults to 0). Words are grouped
   // internally by length. Entries scoring below `min_score` are dropped
   // entirely -- not just deprioritized -- so the solver can never place them.
+  // AllowedMask() on a Dictionary loaded this way returns "every word" for
+  // both directions -- i.e. no per-direction restriction.
   static Dictionary LoadFromFile(const std::string& path, int min_score = 0);
+
+  // Loads two "WORD;SCORE" files -- one for across slots, one for down --
+  // each with its own min_score threshold, and merges them into a single
+  // Dictionary: a word is included if it clears its own direction's
+  // threshold in that direction's source file (a word can be pulled in by
+  // one direction only, or by both, possibly at different scores). Word
+  // indices are shared across both directions (a single global numbering
+  // per length, same as LoadFromFile), so every existing per-length data
+  // structure (letter masks, used-word tracking, nogoods, ScoreOrder) needs
+  // no per-direction awareness at all -- only AllowedMask() distinguishes
+  // them, and it's consulted exactly once, when Solver::Solve() builds each
+  // slot's *initial* domain. Propagation only ever narrows a domain after
+  // that (see solver.hpp's Propagate), so restricting it once at the root
+  // is sufficient to keep a direction's disallowed words out of that slot's
+  // domain for the rest of the search -- no hot-path change required.
+  static Dictionary LoadDual(const std::string& across_path, int min_score_across,
+                              const std::string& down_path, int min_score_down);
 
   bool HasLength(int length) const;
   size_t NumWordsOfLength(int length) const;
@@ -240,7 +259,28 @@ class Dictionary {
     return score_rank_by_length_[static_cast<size_t>(length)][word_index];
   }
 
+  // Bitset of every word of `length` usable in the given direction --
+  // "usable in across slots" if `is_across`, "usable in down slots"
+  // otherwise. A Dictionary loaded via LoadFromFile has no per-direction
+  // restriction, so this returns "every word of this length" regardless of
+  // `is_across`. See Solver::Solve(), the only caller: it's ANDed into
+  // each slot's domain once, at construction, before search or propagation
+  // ever runs.
+  const WordBitset& AllowedMask(int length, bool is_across) const {
+    static const WordBitset empty(0, false);
+    const std::vector<WordBitset>& masks = is_across ? allowed_across_by_length_
+                                                       : allowed_down_by_length_;
+    if (length < 0 || static_cast<size_t>(length) >= masks.size()) return empty;
+    return masks[static_cast<size_t>(length)];
+  }
+
  private:
+  // Populates letter_masks_, score_order_by_length_ and
+  // score_rank_by_length_ from words_by_length_/scores_by_length_, which
+  // the caller must already have filled in. Shared by LoadFromFile and
+  // LoadDual so this (nontrivial) derivation logic exists in exactly one
+  // place.
+  void BuildDerivedIndexes();
   // Indexed directly by length (index 0 unused) rather than keyed in an
   // unordered_map: word lengths are a small, dense range known at load
   // time, so a hash + bucket lookup on every access (LetterMask is called
@@ -256,6 +296,12 @@ class Dictionary {
   // once at load time so ScoreRank() is O(1) instead of an O(n) search
   // through ScoreOrder on every call.
   std::vector<std::vector<size_t>> score_rank_by_length_;
+  // allowed_across_by_length_[length] / allowed_down_by_length_[length]:
+  // which of words_by_length_[length]'s words that direction may use. Only
+  // populated with a real per-direction restriction by LoadDual; LoadFromFile
+  // sets both to "every word" (see AllowedMask).
+  std::vector<WordBitset> allowed_across_by_length_;
+  std::vector<WordBitset> allowed_down_by_length_;
 };
 
 }  // namespace xfill

@@ -114,7 +114,13 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
   std::vector<WordBitset> domains(grid_.slots().size());
   for (const Slot& slot : grid_.slots()) {
     WordBitset& domain = domains[static_cast<size_t>(slot.id)];
-    domain = dict_.FullDomain(slot.length);
+    // Restrict to this slot's direction up front, once: AC-3 propagation
+    // and every later narrowing step only ever shrink a domain (see
+    // Propagate below), never add bits back, so excluding the other
+    // direction's disallowed words here keeps them out for the rest of the
+    // search without any per-direction awareness anywhere else in this
+    // file. See Dictionary::AllowedMask's doc comment.
+    domain = dict_.AllowedMask(slot.length, slot.dir == Direction::Across);
     // Seeded/pre-filled cells (see Grid::FromSpec) narrow this slot's
     // domain before propagation or search ever runs, the same way a
     // crossing constraint would once a neighbor is assigned -- just

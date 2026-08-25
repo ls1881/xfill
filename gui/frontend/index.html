@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>xfill — Crossword Constructor</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header id="toolbar">
+    <div class="brand">xfill <span class="brand-sub">constructor</span></div>
+
+    <div class="toolbar-group">
+      <button id="btn-new">New</button>
+      <label class="file-btn">
+        Import
+        <input type="file" id="input-import" accept=".puz,.ipuz,.cfp" hidden />
+      </label>
+      <div class="dropdown">
+        <button id="btn-export">Export ▾</button>
+        <div class="dropdown-menu" id="export-menu">
+          <button data-format="puz">.puz</button>
+          <button data-format="ipuz">.ipuz</button>
+          <button data-format="cfp">.cfp (best-effort)</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toolbar-group">
+      <label class="checkbox-label"><input type="checkbox" id="chk-symmetric" checked /> Symmetric blocks</label>
+      <button id="btn-fill" class="primary">Fill ▶</button>
+    </div>
+
+    <div id="status-line"></div>
+  </header>
+
+  <main id="app">
+    <section id="grid-panel">
+      <div id="grid-wrap">
+        <div id="grid"></div>
+      </div>
+      <div id="grid-hint">Click a cell to select it; click the selected cell again (or press “.”) to toggle a block. Type letters to fill. Space toggles across/down.</div>
+    </section>
+
+    <aside id="side-panel">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="summary">Summary</button>
+        <button class="tab-btn" data-tab="clues">Clues</button>
+        <button class="tab-btn" data-tab="fill">Options</button>
+        <button class="tab-btn" data-tab="dict">Dictionaries</button>
+        <button class="tab-btn" data-tab="info">Info</button>
+      </div>
+
+      <div class="tab-panel active" id="tab-summary">
+        <h3>Grid stats</h3>
+        <table class="stats-table" id="stats-general"></table>
+        <h3>Word lengths</h3>
+        <table class="stats-table" id="stats-lengths"></table>
+        <h3>Letter counts</h3>
+        <div id="letter-grid"></div>
+      </div>
+
+      <div class="tab-panel" id="tab-clues">
+        <div class="clue-columns">
+          <div>
+            <h3>Across</h3>
+            <div id="clues-across" class="clue-list"></div>
+          </div>
+          <div>
+            <h3>Down</h3>
+            <div id="clues-down" class="clue-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel" id="tab-fill">
+        <h3 id="options-heading">Options for selected slot</h3>
+        <div id="options-pattern" class="pattern-display"></div>
+        <div id="options-list"></div>
+      </div>
+
+      <div class="tab-panel" id="tab-dict">
+        <h3>Across dictionary</h3>
+        <select id="across-dict-select"></select>
+        <label>Min score <input type="number" id="across-min-score" value="0" min="0" max="100" /></label>
+
+        <h3>Down dictionary</h3>
+        <select id="down-dict-select"></select>
+        <label>Min score <input type="number" id="down-min-score" value="0" min="0" max="100" /></label>
+
+        <h3>Upload a dictionary</h3>
+        <div class="hint">WORD;SCORE format, one entry per line.</div>
+        <input type="file" id="input-dict-upload" accept=".txt,.dict" />
+      </div>
+
+      <div class="tab-panel" id="tab-info">
+        <h3>Puzzle info</h3>
+        <label>Title <input type="text" id="meta-title" /></label>
+        <label>Author <input type="text" id="meta-author" /></label>
+        <label>Copyright <input type="text" id="meta-copyright" /></label>
+        <label>Note <textarea id="meta-notes" rows="4"></textarea></label>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

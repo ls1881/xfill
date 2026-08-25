@@ -21,20 +21,22 @@ std::string Trim(const std::string& s) {
   }
   return s.substr(start, end - start);
 }
-}  // namespace
 
-Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
+struct ParsedEntry {
+  std::string word;
+  int score;
+};
+
+// Parses a "WORD;SCORE" file (semicolon-delimited; a missing/unparseable
+// score defaults to 0) into per-length lists, dropping entries below
+// `min_score` and any entry that isn't pure A-Z after uppercasing (see the
+// UBSan note below). Shared by LoadFromFile and LoadDual.
+std::unordered_map<int, std::vector<ParsedEntry>> ParseWordFile(
+    const std::string& path, int min_score) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("could not open dictionary: " + path);
 
-  // First pass: collect words per length into an unordered_map, since the
-  // max length (and thus how big to size the index-by-length vectors
-  // below) isn't known up front. This map only exists during loading; the
-  // solver's hot path never touches it.
-  std::unordered_map<int, std::vector<std::string>> words_by_length;
-  std::unordered_map<int, std::vector<int>> scores_by_length;
-  int max_length = 0;
-
+  std::unordered_map<int, std::vector<ParsedEntry>> by_length;
   std::string line;
   while (std::getline(in, line)) {
     line = Trim(line);
@@ -68,30 +70,20 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
                                     [](char c) { return c >= 'A' && c <= 'Z'; });
     if (!all_letters) continue;
 
-    int length = static_cast<int>(word.size());
-    max_length = std::max(max_length, length);
-    words_by_length[length].push_back(word);
-    scores_by_length[length].push_back(score);
+    by_length[static_cast<int>(word.size())].push_back({std::move(word), score});
   }
+  return by_length;
+}
+}  // namespace
 
-  Dictionary dict;
-  size_t num_lengths = static_cast<size_t>(max_length) + 1;
-  dict.words_by_length_.resize(num_lengths);
-  dict.scores_by_length_.resize(num_lengths);
-  dict.letter_masks_.resize(num_lengths);
-  dict.score_order_by_length_.resize(num_lengths);
-  dict.score_rank_by_length_.resize(num_lengths);
-
-  for (auto& [length, words] : words_by_length) {
-    dict.words_by_length_[static_cast<size_t>(length)] = std::move(words);
-  }
-  for (auto& [length, scores] : scores_by_length) {
-    dict.scores_by_length_[static_cast<size_t>(length)] = std::move(scores);
-  }
+void Dictionary::BuildDerivedIndexes() {
+  size_t num_lengths = words_by_length_.size();
+  letter_masks_.resize(num_lengths);
+  score_order_by_length_.resize(num_lengths);
+  score_rank_by_length_.resize(num_lengths);
 
   for (int length = 1; length < static_cast<int>(num_lengths); ++length) {
-    const std::vector<std::string>& words =
-        dict.words_by_length_[static_cast<size_t>(length)];
+    const std::vector<std::string>& words = words_by_length_[static_cast<size_t>(length)];
     size_t n = words.size();
     if (n == 0) continue;
 
@@ -112,12 +104,11 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
         }
       }
     }
-    dict.letter_masks_[static_cast<size_t>(length)] = std::move(masks);
+    letter_masks_[static_cast<size_t>(length)] = std::move(masks);
   }
 
   for (int length = 1; length < static_cast<int>(num_lengths); ++length) {
-    const std::vector<int>& scores =
-        dict.scores_by_length_[static_cast<size_t>(length)];
+    const std::vector<int>& scores = scores_by_length_[static_cast<size_t>(length)];
     std::vector<size_t> order(scores.size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
     std::stable_sort(order.begin(), order.end(), [&scores](size_t a, size_t b) {
@@ -125,10 +116,107 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
     });
     std::vector<size_t> rank(order.size());
     for (size_t pos = 0; pos < order.size(); ++pos) rank[order[pos]] = pos;
-    dict.score_rank_by_length_[static_cast<size_t>(length)] = std::move(rank);
-    dict.score_order_by_length_[static_cast<size_t>(length)] = std::move(order);
+    score_rank_by_length_[static_cast<size_t>(length)] = std::move(rank);
+    score_order_by_length_[static_cast<size_t>(length)] = std::move(order);
+  }
+}
+
+Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
+  std::unordered_map<int, std::vector<ParsedEntry>> parsed = ParseWordFile(path, min_score);
+
+  int max_length = 0;
+  for (const auto& [length, entries] : parsed) max_length = std::max(max_length, length);
+
+  Dictionary dict;
+  size_t num_lengths = static_cast<size_t>(max_length) + 1;
+  dict.words_by_length_.resize(num_lengths);
+  dict.scores_by_length_.resize(num_lengths);
+  dict.allowed_across_by_length_.resize(num_lengths);
+  dict.allowed_down_by_length_.resize(num_lengths);
+
+  for (auto& [length, entries] : parsed) {
+    std::vector<std::string>& words = dict.words_by_length_[static_cast<size_t>(length)];
+    std::vector<int>& scores = dict.scores_by_length_[static_cast<size_t>(length)];
+    words.reserve(entries.size());
+    scores.reserve(entries.size());
+    for (auto& e : entries) {
+      words.push_back(std::move(e.word));
+      scores.push_back(e.score);
+    }
+    // No per-direction restriction -- every word this Dictionary knows is
+    // usable in either direction (see AllowedMask's doc comment).
+    dict.allowed_across_by_length_[static_cast<size_t>(length)] =
+        WordBitset(words.size(), /*all_set=*/true);
+    dict.allowed_down_by_length_[static_cast<size_t>(length)] =
+        WordBitset(words.size(), /*all_set=*/true);
   }
 
+  dict.BuildDerivedIndexes();
+  return dict;
+}
+
+Dictionary Dictionary::LoadDual(const std::string& across_path, int min_score_across,
+                                 const std::string& down_path, int min_score_down) {
+  std::unordered_map<int, std::vector<ParsedEntry>> across =
+      ParseWordFile(across_path, min_score_across);
+  std::unordered_map<int, std::vector<ParsedEntry>> down =
+      ParseWordFile(down_path, min_score_down);
+
+  int max_length = 0;
+  for (const auto& [length, entries] : across) max_length = std::max(max_length, length);
+  for (const auto& [length, entries] : down) max_length = std::max(max_length, length);
+
+  Dictionary dict;
+  size_t num_lengths = static_cast<size_t>(max_length) + 1;
+  dict.words_by_length_.resize(num_lengths);
+  dict.scores_by_length_.resize(num_lengths);
+  dict.allowed_across_by_length_.resize(num_lengths);
+  dict.allowed_down_by_length_.resize(num_lengths);
+
+  struct Merged {
+    int score = 0;
+    bool in_across = false;
+    bool in_down = false;
+  };
+
+  for (int length = 1; length < static_cast<int>(num_lengths); ++length) {
+    std::unordered_map<std::string, Merged> merged;
+    auto add = [&merged](const std::vector<ParsedEntry>& entries, bool is_across) {
+      for (const ParsedEntry& e : entries) {
+        Merged& m = merged[e.word];
+        m.score = std::max(m.score, e.score);
+        (is_across ? m.in_across : m.in_down) = true;
+      }
+    };
+    auto it_a = across.find(length);
+    if (it_a != across.end()) add(it_a->second, /*is_across=*/true);
+    auto it_d = down.find(length);
+    if (it_d != down.end()) add(it_d->second, /*is_across=*/false);
+    if (merged.empty()) continue;
+
+    // unordered_map iteration order isn't reproducible run to run; sort so
+    // a given pair of input files always yields the same word indices.
+    std::vector<std::string> words;
+    words.reserve(merged.size());
+    for (auto& [w, m] : merged) words.push_back(w);
+    std::sort(words.begin(), words.end());
+
+    std::vector<int>& scores = dict.scores_by_length_[static_cast<size_t>(length)];
+    scores.reserve(words.size());
+    WordBitset allowed_across(words.size(), /*all_set=*/false);
+    WordBitset allowed_down(words.size(), /*all_set=*/false);
+    for (size_t i = 0; i < words.size(); ++i) {
+      const Merged& m = merged[words[i]];
+      scores.push_back(m.score);
+      if (m.in_across) allowed_across.Set(i);
+      if (m.in_down) allowed_down.Set(i);
+    }
+    dict.words_by_length_[static_cast<size_t>(length)] = std::move(words);
+    dict.allowed_across_by_length_[static_cast<size_t>(length)] = std::move(allowed_across);
+    dict.allowed_down_by_length_[static_cast<size_t>(length)] = std::move(allowed_down);
+  }
+
+  dict.BuildDerivedIndexes();
   return dict;
 }
 
