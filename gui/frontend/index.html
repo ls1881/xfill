@@ -23,9 +23,12 @@
           <button data-format="cfp">.cfp (best-effort)</button>
         </div>
       </div>
+      <button id="btn-undo" title="⌘Z / Ctrl+Z">Undo</button>
+      <button id="btn-clear" title="Clear all letters, keep the grid shape">Clear</button>
     </div>
 
-    <div class="toolbar-group">
+    <fieldset class="toolbar-group symmetry-group">
+      <legend>Grid style</legend>
       <label class="checkbox-label"><input type="checkbox" id="chk-american-style" checked /> American style</label>
       <label class="select-label">
         Symmetry
@@ -38,10 +41,13 @@
           <option value="none">None</option>
         </select>
       </label>
+    </fieldset>
+
+    <div class="toolbar-group">
       <button id="btn-fill" class="primary" title="⌘F / Ctrl+F">Fill ▶</button>
     </div>
 
-    <div id="status-line"></div>
+    <div id="status-line"><span id="fill-spinner" class="spinner" hidden></span><span id="status-text"></span></div>
   </header>
 
   <main id="app">
@@ -49,7 +55,7 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it; click the selected cell again (or press “.”) to toggle a block on/off. Type letters to fill. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle.</div>
+      <div id="grid-hint">Click a cell to select it; click it again (or press “.” or Backspace) to toggle a block on/off. Type letters to fill; Backspace clears and steps back. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
     </section>
 
     <aside id="side-panel">

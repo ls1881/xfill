@@ -16,9 +16,13 @@ let dictSelections = {
 };
 let symmetryMode = "rotational180";
 let americanStyle = true;
-let pendingBlockToggle = null; // setTimeout id, used to disambiguate a click from the first half of a double-click
 let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots response arriving after a newer one
 let optionsRequestSeq = 0; // same, for /api/options
+let lastClick = { row: null, col: null, time: 0 }; // same-cell click timing, used to detect a double-click ourselves
+const DOUBLE_CLICK_MS = 350;
+let undoStack = []; // deep-cloned puzzle snapshots, most recent last
+const MAX_UNDO = 100;
+let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
 
 const EMPTY = "-";
 
@@ -50,9 +54,46 @@ function apiJson(path, body) {
 }
 
 function setStatus(msg, kind) {
-  const el = document.getElementById("status-line");
-  el.textContent = msg;
-  el.className = kind || "";
+  document.getElementById("status-text").textContent = msg;
+  document.getElementById("status-line").className = kind || "";
+}
+
+function setFillSpinner(visible) {
+  document.getElementById("fill-spinner").hidden = !visible;
+}
+
+// ---------------------------------------------------------------------------
+// Undo
+// ---------------------------------------------------------------------------
+
+// Call before any in-place mutation of `puzzle` -- captures the
+// pre-mutation state so undo() can restore it. A plain deep clone is fine
+// here: puzzle objects are small (a grid's worth of strings/booleans plus
+// a clues map), and undo doesn't need to be fast, just correct.
+function snapshotForUndo() {
+  if (!puzzle) return;
+  undoStack.push(JSON.parse(JSON.stringify(puzzle)));
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  clearFillFailedHighlight();
+}
+
+function clearFillFailedHighlight() {
+  if (fillFailedCells.size) fillFailedCells = new Set();
+}
+
+function undo() {
+  if (!undoStack.length) {
+    setStatus("Nothing to undo", "error");
+    return;
+  }
+  puzzle = undoStack.pop();
+  // Bounds/direction could be stale if the undone step crossed a New or
+  // Import (different grid size) -- drop selection rather than risk it
+  // pointing outside the restored grid.
+  selected = null;
+  clearFillFailedHighlight();
+  renderAll();
+  setStatus("Undid last change", "ok");
 }
 
 // ---------------------------------------------------------------------------
@@ -60,7 +101,12 @@ function setStatus(msg, kind) {
 // ---------------------------------------------------------------------------
 
 async function newPuzzle(width, height) {
+  const previous = puzzle;
   const data = await apiJson(`/api/puzzle/new?width=${width}&height=${height}`, {});
+  if (previous) {
+    undoStack.push(previous);
+    if (undoStack.length > MAX_UNDO) undoStack.shift();
+  }
   puzzle = data.puzzle;
   slots = data.slots;
   selected = null;
@@ -103,6 +149,7 @@ function symmetryMirror(r, c) {
 }
 
 function toggleBlockAt(r, c) {
+  snapshotForUndo();
   const newState = !puzzle.blocks[r][c];
   puzzle.blocks[r][c] = newState;
   puzzle.letters[r][c] = EMPTY;
@@ -218,6 +265,7 @@ function renderGrid() {
       if (activeCells.has(key)) cell.classList.add("in-word");
       if (selected && selected.row === r && selected.col === c) cell.classList.add("selected");
       if (styleIssues.has(key) || symmetryIssues.has(key)) cell.classList.add("style-issue");
+      if (fillFailedCells.has(key)) cell.classList.add("fill-failed");
 
       if (!blocked) {
         const num = numbers.get(`${r},${c}`);
@@ -234,39 +282,45 @@ function renderGrid() {
       }
 
       cell.addEventListener("click", () => onCellClick(r, c));
-      cell.addEventListener("dblclick", () => onCellDoubleClick(r, c));
       grid.appendChild(cell);
     }
   }
 }
 
-// A plain click on the already-selected cell toggles its block -- but
-// that same click is also the first half of a double-click, which instead
-// changes direction (onCellDoubleClick). The two can't be told apart from
-// a single click event alone, so the toggle is delayed briefly; if a
-// dblclick follows, it cancels the pending toggle before it fires.
+// Double-click changes direction instead of toggling a block. This can't
+// be done by also listening for the native 'dblclick' event: renderGrid()
+// rebuilds every cell <div> from scratch on each render (including the one
+// that was just clicked, since a click on a new cell re-renders to show
+// the new selection), and relying on the browser's own click-target
+// tracking across a DOM node being replaced mid-gesture proved unreliable
+// -- double-clicking was landing as two single clicks (select, then
+// toggle-block) instead of being recognized as a double-click at all. So
+// double-click detection is done by hand here, purely from click
+// timestamps on the same (row, col), independent of DOM node identity.
 function onCellClick(r, c) {
+  const now = Date.now();
+  const isDoubleClick =
+    lastClick.row === r && lastClick.col === c && now - lastClick.time < DOUBLE_CLICK_MS;
+  lastClick = isDoubleClick ? { row: null, col: null, time: 0 } : { row: r, col: c, time: now };
+
+  if (isDoubleClick) {
+    selected = { row: r, col: c };
+    direction = direction === "across" ? "down" : "across";
+    renderGrid();
+    updateOptionsPanel();
+    highlightActiveClue();
+    return;
+  }
+
   if (selected && selected.row === r && selected.col === c) {
-    if (pendingBlockToggle) clearTimeout(pendingBlockToggle);
-    pendingBlockToggle = setTimeout(() => {
-      pendingBlockToggle = null;
-      toggleBlockAt(r, c);
-    }, 250);
+    // A second, unhurried click on the already-selected cell (not fast
+    // enough to have been caught as a double-click above) toggles its
+    // block -- no artificial delay needed, since double-click status was
+    // already resolved, one way or the other, by the check above.
+    toggleBlockAt(r, c);
     return;
   }
   selected = { row: r, col: c };
-  renderGrid();
-  updateOptionsPanel();
-  highlightActiveClue();
-}
-
-function onCellDoubleClick(r, c) {
-  if (pendingBlockToggle) {
-    clearTimeout(pendingBlockToggle);
-    pendingBlockToggle = null;
-  }
-  selected = { row: r, col: c };
-  direction = direction === "across" ? "down" : "across";
   renderGrid();
   updateOptionsPanel();
   highlightActiveClue();
@@ -301,24 +355,46 @@ function advanceInDirection(step) {
   highlightActiveClue();
 }
 
-document.addEventListener("keydown", (e) => {
-  if (!puzzle) return;
+// Cmd+F/Ctrl+F (fill) and Cmd+Z/Ctrl+Z (undo) are registered on their own
+// CAPTURE-phase listener, ahead of everything else including the browser's
+// own handling: a bubble-phase listener plus preventDefault() was not
+// enough to reliably stop the browser's native "Find in page" from also
+// opening in every browser tested, since some browsers resolve that
+// shortcut before page JS ever sees it in the bubble phase. Capture-phase
+// interception is the more reliable way to win that race. (Some browsers
+// -- notably Safari on macOS -- bind Find at the OS/Services level in a
+// way no page script can override; if it still opens there, that's a
+// browser limitation the Fill/Undo buttons remain the reliable fallback
+// for, not a bug in this handler.)
+document.addEventListener(
+  "keydown",
+  (e) => {
+    if (!puzzle) return;
+    const key = e.key.toLowerCase();
+    if (!(e.metaKey || e.ctrlKey) || (key !== "f" && key !== "z")) return;
 
-  // Cmd+F (Mac) / Ctrl+F (elsewhere) fills the puzzle -- checked before
-  // any other bailout, so it works even without a selected cell and even
-  // while a clue/dictionary input has focus, matching how a browser's own
-  // Ctrl/Cmd+F "Find" shortcut is global rather than field-scoped.
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    const inTextField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    // Undo inside a text field should undo the *text edit* (native browser
+    // behavior), not the grid -- Fill has no such field-local meaning, so
+    // it stays global regardless of focus.
+    if (key === "z" && inTextField) return;
+
     e.preventDefault();
-    runFill();
-    return;
-  }
+    e.stopPropagation();
+    if (key === "f") runFill();
+    else undo();
+  },
+  true
+);
 
-  if (!selected) return;
+document.addEventListener("keydown", (e) => {
+  if (!puzzle || !selected) return;
   const tag = (document.activeElement && document.activeElement.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
   const { row, col } = selected;
+  const blocked = puzzle.blocks[row][col];
   if (e.key === ".") {
     e.preventDefault();
     toggleBlockAt(row, col);
@@ -342,16 +418,29 @@ document.addEventListener("keydown", (e) => {
     highlightActiveClue();
   } else if (e.key === "Backspace") {
     e.preventDefault();
-    if (!puzzle.blocks[row][col] && puzzle.letters[row][col] !== EMPTY) {
+    if (blocked) {
+      // Backspace on a block deletes it -- the same action as clicking it
+      // or pressing "." while selected, just from the keyboard.
+      toggleBlockAt(row, col);
+    } else if (puzzle.letters[row][col] !== EMPTY) {
+      // Clear the current letter AND step back in one press, so holding
+      // Backspace erases one letter per press while walking back through
+      // a word -- previously this only cleared the current cell and left
+      // the cursor there, so the *next* press just moved (without
+      // clearing) onto the still-filled previous cell, and only the press
+      // after *that* cleared it: two presses per letter instead of one.
+      snapshotForUndo();
       setLetterAt(row, col, EMPTY);
       renderGrid();
       refreshSlotsAndStats();
+      advanceInDirection(-1);
     } else {
       advanceInDirection(-1);
     }
   } else if (/^[a-zA-Z]$/.test(e.key)) {
     e.preventDefault();
-    if (!puzzle.blocks[row][col]) {
+    if (!blocked) {
+      snapshotForUndo();
       setLetterAt(row, col, e.key.toUpperCase());
       renderGrid();
       refreshSlotsAndStats();
@@ -500,6 +589,7 @@ async function updateOptionsPanel() {
 }
 
 function applyWordToSlot(slot, word) {
+  snapshotForUndo();
   for (let i = 0; i < slot.cells.length; i++) {
     const [r, c] = slot.cells[i];
     puzzle.letters[r][c] = word[i];
@@ -605,9 +695,14 @@ function wireToolbar() {
     formData.append("file", file);
     try {
       const data = await api("/api/puzzle/import", { method: "POST", body: formData });
+      if (puzzle) {
+        undoStack.push(puzzle);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+      }
       puzzle = data.puzzle;
       slots = data.slots;
       selected = null;
+      clearFillFailedHighlight();
       renderAll();
       setStatus(data.warning ? `Imported "${file.name}" — ${data.warning}` : `Imported "${file.name}"`, data.warning ? "error" : "ok");
     } catch (err) {
@@ -654,6 +749,21 @@ function wireToolbar() {
   });
 
   document.getElementById("btn-fill").addEventListener("click", runFill);
+
+  document.getElementById("btn-undo").addEventListener("click", undo);
+
+  document.getElementById("btn-clear").addEventListener("click", () => {
+    if (!puzzle) return;
+    snapshotForUndo();
+    for (let r = 0; r < puzzle.height; r++) {
+      for (let c = 0; c < puzzle.width; c++) {
+        if (!puzzle.blocks[r][c]) puzzle.letters[r][c] = EMPTY;
+      }
+    }
+    renderGrid();
+    refreshSlotsAndStats();
+    setStatus("Cleared letters (grid shape and clues kept)", "ok");
+  });
 }
 
 let filling = false;
@@ -666,7 +776,22 @@ async function runFill() {
     return;
   }
   filling = true;
-  setStatus("Filling…");
+  clearFillFailedHighlight();
+  renderGrid();
+  setFillSpinner(true);
+
+  // The C++ solver doesn't currently stream intermediate progress (node
+  // counts, restarts-so-far) back over its one-shot --json call, so there
+  // is no real number to show mid-solve without a genuine engine change
+  // (see chat) -- an elapsed-time ticker is what's honestly available
+  // without one, and at least confirms the app is still working rather
+  // than showing a static, possibly-stale "Filling…".
+  const startedAt = Date.now();
+  const tick = () => setStatus(`Filling… ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
+  tick();
+  const tickInterval = setInterval(tick, 100);
+
+  const beforeFill = JSON.parse(JSON.stringify(puzzle));
   try {
     const data = await apiJson("/api/fill", {
       puzzle,
@@ -676,20 +801,63 @@ async function runFill() {
       down_min_score: dictSelections.down.minScore,
       threads: 0,
     });
-    puzzle = data.puzzle;
-    await refreshSlotsAndStats();
-    renderGrid();
     const st = data.stats;
     if (data.solved) {
+      undoStack.push(beforeFill);
+      if (undoStack.length > MAX_UNDO) undoStack.shift();
+      puzzle = data.puzzle;
+      await refreshSlotsAndStats();
+      renderGrid();
       setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
     } else {
-      setStatus(`No solution found (${st.time_seconds.toFixed(2)}s)`, "error");
+      setStatus(`No solution found (${st.time_seconds.toFixed(2)}s) — diagnosing…`, "error");
+      await diagnoseFillFailure();
+      renderGrid();
+      setStatus(
+        fillFailedCells.size
+          ? `No solution found (${st.time_seconds.toFixed(2)}s) — cells in red have no dictionary candidates given their current letters`
+          : `No solution found (${st.time_seconds.toFixed(2)}s) — the conflict spans the whole grid, not one isolated slot`,
+        "error"
+      );
     }
   } catch (err) {
     setStatus(`Fill failed: ${err.message}`, "error");
   } finally {
+    clearInterval(tickInterval);
+    setFillSpinner(false);
     filling = false;
   }
+}
+
+// After a failed Fill, flags every open cell belonging to a slot that has
+// zero dictionary candidates for its *current* fixed letters -- a sound
+// (if partial) diagnosis: such a slot is provably part of why no solution
+// exists. This can't localize a failure caused purely by how open slots
+// interlock with each other (a blank grid that's still unsatisfiable has
+// no single slot with zero candidates in isolation); the solver itself
+// doesn't expose a minimal-conflict-set analysis to point at that case
+// more precisely, so nothing is highlighted for it.
+async function diagnoseFillFailure() {
+  fillFailedCells = new Set();
+  const checks = slots.map(async (s) => {
+    const sel = s.direction === "across" ? dictSelections.across : dictSelections.down;
+    if (!sel.path) return;
+    try {
+      const data = await apiJson("/api/options", {
+        pattern: s.pattern,
+        dict_path: sel.path,
+        min_score: sel.minScore,
+        limit: 1,
+      });
+      if (data.candidates.length === 0) {
+        for (const [r, c] of s.cells) fillFailedCells.add(`${r},${c}`);
+      }
+    } catch (_) {
+      // A dictionary lookup failing here shouldn't block reporting the
+      // rest of the diagnosis -- just skip this slot.
+    }
+  });
+  await Promise.all(checks);
 }
 
 // ---------------------------------------------------------------------------
