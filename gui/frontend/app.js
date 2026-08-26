@@ -399,21 +399,30 @@ function backspaceStepBack() {
   highlightActiveClue();
 }
 
-// Cmd+F/Ctrl+F (fill) and Cmd+Z/Ctrl+Z (undo) are registered on their own
-// CAPTURE-phase listener, ahead of everything else including the browser's
-// own handling: a bubble-phase listener plus preventDefault() was not
-// enough to reliably stop the browser's native "Find in page" from also
-// opening in every browser tested, since some browsers resolve that
-// shortcut before page JS ever sees it in the bubble phase. Capture-phase
-// interception is the more reliable way to win that race. (Some browsers
-// -- notably Safari on macOS -- bind Find at the OS/Services level in a
-// way no page script can override; if it still opens there, that's a
-// browser limitation the Fill/Undo buttons remain the reliable fallback
-// for, not a bug in this handler.)
+// Cmd+F/Ctrl+F (fill), Cmd+Z/Ctrl+Z (undo), and Escape (cancel an
+// in-progress fill) are registered on their own CAPTURE-phase listener,
+// ahead of everything else including the browser's own handling: a
+// bubble-phase listener plus preventDefault() was not enough to reliably
+// stop the browser's native "Find in page" from also opening in every
+// browser tested, since some browsers resolve that shortcut before page
+// JS ever sees it in the bubble phase. Capture-phase interception is the
+// more reliable way to win that race. (Some browsers -- notably Safari on
+// macOS -- bind Find at the OS/Services level in a way no page script can
+// override; if it still opens there, that's a browser limitation the
+// Fill/Undo buttons remain the reliable fallback for, not a bug in this
+// handler.)
 document.addEventListener(
   "keydown",
   (e) => {
     if (!puzzle) return;
+
+    if (e.key === "Escape" && filling) {
+      e.preventDefault();
+      e.stopPropagation();
+      cancelFill();
+      return;
+    }
+
     const key = e.key.toLowerCase();
     if (!(e.metaKey || e.ctrlKey) || (key !== "f" && key !== "z")) return;
 
@@ -820,6 +829,7 @@ function wireToolbar() {
   });
 
   document.getElementById("btn-fill").addEventListener("click", runFill);
+  document.getElementById("btn-cancel-fill").addEventListener("click", cancelFill);
 
   document.getElementById("btn-undo").addEventListener("click", undo);
 
@@ -839,7 +849,15 @@ function wireToolbar() {
 
 let filling = false;
 
-// Shared by the Fill button and the Cmd+F / Ctrl+F shortcut.
+function setCancelButtonVisible(visible) {
+  document.getElementById("btn-cancel-fill").hidden = !visible;
+}
+
+// Shared by the Fill button and the Cmd+F / Ctrl+F shortcut. Streams
+// newline-delimited JSON from POST /api/fill (see app.py's docstring on
+// that endpoint) instead of awaiting one parsed response: a plain
+// await-the-whole-response call can't show live progress at all, since
+// nothing arrives until the request finishes.
 async function runFill() {
   if (!puzzle || filling) return;
   if (!dictSelections.across.path || !dictSelections.down.path) {
@@ -850,53 +868,113 @@ async function runFill() {
   clearFillFailedHighlight();
   renderGrid();
   setFillSpinner(true);
+  setCancelButtonVisible(true);
 
-  // The C++ solver doesn't currently stream intermediate progress (node
-  // counts, restarts-so-far) back over its one-shot --json call, so there
-  // is no real number to show mid-solve without a genuine engine change
-  // (see chat) -- an elapsed-time ticker is what's honestly available
-  // without one, and at least confirms the app is still working rather
-  // than showing a static, possibly-stale "Filling…".
   const startedAt = Date.now();
-  const tick = () => setStatus(`Filling… ${((Date.now() - startedAt) / 1000).toFixed(1)}s`);
-  tick();
-  const tickInterval = setInterval(tick, 100);
+  let lastNodes = 0;
+  const elapsed = () => ((Date.now() - startedAt) / 1000).toFixed(1);
+  const showProgress = () => setStatus(`Filling… ${lastNodes.toLocaleString()} nodes explored (${elapsed()}s)`);
+  showProgress();
+  // Keeps the elapsed-time portion visibly live even during a gap between
+  // progress events (~150ms apart at the solver end, but network/JS
+  // scheduling can widen that) -- the node count itself only ever updates
+  // from an actual progress event, never guessed at here.
+  const tickInterval = setInterval(showProgress, 200);
 
   const beforeFill = JSON.parse(JSON.stringify(puzzle));
   try {
-    const data = await apiJson("/api/fill", {
-      puzzle,
-      across_dict_path: dictSelections.across.path,
-      across_min_score: dictSelections.across.minScore,
-      down_dict_path: dictSelections.down.path,
-      down_min_score: dictSelections.down.minScore,
-      threads: 0,
+    const resp = await fetch("/api/fill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        puzzle,
+        across_dict_path: dictSelections.across.path,
+        across_min_score: dictSelections.across.minScore,
+        down_dict_path: dictSelections.down.path,
+        down_min_score: dictSelections.down.minScore,
+        threads: 0,
+      }),
     });
-    const st = data.stats;
-    if (data.solved) {
-      undoStack.push(beforeFill);
-      if (undoStack.length > MAX_UNDO) undoStack.shift();
-      puzzle = data.puzzle;
-      await refreshSlotsAndStats();
-      renderGrid();
-      setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
-    } else {
-      setStatus(`No solution found (${st.time_seconds.toFixed(2)}s) — diagnosing…`, "error");
-      await diagnoseFillFailure();
-      renderGrid();
-      setStatus(
-        fillFailedCells.size
-          ? `No solution found (${st.time_seconds.toFixed(2)}s) — cells in red have no dictionary candidates given their current letters`
-          : `No solution found (${st.time_seconds.toFixed(2)}s) — the conflict spans the whole grid, not one isolated slot`,
-        "error"
-      );
+    if (!resp.ok) {
+      let detail = resp.statusText;
+      try {
+        detail = (await resp.json()).detail || detail;
+      } catch (_) {}
+      throw new Error(detail);
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let finalEvent = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let newlineIndex;
+      while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (!line) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch (_) {
+          continue; // tolerate a stray malformed line rather than aborting the whole stream
+        }
+        if (event.type === "progress") {
+          lastNodes = event.nodes;
+          showProgress();
+        } else {
+          finalEvent = event;
+        }
+      }
+    }
+
+    if (!finalEvent) {
+      throw new Error("connection closed before a result arrived");
+    } else if (finalEvent.type === "done") {
+      const st = finalEvent.stats;
+      if (finalEvent.solved) {
+        undoStack.push(beforeFill);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        puzzle = finalEvent.puzzle;
+        await refreshSlotsAndStats();
+        renderGrid();
+        setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
+      } else {
+        setStatus(`No solution found (${st.time_seconds.toFixed(2)}s) — diagnosing…`, "error");
+        await diagnoseFillFailure();
+        renderGrid();
+        setStatus(
+          fillFailedCells.size
+            ? `No solution found (${st.time_seconds.toFixed(2)}s) — cells in red have no dictionary candidates given their current letters`
+            : `No solution found (${st.time_seconds.toFixed(2)}s) — the conflict spans the whole grid, not one isolated slot`,
+          "error"
+        );
+      }
+    } else if (finalEvent.type === "cancelled") {
+      setStatus(`Cancelled after ${lastNodes.toLocaleString()} nodes (${elapsed()}s) — grid unchanged`, "error");
+    } else if (finalEvent.type === "error") {
+      setStatus(`Fill failed: ${finalEvent.message}`, "error");
     }
   } catch (err) {
     setStatus(`Fill failed: ${err.message}`, "error");
   } finally {
     clearInterval(tickInterval);
     setFillSpinner(false);
+    setCancelButtonVisible(false);
     filling = false;
+  }
+}
+
+async function cancelFill() {
+  if (!filling) return;
+  try {
+    await api("/api/fill/cancel", { method: "POST" });
+  } catch (err) {
+    setStatus(`Cancel failed: ${err.message}`, "error");
   }
 }
 

@@ -1,6 +1,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <ostream>
@@ -101,6 +102,7 @@ struct Args {
   int down_min_score = 0;
   unsigned num_threads = 0;
   bool json = false;
+  bool progress = false;
 };
 
 // New flag-based invocation, used by the GUI backend so across/down can
@@ -140,6 +142,8 @@ Args ParseFlagArgs(int argc, char** argv) {
       args.num_threads = static_cast<unsigned>(std::stoul(next()));
     } else if (flag == "--json") {
       args.json = true;
+    } else if (flag == "--progress") {
+      args.progress = true;
     } else {
       throw std::runtime_error("unknown flag: " + flag);
     }
@@ -173,7 +177,12 @@ int main(int argc, char** argv) {
            "[--min-score <n>] [--threads <n>] [--json]\n"
            "   or: xfill_cli <grid_spec_file> --across-dict <path> "
            "--across-min <n> --down-dict <path> --down-min <n> "
-           "[--threads <n>] [--json]\n"
+           "[--threads <n>] [--json] [--progress]\n"
+           "  --progress: while solving, write a "
+           "{\"progress\":true,\"nodes\":N} line to stdout roughly every "
+           "150ms\n"
+           "  (N = total nodes visited across every worker so far), "
+           "ahead of the final result line. Flag-mode only.\n"
            "  num_threads: 0 (default) = "
            "std::thread::hardware_concurrency(); 1 = single-threaded,\n"
            "  for reproducible timing or comparing against a build "
@@ -206,9 +215,28 @@ int main(int argc, char** argv) {
             : xfill::Dictionary::LoadDual(args.across_dict_path, args.across_min_score,
                                            args.down_dict_path, args.down_min_score);
 
+    std::function<void(uint64_t)> on_progress;
+    if (args.progress) {
+      // A distinct, unambiguous shape (the "progress" key) from the
+      // final result line below, which never has one -- lets a line-by-
+      // line reader (the GUI backend) tell interim updates from the
+      // terminal one without needing a second stream, which would risk
+      // the classic two-pipe subprocess deadlock (child blocks writing
+      // to a full pipe the parent isn't currently reading, while the
+      // parent blocks reading the *other* pipe to EOF). Flushed
+      // immediately: stdout is otherwise fully buffered when it isn't
+      // attached to a terminal, e.g. when a parent process reads it
+      // through a pipe, and an update the caller can't see until some
+      // later flush defeats the entire point of live progress.
+      on_progress = [](uint64_t nodes) {
+        std::cout << "{\"progress\":true,\"nodes\":" << nodes << "}\n";
+        std::cout.flush();
+      };
+    }
+
     auto start = std::chrono::steady_clock::now();
     xfill::ParallelSolveResult result =
-        xfill::Solver::SolveParallel(grid, dict, args.num_threads);
+        xfill::Solver::SolveParallel(grid, dict, args.num_threads, on_progress);
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
 

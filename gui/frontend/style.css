@@ -63,6 +63,8 @@ button {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent-dim); border-color: var(--accent); font-weight: 600; }
 button.primary:hover { background: var(--accent); }
+button.danger { border-color: var(--issue-red); color: #ffb3b3; }
+button.danger:hover { background: var(--issue-red); color: var(--text); }
 
 .file-btn {
   background: var(--bg-panel-2);

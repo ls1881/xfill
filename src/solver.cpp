@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -249,7 +252,8 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
 }
 
 ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& dict,
-                                           unsigned num_threads) {
+                                           unsigned num_threads,
+                                           std::function<void(uint64_t)> on_progress) {
   if (num_threads == 0) {
     num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 1;
@@ -303,6 +307,39 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
     for (unsigned i = 0; i + 1 < num_threads; ++i) {
       solvers[i]->shared_crossing_weights_ = &shared_crossing_weights;
     }
+  }
+
+  // Shared node counter + monitor thread for on_progress (see its doc
+  // comment in solver.hpp): every worker adds to `total_nodes` as it
+  // visits nodes (Backtrack's try_candidate, gated on
+  // global_node_counter_ being non-null so this costs nothing when no
+  // callback was requested), and this dedicated thread -- never a worker
+  // itself -- polls it on a wall-clock interval and reports. Polling
+  // instead of an exact-node-count trigger sidesteps needing any
+  // synchronization among workers to agree on who reports which boundary.
+  //
+  // Waits on a condition variable rather than plain sleep_for: a solve
+  // that finishes well inside one interval still has to let this thread's
+  // *current* wait actually end before SolveParallel can join and return
+  // it, and a sleep_for can't be woken early -- confirmed directly, a
+  // trivial 2x2 grid that used to solve in ~0.0003s took 0.155s once this
+  // was wired in with plain sleep_for, all of it this thread finishing
+  // out a stale wait nobody needed anymore. notify_one() below wakes it
+  // immediately once solving is done instead.
+  std::atomic<uint64_t> total_nodes{0};
+  bool stop_monitor = false;
+  std::mutex monitor_mutex;
+  std::condition_variable monitor_cv;
+  std::thread monitor_thread;
+  if (on_progress) {
+    for (auto& solver : solvers) solver->global_node_counter_ = &total_nodes;
+    monitor_thread = std::thread([&]() {
+      std::unique_lock<std::mutex> lock(monitor_mutex);
+      while (!monitor_cv.wait_for(lock, std::chrono::milliseconds(150),
+                                   [&] { return stop_monitor; })) {
+        on_progress(total_nodes.load(std::memory_order_relaxed));
+      }
+    });
   }
 
   std::atomic<bool> cancel{false};
@@ -366,6 +403,19 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
     });
   }
   for (std::thread& t : threads) t.join();
+
+  if (on_progress) {
+    {
+      std::lock_guard<std::mutex> lock(monitor_mutex);
+      stop_monitor = true;
+    }
+    monitor_cv.notify_one();
+    monitor_thread.join();
+    // One last report with the true final total -- the monitor thread's
+    // own last iteration could have read total_nodes anywhere up to
+    // 150ms before every worker actually finished.
+    on_progress(total_nodes.load(std::memory_order_relaxed));
+  }
 
   ParallelSolveResult result;
   result.num_threads = num_threads;
@@ -842,6 +892,9 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   // or a solution was found (unwind immediately).
   auto try_candidate = [&](size_t idx) -> std::optional<Solution> {
     stats_.nodes++;
+    if (global_node_counter_ != nullptr) {
+      global_node_counter_->fetch_add(1, std::memory_order_relaxed);
+    }
     size_t domain_mark = trail.domains.size();
     size_t used_mark = trail.used.size();
     if (Assign(slot, idx, domains, used_by_length, assigned, trail,

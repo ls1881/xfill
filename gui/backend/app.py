@@ -13,11 +13,12 @@ to the network beyond localhost.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 
 from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -227,27 +228,54 @@ class FillRequest(BaseModel):
 
 @app.post("/api/fill")
 def fill(req: FillRequest):
+    """Streams newline-delimited JSON: zero or more
+    {"type":"progress","nodes":N} lines while solving, then exactly one
+    final line -- {"type":"done",...}, {"type":"cancelled"} (see
+    POST /api/fill/cancel), or {"type":"error","message":...}.
+
+    A plain non-streaming JSON response (what this returned before) can't
+    carry live progress at all -- it isn't sent until the whole request
+    finishes -- so a client that wants progress updates has to read this
+    response body incrementally (e.g. the Fetch API's
+    response.body.getReader(), which the frontend uses) rather than
+    awaiting a parsed JSON body in one shot.
+    """
     p = req.puzzle.to_puzzle()
     for path in (req.across_dict_path, req.down_dict_path):
         if not pathlib.Path(path).exists():
             raise HTTPException(400, f"dictionary not found: {path}")
-    try:
-        result = solver_bridge.solve(
-            p,
-            req.across_dict_path, req.across_min_score,
-            req.down_dict_path, req.down_min_score,
-            threads=req.threads,
-        )
-    except solver_bridge.SolveError as e:
-        raise HTTPException(500, str(e)) from e
-    solver_bridge.apply_solution(p, result)
-    return {
-        "solved": result.get("solved", False),
-        "puzzle": PuzzleModel.from_puzzle(p),
-        "stats": {
-            k: result.get(k) for k in ("nodes", "backtracks", "restarts", "time_seconds", "threads")
-        },
-    }
+
+    def generate():
+        try:
+            for event in solver_bridge.solve_stream(
+                p,
+                req.across_dict_path, req.across_min_score,
+                req.down_dict_path, req.down_min_score,
+                threads=req.threads,
+            ):
+                if event["type"] == "done":
+                    solver_bridge.apply_solution(p, event)
+                    payload = {
+                        "type": "done",
+                        "solved": event.get("solved", False),
+                        "puzzle": PuzzleModel.from_puzzle(p).model_dump(),
+                        "stats": {
+                            k: event.get(k)
+                            for k in ("nodes", "backtracks", "restarts", "time_seconds", "threads")
+                        },
+                    }
+                else:
+                    payload = event
+                yield json.dumps(payload) + "\n"
+        except solver_bridge.SolveError as e:
+            yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
+
+
+@app.post("/api/fill/cancel")
+def fill_cancel():
+    return {"cancelled": solver_bridge.cancel_current_fill()}
 
 
 # ---------------------------------------------------------------------------

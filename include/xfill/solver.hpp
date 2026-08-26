@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <random>
 #include <string>
@@ -218,8 +219,23 @@ class Solver {
   // guaranteed to reach a real exhaustive conclusion even on a grid
   // where restart-based search alone never does. See the class comment
   // above for the design.
+  //
+  // `on_progress`, when set, is called periodically (roughly every 150ms
+  // of wall time -- see the dedicated monitor thread in solver.cpp, not a
+  // fixed node-count boundary: with N workers concurrently incrementing
+  // the same shared counter, catching an exact multiple would need
+  // synchronization this project avoids everywhere else in the hot path)
+  // with the total node count summed across every worker so far. It is
+  // never called from inside a worker's own search thread -- the search
+  // itself does one relaxed atomic increment per node when this is set
+  // (nothing extra when it's null, the default, matching
+  // shared_crossing_weights_'s existing "strictly additive, zero cost
+  // when unused" pattern) and the monitor thread does the reporting, so a
+  // slow or blocking callback only ever delays progress updates, never
+  // the search.
   static ParallelSolveResult SolveParallel(const Grid& grid, const Dictionary& dict,
-                                            unsigned num_threads = 0);
+                                            unsigned num_threads = 0,
+                                            std::function<void(uint64_t)> on_progress = nullptr);
 
   const SolverStats& stats() const { return stats_; }
 
@@ -676,6 +692,14 @@ class Solver {
   // single-threaded Solve() call, which then behaves exactly as it
   // always has -- this is strictly additive, not a replacement.
   SharedCrossingWeights* shared_crossing_weights_ = nullptr;
+  // Set only by SolveParallel, only when its caller passed a non-null
+  // on_progress callback: every worker adds to this same shared counter
+  // as it visits nodes, so a separate monitor thread (not any worker
+  // itself -- see SolveParallel's on_progress doc comment) can report a
+  // live total across the whole portfolio. Null (the default) costs one
+  // predictable, always-false branch per node -- see the same "strictly
+  // additive, zero cost when unused" reasoning as shared_crossing_weights_.
+  std::atomic<uint64_t>* global_node_counter_ = nullptr;
   // Whether SelectBranchSlot should weighted-randomly pick among the top
   // few slots (true on restarts) or deterministically take the single
   // best one (false on the first attempt). Benchmarking showed always
