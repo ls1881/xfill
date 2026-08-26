@@ -14,6 +14,7 @@ to the network beyond localhost.
 from __future__ import annotations
 
 import pathlib
+import re
 
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -138,6 +139,19 @@ async def import_puzzle(file: UploadFile):
     return resp
 
 
+def _safe_download_filename(title: str, ext: str) -> str:
+    """A puzzle's title is arbitrary user text with no character
+    restrictions -- embedding it in a Content-Disposition header as-is
+    would let a title containing '"' break the header's quoting, or one
+    containing CR/LF inject additional headers into the response
+    entirely. Stripping down to a conservative safe set avoids both,
+    while still keeping the title recognizable in the downloaded
+    filename."""
+    base = re.sub(r"[^A-Za-z0-9 _-]", "", title.strip())
+    base = re.sub(r"\s+", "_", base).strip("_")
+    return f"{base or 'puzzle'}.{ext}"
+
+
 @app.post("/api/puzzle/export")
 def export_puzzle(puzzle: PuzzleModel, format: str):
     writer = _WRITERS.get(format)
@@ -145,7 +159,7 @@ def export_puzzle(puzzle: PuzzleModel, format: str):
         raise HTTPException(400, f"unsupported format: {format} (expected puz, ipuz, or cfp)")
     p = puzzle.to_puzzle()
     data = writer(p)
-    filename = f"{(p.title or 'puzzle').strip().replace(' ', '_')}.{format}"
+    filename = _safe_download_filename(p.title, format)
     return Response(
         content=data,
         media_type=_MEDIA_TYPES[format],
@@ -173,6 +187,11 @@ async def upload_dictionary(file: UploadFile):
     dest = DICT_DIR / pathlib.Path(file.filename).name
     data = await file.read()
     dest.write_bytes(data)
+    # Re-uploading an existing filename overwrites it on disk -- without
+    # this, /api/options would keep serving dict_lookup's cached,
+    # pre-overwrite word list for this path indefinitely (see
+    # dict_lookup.invalidate's docstring).
+    dict_lookup.invalidate(str(dest))
     return {"id": dest.name, "name": dest.name, "path": str(dest)}
 
 

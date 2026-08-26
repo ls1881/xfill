@@ -64,6 +64,23 @@ def _load_cached(path: str, min_score: int) -> WordList:
 def get_word_list(path: str, min_score: int = 0) -> WordList:
     """Cached by (path, min_score) -- these dictionaries can be hundreds of
     thousands of lines, so re-parsing on every request would make the
-    options panel noticeably laggy. Invalidate by restarting the server if
-    a dictionary file on disk changes underneath an already-cached path."""
+    options panel noticeably laggy. See invalidate() for what to call when
+    a dictionary file's content changes on disk (e.g. a re-upload)."""
     return _load_cached(path, min_score)
+
+
+def invalidate(path: str | None = None) -> None:
+    """Drops cached word lists so a subsequent get_word_list() re-reads
+    from disk. Call this whenever a dictionary file's content changes
+    underneath an already-cached path -- e.g. POST /api/dictionaries/upload
+    overwriting an existing filename, which would otherwise keep serving
+    the pre-overwrite word list to /api/options indefinitely, since
+    lru_cache has no way to know the file changed.
+
+    `path` is accepted but not used to select entries: lru_cache doesn't
+    expose per-key eviction, and an upload is infrequent enough that
+    clearing the whole (cheap-to-rebuild-on-next-use) cache is simpler and
+    safer than reimplementing the cache to support it, at the cost of a
+    cold read for any *other* dictionary currently in use too.
+    """
+    _load_cached.cache_clear()

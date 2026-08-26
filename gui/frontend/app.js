@@ -538,6 +538,25 @@ function renderClues() {
   const down = slots.filter((s) => s.direction === "down").sort((a, b) => a.number - b.number);
   const activeId = currentSlot() ? currentSlot().id : null;
 
+  // This rebuilds every clue <input> from scratch, which would otherwise
+  // steal focus (and cursor position) out from under the user's hands if
+  // they're mid-typing a clue when an unrelated, still-in-flight grid
+  // edit's refresh happens to resolve and call this -- e.g. typing a grid
+  // letter kicks off an async refreshSlotsAndStats(), and if the user
+  // switches to the Clues tab and starts typing before that resolves, it
+  // would otherwise land while their cursor is in a clue field. Restoring
+  // focus + selection afterward, when the focused element is one of these
+  // inputs, avoids that.
+  const active = document.activeElement;
+  let restoreFocus = null;
+  if (active && active.hasAttribute && active.hasAttribute("data-slot-input")) {
+    restoreFocus = {
+      slotId: active.getAttribute("data-slot-input"),
+      selectionStart: active.selectionStart,
+      selectionEnd: active.selectionEnd,
+    };
+  }
+
   const build = (list) =>
     list
       .map(
@@ -571,6 +590,14 @@ function renderClues() {
       highlightActiveClue();
     });
   });
+
+  if (restoreFocus) {
+    const input = document.querySelector(`[data-slot-input="${restoreFocus.slotId}"]`);
+    if (input) {
+      input.focus();
+      input.setSelectionRange(restoreFocus.selectionStart, restoreFocus.selectionEnd);
+    }
+  }
 }
 
 function highlightActiveClue() {
