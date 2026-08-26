@@ -58,6 +58,69 @@ let previewGrid = null;
 const EMPTY = "-";
 
 // ---------------------------------------------------------------------------
+// Local persistence -- so reloading the page (or reopening the app later)
+// picks up where you left off instead of starting from a blank grid.
+// Purely client-side (localStorage), no backend involved: this app has no
+// server-side session (see app.py's module docstring), and a single
+// "resume my last grid" convenience doesn't need one either.
+// ---------------------------------------------------------------------------
+
+const SAVE_KEY = "xfill-gui-state-v1";
+let saveTimer = null;
+
+// Debounced so rapid typing doesn't hit localStorage on every keystroke --
+// called from every place puzzle/dictSelections/style-control state
+// actually changes (see renderGrid, wireInfoTab, renderClues,
+// wireDictTab, wireStyleControls, wireOptionsSort).
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveStateNow, 400);
+}
+
+function saveStateNow() {
+  if (!puzzle) return;
+  try {
+    localStorage.setItem(
+      SAVE_KEY,
+      JSON.stringify({ puzzle, dictSelections, symmetryMode, americanStyle, optionsSortMode })
+    );
+  } catch (_) {
+    // localStorage can throw (quota exceeded, some browsers' private
+    // windows, storage disabled, ...) -- losing autosave silently beats
+    // crashing the app over a convenience feature.
+  }
+}
+
+// Returns the saved state if present and structurally sane, else null.
+// Deliberately paranoid about validating shape: this is user-editable
+// browser storage (and the save format could change across versions of
+// this app), so a corrupt or stale value should fall back to a blank grid
+// rather than half-apply and break rendering.
+function loadSavedState() {
+  let data;
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    data = JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+  const p = data && data.puzzle;
+  if (
+    !p ||
+    typeof p.width !== "number" ||
+    typeof p.height !== "number" ||
+    !Array.isArray(p.blocks) ||
+    !Array.isArray(p.letters) ||
+    p.blocks.length !== p.height ||
+    p.letters.length !== p.height
+  ) {
+    return null;
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
 // API helpers
 // ---------------------------------------------------------------------------
 
@@ -290,6 +353,7 @@ function currentSlot() {
 }
 
 function renderGrid() {
+  scheduleSave(); // every puzzle-content mutation renders the grid afterward, so this is the one reliable choke point for autosave
   const grid = document.getElementById("grid");
   grid.style.gridTemplateColumns = `repeat(${puzzle.width}, 36px)`;
   grid.innerHTML = "";
@@ -612,6 +676,7 @@ function renderClues() {
     input.addEventListener("input", (e) => {
       const id = e.target.getAttribute("data-slot-input");
       puzzle.clues[id] = e.target.value;
+      scheduleSave();
     });
   });
   document.querySelectorAll(".clue-row").forEach((row) => {
@@ -914,18 +979,22 @@ function wireDictTab() {
   acrossSel.addEventListener("change", () => {
     dictSelections.across.path = acrossSel.value;
     updateOptionsPanel();
+    scheduleSave();
   });
   downSel.addEventListener("change", () => {
     dictSelections.down.path = downSel.value;
     updateOptionsPanel();
+    scheduleSave();
   });
   acrossMin.addEventListener("input", () => {
     dictSelections.across.minScore = parseInt(acrossMin.value || "0", 10);
     updateOptionsPanel();
+    scheduleSave();
   });
   downMin.addEventListener("input", () => {
     dictSelections.down.minScore = parseInt(downMin.value || "0", 10);
     updateOptionsPanel();
+    scheduleSave();
   });
 
   document.getElementById("input-dict-upload").addEventListener("change", async (e) => {
@@ -953,6 +1022,7 @@ function wireInfoTab() {
   for (const [elId, key] of fields) {
     document.getElementById(elId).addEventListener("input", (e) => {
       puzzle[key] = e.target.value;
+      scheduleSave();
     });
   }
 }
@@ -1238,6 +1308,7 @@ function wireOptionsSort() {
   document.getElementById("options-sort-select").addEventListener("change", (e) => {
     optionsSortMode = e.target.value;
     if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
+    scheduleSave();
   });
 }
 
@@ -1283,6 +1354,20 @@ function renderAll() {
   refreshSlotsAndStats();
 }
 
+// Pushes dictSelections/symmetryMode/americanStyle/optionsSortMode into
+// their DOM controls -- needed after restoring saved state, since
+// loadDictionaries() (called first, so the <option> lists exist at all)
+// already set its own defaults into those same elements.
+function syncControlsToState() {
+  document.getElementById("across-dict-select").value = dictSelections.across.path;
+  document.getElementById("across-min-score").value = dictSelections.across.minScore;
+  document.getElementById("down-dict-select").value = dictSelections.down.path;
+  document.getElementById("down-min-score").value = dictSelections.down.minScore;
+  document.getElementById("chk-american-style").checked = americanStyle;
+  document.getElementById("symmetry-select").value = symmetryMode;
+  document.getElementById("options-sort-select").value = optionsSortMode;
+}
+
 async function main() {
   wireToolbar();
   wireTabs();
@@ -1291,7 +1376,30 @@ async function main() {
   wireStyleControls();
   wireOptionsSort();
   await loadDictionaries();
-  await newPuzzle(15, 15);
+
+  const saved = loadSavedState();
+  if (saved) {
+    puzzle = saved.puzzle;
+    if (saved.symmetryMode) symmetryMode = saved.symmetryMode;
+    if (typeof saved.americanStyle === "boolean") americanStyle = saved.americanStyle;
+    if (saved.optionsSortMode) optionsSortMode = saved.optionsSortMode;
+    // Only restore a dictionary selection if that exact file still exists
+    // -- it may have been deleted or renamed since the save, in which case
+    // loadDictionaries()'s own default (already applied above) stands.
+    const knownPaths = new Set(dictionaries.map((d) => d.path));
+    if (saved.dictSelections?.across?.path && knownPaths.has(saved.dictSelections.across.path)) {
+      dictSelections.across = { ...saved.dictSelections.across };
+    }
+    if (saved.dictSelections?.down?.path && knownPaths.has(saved.dictSelections.down.path)) {
+      dictSelections.down = { ...saved.dictSelections.down };
+    }
+    syncControlsToState();
+    selected = null;
+    renderAll();
+    setStatus("Restored your previous grid", "ok");
+  } else {
+    await newPuzzle(15, 15);
+  }
 }
 
 // Best-effort cleanup for whatever a normal fetch() can't reach: if a
