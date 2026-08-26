@@ -213,6 +213,60 @@ def slot_options(req: OptionsRequest):
     return {"candidates": [{"word": w, "score": s} for w, s in candidates]}
 
 
+class VerifyOptionRequest(BaseModel):
+    puzzle: PuzzleModel
+    slot_id: str
+    word: str
+    across_dict_path: str
+    across_min_score: int = 0
+    down_dict_path: str
+    down_min_score: int = 0
+    threads: int = 2
+
+
+@app.post("/api/options/verify")
+def verify_option(req: VerifyOptionRequest):
+    """Checks whether locking `word` into slot `slot_id` still allows the
+    rest of the grid to be completed -- a real solve, not the plain
+    pattern match slot_options above does. Used by the frontend to tell a
+    candidate that's merely dictionary-valid apart from one actually known
+    to lead to a complete fill; expensive (one full solve per call), so
+    the frontend only calls this for a handful of candidates at a time,
+    sequentially, in the background.
+    """
+    p = req.puzzle.to_puzzle()
+    for path in (req.across_dict_path, req.down_dict_path):
+        if not pathlib.Path(path).exists():
+            raise HTTPException(400, f"dictionary not found: {path}")
+
+    slot = next((s for s in p.compute_slots() if s.id == req.slot_id), None)
+    if slot is None:
+        raise HTTPException(400, f"no such slot: {req.slot_id}")
+    word = req.word.strip().upper()
+    if len(word) != slot.length:
+        raise HTTPException(400, f"word length {len(word)} != slot length {slot.length}")
+
+    for (r, c), ch in zip(slot.cells, word):
+        p.letters[r][c] = ch
+
+    result = solver_bridge.solve_blocking(
+        p,
+        req.across_dict_path, req.across_min_score,
+        req.down_dict_path, req.down_min_score,
+        threads=req.threads,
+        track_for_cancel=False,
+    )
+    if result.get("type") == "done":
+        if result.get("solved"):
+            return {"feasible": True, "grid": result.get("grid")}
+        return {"feasible": False, "grid": None}
+    # An "error" (xfill_cli missing, crashed, etc.) is not the same
+    # finding as a genuine infeasibility -- don't let a transient problem
+    # here get treated as "this word doesn't work" and silently removed
+    # from the list; the frontend leaves it unchecked instead.
+    return {"feasible": None, "grid": None, "error": result.get("message", "verify failed")}
+
+
 # ---------------------------------------------------------------------------
 # Fill (full solve)
 # ---------------------------------------------------------------------------

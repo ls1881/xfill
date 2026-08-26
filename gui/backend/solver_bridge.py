@@ -113,6 +113,7 @@ def solve_stream(
     down_dict_path: str,
     down_min_score: int,
     threads: int = 0,
+    track_for_cancel: bool = True,
 ) -> Iterator[dict]:
     """Yields {"type": "progress", "nodes": N} dicts as xfill_cli reports
     them (see main.cpp's --progress), then exactly one final dict:
@@ -129,6 +130,15 @@ def solve_stream(
     progress both available, a silent timeout would just be a second,
     redundant way to give up that the user can no longer see coming or
     override.
+
+    `track_for_cancel`: whether this call's subprocess is the one
+    cancel_current_fill() (the Cancel button) can terminate. False for the
+    background per-candidate feasibility checks in app.py's
+    /api/options/verify -- those aren't user-cancellable individually (the
+    frontend just stops *issuing* more of them once its batch goes stale,
+    see updateOptionsPanel's doc comment), and must NOT be reachable by a
+    Cancel click aimed at an unrelated, actually-running Fill, nor allowed
+    to clobber that Fill's own tracked process out from under it.
     """
     if not XFILL_CLI.exists():
         raise SolveError(
@@ -173,9 +183,10 @@ def solve_stream(
         except OSError as e:
             raise SolveError(f"could not start xfill_cli: {e}") from e
 
-        global _current_process
-        with _current_process_lock:
-            _current_process = proc
+        if track_for_cancel:
+            global _current_process
+            with _current_process_lock:
+                _current_process = proc
 
         final_result: dict | None = None
         assert proc.stdout is not None
@@ -209,14 +220,38 @@ def solve_stream(
                 "message": stderr_text or f"xfill_cli exited with code {returncode} and no output",
             }
     finally:
-        with _current_process_lock:
-            if _current_process is proc:
-                _current_process = None
+        if track_for_cancel:
+            with _current_process_lock:
+                if _current_process is proc:
+                    _current_process = None
         pathlib.Path(grid_path).unlink(missing_ok=True)
         if across_is_temp:
             pathlib.Path(across_path).unlink(missing_ok=True)
         if down_is_temp:
             pathlib.Path(down_path).unlink(missing_ok=True)
+
+
+def solve_blocking(
+    puzzle: Puzzle,
+    across_dict_path: str,
+    across_min_score: int,
+    down_dict_path: str,
+    down_min_score: int,
+    threads: int = 0,
+    track_for_cancel: bool = True,
+) -> dict:
+    """Runs solve_stream to completion and returns just its final (non-
+    "progress") event. For a caller that only wants the end result --
+    e.g. /api/options/verify, which checks one candidate word at a time
+    and has nothing to do with an intermediate node count."""
+    final: dict | None = None
+    for event in solve_stream(
+        puzzle, across_dict_path, across_min_score, down_dict_path, down_min_score,
+        threads=threads, track_for_cancel=track_for_cancel,
+    ):
+        if event["type"] != "progress":
+            final = event
+    return final if final is not None else {"type": "error", "message": "no result produced"}
 
 
 def apply_solution(puzzle: Puzzle, result: dict) -> None:

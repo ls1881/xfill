@@ -239,6 +239,13 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   font-weight: 400;
   color: #555;
 }
+/* A previewed (not yet committed) candidate's letter -- dimmed so it
+   reads as tentative, never confused with an actually-typed letter. Only
+   ever drawn into a still-blank cell (see renderGrid). */
+.cell .preview-letter {
+  color: #9a978c;
+  font-weight: 400;
+}
 
 #grid-hint {
   margin-top: 14px;
@@ -354,6 +361,12 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .option-row:hover { background: var(--accent-dim); }
 .option-row .word { font-family: "SF Mono", Menlo, monospace; letter-spacing: 0.05em; }
 .option-row .score { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Confirmed, via a real solve (see startVerificationBatch), to still
+   leave the rest of the grid completable -- not just a dictionary/pattern
+   match, which every row here already is. Click previews its full
+   completion; click again to commit it (see onOptionClick). */
+.option-row.verified { border: 1px solid var(--good); }
+.option-row.verified .word { font-weight: 700; color: var(--good); }
 
 #tab-dict select, #tab-dict input, #tab-info input, #tab-info textarea {
   width: 100%;

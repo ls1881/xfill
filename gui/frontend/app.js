@@ -25,6 +25,24 @@ let undoStack = []; // deep-cloned puzzle snapshots, most recent last
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
 
+// Per-candidate solve-feasibility checks for the Options panel (see
+// updateOptionsPanel): word -> {feasible: true|false, grid: [...] | null}.
+// Reset whenever the (slot, pattern, dictionary) combination changes --
+// see lastVerifiedKey.
+let verifiedResults = new Map();
+let lastVerifiedKey = null;
+let verifyBatchToken = 0; // incremented per batch; a stale batch stops issuing further checks
+const VERIFY_LIMIT = 10; // how many top-scored candidates get checked per slot
+const VERIFY_THREADS = 2; // kept modest since these run one at a time, in the background
+
+// The grid preview shown when a verified candidate is clicked: a full
+// solved grid (row strings, '#' for block) from that candidate's own
+// verify check. Only ever drawn into cells the user hasn't actually
+// filled in yet (see renderGrid).
+let previewSlotId = null;
+let previewWord = null;
+let previewGrid = null;
+
 const EMPTY = "-";
 
 // ---------------------------------------------------------------------------
@@ -76,10 +94,23 @@ function snapshotForUndo() {
   undoStack.push(JSON.parse(JSON.stringify(puzzle)));
   if (undoStack.length > MAX_UNDO) undoStack.shift();
   clearFillFailedHighlight();
+  clearPreview();
 }
 
 function clearFillFailedHighlight() {
   if (fillFailedCells.size) fillFailedCells = new Set();
+}
+
+// A previewed candidate's grid is only meaningful relative to the exact
+// puzzle state it was verified against and the slot it was requested for
+// -- any real edit or change of selection invalidates it. Called from
+// snapshotForUndo() (every real grid edit already goes through that) and
+// directly wherever `selected`/`direction` change on their own without an
+// edit (moveSelection, onCellClick, etc).
+function clearPreview() {
+  previewSlotId = null;
+  previewWord = null;
+  previewGrid = null;
 }
 
 function undo() {
@@ -279,6 +310,15 @@ function renderGrid() {
         const letter = puzzle.letters[r][c];
         if (letter && letter !== EMPTY) {
           cell.appendChild(document.createTextNode(letter));
+        } else if (previewGrid && previewGrid[r][c] !== "#") {
+          // A previewed candidate's letter for a cell the user hasn't
+          // actually filled yet -- dimmed so it reads as "not committed,"
+          // and never shown over a real letter (checked above: this
+          // branch only runs when the cell is still EMPTY).
+          const previewEl = document.createElement("span");
+          previewEl.className = "preview-letter";
+          previewEl.textContent = previewGrid[r][c];
+          cell.appendChild(previewEl);
         }
       }
 
@@ -629,6 +669,18 @@ async function updateOptionsPanel() {
   const patternEl = document.getElementById("options-pattern");
   const listEl = document.getElementById("options-list");
   const s = currentSlot();
+
+  // A preview is only meaningful for the slot it was generated for --
+  // this is the single choke point every selection change already
+  // funnels through, so it's the one place that needs to know "the user
+  // moved on" rather than sprinkling the same check across every
+  // selection-changing function (click, arrows, double-click, Space,
+  // clue-row click, ...).
+  if (previewSlotId !== null && (!s || s.id !== previewSlotId)) {
+    clearPreview();
+    renderGrid();
+  }
+
   if (!s) {
     heading.textContent = "Options for selected slot";
     patternEl.textContent = "";
@@ -656,16 +708,127 @@ async function updateOptionsPanel() {
       listEl.innerHTML = '<div class="hint">No matches.</div>';
       return;
     }
-    listEl.innerHTML = data.candidates
-      .map((c) => `<div class="option-row" data-word="${c.word}"><span class="word">${c.word}</span><span class="score">${c.score}</span></div>`)
-      .join("");
-    listEl.querySelectorAll(".option-row").forEach((row) => {
-      row.addEventListener("click", () => applyWordToSlot(s, row.getAttribute("data-word")));
-    });
+
+    // Solve-feasibility checks (verifiedResults) are scoped to one exact
+    // (slot, pattern, dictionary) combination -- if any of those changed,
+    // start a fresh background verification pass and drop whatever was
+    // known before, since it no longer applies to what's now on screen.
+    const key = `${s.id}|${s.pattern}|${sel.path}|${sel.minScore}`;
+    if (key !== lastVerifiedKey) {
+      lastVerifiedKey = key;
+      verifiedResults = new Map();
+      startVerificationBatch(s, data.candidates);
+    }
+
+    renderOptionsList(s, data.candidates);
   } catch (err) {
     if (seq !== optionsRequestSeq) return;
     listEl.innerHTML = `<div class="hint">${err.message}</div>`;
   }
+}
+
+// Renders the candidate list against whatever verifiedResults currently
+// knows: a candidate confirmed feasible (a full grid completion actually
+// exists with it in this slot) is bolded; one confirmed infeasible is
+// dropped from the list entirely; anything not yet checked (or checked
+// and inconclusive -- see verify_option's "feasible: null" error case)
+// stays plain. Called both right after fetching candidates and again,
+// incrementally, as each background verification result comes in.
+function renderOptionsList(slot, candidates) {
+  const listEl = document.getElementById("options-list");
+  const visible = candidates.filter((c) => verifiedResults.get(c.word)?.feasible !== false);
+  if (!visible.length) {
+    listEl.innerHTML = '<div class="hint">No matches.</div>';
+    return;
+  }
+  listEl.innerHTML = visible
+    .map((c) => {
+      const verified = verifiedResults.get(c.word)?.feasible === true;
+      return `<div class="option-row${verified ? " verified" : ""}" data-word="${c.word}"><span class="word">${c.word}</span><span class="score">${c.score}</span></div>`;
+    })
+    .join("");
+  listEl.querySelectorAll(".option-row").forEach((row) => {
+    row.addEventListener("click", () => onOptionClick(slot, row.getAttribute("data-word")));
+  });
+}
+
+// Checks, one at a time in the background, whether each of the top
+// VERIFY_LIMIT candidates actually leads to a complete grid (not just
+// whether it matches the pattern -- see /api/options/verify). Sequential
+// and capped deliberately: each check is a full solve, so checking every
+// returned candidate eagerly and/or in parallel would make selecting a
+// slot expensive instead of the fast, cheap thing it already is via
+// slot_options' plain pattern match.
+async function startVerificationBatch(slot, allCandidates) {
+  const token = ++verifyBatchToken;
+  const toCheck = allCandidates.slice(0, VERIFY_LIMIT);
+  for (const c of toCheck) {
+    if (token !== verifyBatchToken) return; // superseded by a newer slot/pattern/dictionary
+    let result;
+    try {
+      result = await apiJson("/api/options/verify", {
+        puzzle,
+        slot_id: slot.id,
+        word: c.word,
+        across_dict_path: dictSelections.across.path,
+        across_min_score: dictSelections.across.minScore,
+        down_dict_path: dictSelections.down.path,
+        down_min_score: dictSelections.down.minScore,
+        threads: VERIFY_THREADS,
+      });
+    } catch (_) {
+      continue; // leave this one unchecked rather than aborting the whole batch
+    }
+    if (token !== verifyBatchToken) return;
+    if (result.feasible === true) {
+      verifiedResults.set(c.word, { feasible: true, grid: result.grid });
+    } else if (result.feasible === false) {
+      verifiedResults.set(c.word, { feasible: false, grid: null });
+    } // feasible === null (a verify-side error, not a real infeasibility finding) -- leave unset
+
+    if (currentSlot() && currentSlot().id === slot.id) {
+      renderOptionsList(slot, allCandidates);
+    }
+  }
+}
+
+// A confirmed-feasible candidate previews its full solved grid on click
+// (dimmed, into cells the user hasn't actually filled -- see renderGrid);
+// clicking that same candidate again commits it. An unverified candidate
+// has no precomputed completion to preview, so it keeps the original
+// behavior: click commits just that one slot's word immediately.
+function onOptionClick(slot, word) {
+  const verified = verifiedResults.get(word);
+  if (verified?.feasible && verified.grid) {
+    if (previewSlotId === slot.id && previewWord === word) {
+      commitPreview();
+    } else {
+      previewSlotId = slot.id;
+      previewWord = word;
+      previewGrid = verified.grid;
+      renderGrid();
+    }
+  } else {
+    applyWordToSlot(slot, word);
+  }
+}
+
+function commitPreview() {
+  if (!previewGrid) return;
+  const gridToApply = previewGrid; // captured before snapshotForUndo() clears the preview
+  snapshotForUndo();
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      // Only fills in still-blank cells -- never overwrites a letter the
+      // user already actually typed, whether that's part of this slot or
+      // one the preview grid's completion happened to also cover.
+      if (!puzzle.blocks[r][c] && puzzle.letters[r][c] === EMPTY && gridToApply[r][c] !== "#") {
+        puzzle.letters[r][c] = gridToApply[r][c];
+      }
+    }
+  }
+  renderGrid();
+  refreshSlotsAndStats();
 }
 
 function applyWordToSlot(slot, word) {
