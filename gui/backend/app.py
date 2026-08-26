@@ -254,17 +254,36 @@ def verify_option(req: VerifyOptionRequest):
         req.across_dict_path, req.across_min_score,
         req.down_dict_path, req.down_min_score,
         threads=req.threads,
-        track_for_cancel=False,
+        kind="verify",
+        # A bound the automatic verification batch can't itself request
+        # cancellation for individually (see solve_stream's docstring) --
+        # the frontend proactively cancels a whole stale batch via
+        # /api/options/verify/cancel-all, but this is the backstop for
+        # whenever that doesn't happen (a closed tab, a crashed page, ...).
+        timeout_seconds=20.0,
     )
     if result.get("type") == "done":
         if result.get("solved"):
             return {"feasible": True, "grid": result.get("grid")}
         return {"feasible": False, "grid": None}
-    # An "error" (xfill_cli missing, crashed, etc.) is not the same
-    # finding as a genuine infeasibility -- don't let a transient problem
-    # here get treated as "this word doesn't work" and silently removed
-    # from the list; the frontend leaves it unchecked instead.
+    # An "error" (xfill_cli missing, crashed, timed out, etc.) is not the
+    # same finding as a genuine infeasibility -- don't let a transient
+    # problem here get treated as "this word doesn't work" and silently
+    # removed from the list; the frontend leaves it unchecked instead.
     return {"feasible": None, "grid": None, "error": result.get("message", "verify failed")}
+
+
+@app.post("/api/options/verify/cancel-all")
+def verify_cancel_all():
+    """Terminates every currently-running verify-check subprocess. Called
+    by the frontend right before starting a fresh verification batch (a
+    newly-selected slot supersedes whatever the previous one was checking)
+    and right before a real Fill starts -- see solve_stream's docstring
+    for why this exists: without it, a batch's already-in-flight (already
+    spawned) check has no way to be stopped once superseded, and multiple
+    such orphaned solves were confirmed piling up and running indefinitely
+    with the app not even open."""
+    return {"killed": solver_bridge.cancel_all_verify_checks()}
 
 
 # ---------------------------------------------------------------------------

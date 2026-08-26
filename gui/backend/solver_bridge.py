@@ -83,27 +83,57 @@ def _augment_dict(original_path: str, locked_words: set[str], min_score: int) ->
         return f.name, True
 
 
-# The GUI runs one fill at a time (the frontend's own `filling` guard
-# already prevents overlapping requests), so tracking a single in-flight
-# subprocess here -- rather than per-job handles keyed by an id the
-# frontend would have to generate, thread through, and clean up -- is
-# sufficient and matches this app's single-user, stateless-otherwise
-# design (see app.py's module docstring). The lock only protects the
-# pointer itself; terminate()/poll() are safe to call concurrently with
-# the subprocess's own lifecycle.
+# The GUI runs one *Fill* at a time (the frontend's own `filling` guard
+# prevents overlapping Fill requests), but verify-checks (see
+# /api/options/verify) are a different story: updateOptionsPanel starts a
+# fresh background batch every time the selected slot's pattern changes,
+# and that batch's first request is already in flight -- its subprocess
+# already spawned -- by the time a newer batch supersedes it, since JS
+# staleness checks only stop a batch from issuing its *next* request, not
+# reach into one already sent. A user clicking through several slots
+# faster than one verify solve completes was leaving each of those
+# now-nobody-cares-about subprocesses running to completion on its own,
+# unbounded, with nothing tracking or able to stop it -- multiple
+# xfill_cli processes still burning CPU with the app not even open,
+# confirmed directly. So verify subprocesses ARE tracked too, in their own
+# set (never the same slot as _current_process, so a Fill's Cancel button
+# can't reach a verify-check and vice versa), and every new batch cancels
+# every previously-tracked one before issuing its own first request (see
+# app.py's /api/options/verify/cancel-all and app.js's
+# startVerificationBatch). A bounded timeout (see solve_stream's
+# `timeout_seconds`) is the second, independent backstop for this same
+# failure mode -- kept even with the cancel-all fix in place, since that
+# fix depends on the frontend actually running and calling it (a closed
+# tab, a crashed page, or some other gap the frontend can't reach still
+# shouldn't leave a solve running forever).
 _current_process: subprocess.Popen | None = None
 _current_process_lock = threading.Lock()
+_verify_processes: set[subprocess.Popen] = set()
+_verify_processes_lock = threading.Lock()
 
 
 def cancel_current_fill() -> bool:
-    """Terminates the currently-running xfill_cli subprocess, if any.
-    Returns whether there actually was one running to cancel."""
+    """Terminates the currently-running Fill's xfill_cli subprocess, if
+    any. Returns whether there actually was one running to cancel."""
     with _current_process_lock:
         proc = _current_process
     if proc is None or proc.poll() is not None:
         return False
     proc.terminate()
     return True
+
+
+def cancel_all_verify_checks() -> int:
+    """Terminates every currently-tracked verify-check subprocess (never
+    touches a Fill's). Returns how many were actually still running."""
+    with _verify_processes_lock:
+        procs = list(_verify_processes)
+    killed = 0
+    for proc in procs:
+        if proc.poll() is None:
+            proc.terminate()
+            killed += 1
+    return killed
 
 
 def solve_stream(
@@ -113,32 +143,43 @@ def solve_stream(
     down_dict_path: str,
     down_min_score: int,
     threads: int = 0,
-    track_for_cancel: bool = True,
+    kind: str = "fill",
+    timeout_seconds: float | None = None,
 ) -> Iterator[dict]:
     """Yields {"type": "progress", "nodes": N} dicts as xfill_cli reports
     them (see main.cpp's --progress), then exactly one final dict:
     {"type": "done", "solved": bool, "grid": [...] or None, ...stats} on a
-    normal finish, {"type": "cancelled"} if cancel_current_fill() killed
-    it, or {"type": "error", "message": str} if it exited abnormally on
-    its own. Raises SolveError immediately (before yielding anything) only
-    for problems that mean the solve was never actually attempted --
-    xfill_cli missing, or a spawn failure.
+    normal finish, {"type": "cancelled"} if this call's subprocess was
+    terminated (by cancel_current_fill(), cancel_all_verify_checks(), or
+    timeout_seconds elapsing) rather than exiting on its own, or
+    {"type": "error", "message": str} if it exited abnormally on its own.
+    Raises SolveError immediately (before yielding anything) only for
+    problems that mean the solve was never actually attempted -- xfill_cli
+    missing, or a spawn failure.
 
-    No automatic timeout: cancel_current_fill() is how a caller now bounds
-    how long it's willing to wait, a deliberate replacement for what used
-    to be a fixed timeout_seconds here -- with real cancellation and live
-    progress both available, a silent timeout would just be a second,
-    redundant way to give up that the user can no longer see coming or
-    override.
+    `kind`: which tracked-process set this call's subprocess belongs to --
+    "fill" (the default) is cancel_current_fill()'s (the Cancel button);
+    "verify" is cancel_all_verify_checks()'s, used for the background
+    per-candidate feasibility checks in app.py's /api/options/verify. Kept
+    as two disjoint sets so a Cancel click aimed at an actual Fill can't
+    reach an unrelated verify-check, and starting a fresh verify batch
+    can't clobber a real Fill's own tracked process.
 
-    `track_for_cancel`: whether this call's subprocess is the one
-    cancel_current_fill() (the Cancel button) can terminate. False for the
-    background per-candidate feasibility checks in app.py's
-    /api/options/verify -- those aren't user-cancellable individually (the
-    frontend just stops *issuing* more of them once its batch goes stale,
-    see updateOptionsPanel's doc comment), and must NOT be reachable by a
-    Cancel click aimed at an unrelated, actually-running Fill, nor allowed
-    to clobber that Fill's own tracked process out from under it.
+    `timeout_seconds`: an upper bound after which this call's subprocess
+    is terminated on its own, reported the same way an explicit cancel is.
+    None (the default, used for a real Fill) means no bound -- the Cancel
+    button is the only thing that can end a deliberate, user-initiated
+    Fill, since a silent timeout would just be a second, redundant way to
+    give up that the user can no longer see coming or override. Verify
+    checks pass a real bound: they're automatic, not something the user
+    explicitly asked *this one* to run, and rely on the caller
+    (app.js's startVerificationBatch) proactively cancelling anything
+    stale as the primary defense -- but that defense only works while the
+    frontend that's supposed to call it is actually running; this is the
+    backstop for when it isn't (a closed tab, a crashed page, or anything
+    else that gap doesn't cover), confirmed necessary directly: multiple
+    xfill_cli processes were found still running with the app not even
+    open, from exactly this gap before both fixes existed.
     """
     if not XFILL_CLI.exists():
         raise SolveError(
@@ -164,6 +205,7 @@ def solve_stream(
     down_path, down_is_temp = _augment_dict(down_dict_path, locked["down"], down_min_score)
 
     proc: subprocess.Popen | None = None
+    watchdog: threading.Timer | None = None
     try:
         cmd = [
             str(XFILL_CLI),
@@ -183,10 +225,18 @@ def solve_stream(
         except OSError as e:
             raise SolveError(f"could not start xfill_cli: {e}") from e
 
-        if track_for_cancel:
+        if kind == "fill":
             global _current_process
             with _current_process_lock:
                 _current_process = proc
+        else:
+            with _verify_processes_lock:
+                _verify_processes.add(proc)
+
+        if timeout_seconds is not None:
+            watchdog = threading.Timer(timeout_seconds, proc.terminate)
+            watchdog.daemon = True
+            watchdog.start()
 
         final_result: dict | None = None
         assert proc.stdout is not None
@@ -204,13 +254,16 @@ def solve_stream(
                 final_result = obj  # the terminal line has no "progress" key; keep the last one
 
         returncode = proc.wait()
+        if watchdog is not None:
+            watchdog.cancel()
 
         if final_result is not None:
             yield {"type": "done", **final_result}
         elif returncode < 0:
             # Killed by a signal (terminate()/kill() from
-            # cancel_current_fill() send SIGTERM/-15, SIGKILL/-9) rather
-            # than exiting on its own -- report as a cancellation, not an
+            # cancel_current_fill(), cancel_all_verify_checks(), or the
+            # watchdog above send SIGTERM/-15, SIGKILL/-9) rather than
+            # exiting on its own -- report as a cancellation, not an
             # error.
             yield {"type": "cancelled"}
         else:
@@ -220,10 +273,15 @@ def solve_stream(
                 "message": stderr_text or f"xfill_cli exited with code {returncode} and no output",
             }
     finally:
-        if track_for_cancel:
+        if watchdog is not None:
+            watchdog.cancel()
+        if kind == "fill":
             with _current_process_lock:
                 if _current_process is proc:
                     _current_process = None
+        elif proc is not None:
+            with _verify_processes_lock:
+                _verify_processes.discard(proc)
         pathlib.Path(grid_path).unlink(missing_ok=True)
         if across_is_temp:
             pathlib.Path(across_path).unlink(missing_ok=True)
@@ -238,7 +296,8 @@ def solve_blocking(
     down_dict_path: str,
     down_min_score: int,
     threads: int = 0,
-    track_for_cancel: bool = True,
+    kind: str = "fill",
+    timeout_seconds: float | None = None,
 ) -> dict:
     """Runs solve_stream to completion and returns just its final (non-
     "progress") event. For a caller that only wants the end result --
@@ -247,7 +306,7 @@ def solve_blocking(
     final: dict | None = None
     for event in solve_stream(
         puzzle, across_dict_path, across_min_score, down_dict_path, down_min_score,
-        threads=threads, track_for_cancel=track_for_cancel,
+        threads=threads, kind=kind, timeout_seconds=timeout_seconds,
     ):
         if event["type"] != "progress":
             final = event

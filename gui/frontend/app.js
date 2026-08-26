@@ -752,6 +752,39 @@ function renderOptionsList(slot, candidates) {
   });
 }
 
+// Terminates whatever verify-check subprocess the backend is currently
+// running, if any (see solver_bridge.cancel_all_verify_checks). Called
+// right before a new verification batch's first request and right before
+// a real Fill starts. This closes a real gap that let multiple xfill_cli
+// processes accumulate and run indefinitely, confirmed directly: this
+// batch's own token-based staleness check (below) only stops it from
+// *issuing further* requests once superseded -- it can't reach a request
+// already sent, whose subprocess by then already exists server-side with
+// nothing tracking or able to stop it if the batch that launched it no
+// longer cares about the answer. A user clicking through several slots
+// faster than one verify solve completes hit this every time.
+async function cancelAllVerifyChecks() {
+  try {
+    await api("/api/options/verify/cancel-all", { method: "POST" });
+  } catch (_) {
+    // Best-effort -- a failed cancel here shouldn't block starting the
+    // next batch or Fill; the 20s server-side timeout is the backstop.
+  }
+}
+
+// Fully stops verification: bumps the token FIRST so startVerificationBatch's
+// loop won't issue another request once its current one (which this also
+// kills) resolves, then kills whatever's currently running. Both halves
+// matter -- confirmed directly: calling only cancelAllVerifyChecks()
+// killed the in-flight subprocess, but the batch loop, still holding a
+// valid token, just treated that as an inconclusive result for that one
+// candidate and immediately moved on to spawn a new subprocess for the
+// next one, so nothing ever actually stopped.
+async function stopAllVerification() {
+  verifyBatchToken++;
+  await cancelAllVerifyChecks();
+}
+
 // Checks, one at a time in the background, whether each of the top
 // VERIFY_LIMIT candidates actually leads to a complete grid (not just
 // whether it matches the pattern -- see /api/options/verify). Sequential
@@ -761,6 +794,8 @@ function renderOptionsList(slot, candidates) {
 // slot_options' plain pattern match.
 async function startVerificationBatch(slot, allCandidates) {
   const token = ++verifyBatchToken;
+  await cancelAllVerifyChecks();
+  if (token !== verifyBatchToken) return; // superseded again while the cancel was in flight
   const toCheck = allCandidates.slice(0, VERIFY_LIMIT);
   for (const c of toCheck) {
     if (token !== verifyBatchToken) return; // superseded by a newer slot/pattern/dictionary
@@ -1032,6 +1067,7 @@ async function runFill() {
   renderGrid();
   setFillSpinner(true);
   setCancelButtonVisible(true);
+  stopAllVerification(); // free up the CPU/process a background verify check is using for the real Fill
 
   const startedAt = Date.now();
   let lastNodes = 0;
@@ -1238,5 +1274,29 @@ async function main() {
   await loadDictionaries();
   await newPuzzle(15, 15);
 }
+
+// Best-effort cleanup for whatever a normal fetch() can't reach: if a
+// verify-check is still running when the tab closes/navigates away, an
+// ordinary fetch() call here would very likely get cut off mid-flight by
+// the page unloading before it completes. sendBeacon is built for exactly
+// this -- a fire-and-forget POST the browser keeps alive across
+// navigation. Not the only defense against an orphaned verify subprocess
+// (see solve_stream's timeout_seconds for the backstop that covers this
+// even when a beacon doesn't fire, e.g. the process being killed outright
+// rather than the tab closing normally), but it means the common case
+// (closing the tab) cleans up immediately instead of waiting out that
+// timeout.
+//
+// Also bumps verifyBatchToken (not just the subprocess kill) for the same
+// reason stopAllVerification pairs the two everywhere else: pagehide can
+// fire on tab backgrounding, not only an actual close (bfcache, switching
+// tabs in some browsers), so this script can still be running afterward
+// -- without the token bump, a live batch loop would just treat the
+// killed subprocess as one inconclusive result and immediately spawn a
+// replacement for the next candidate, undoing the cleanup this is for.
+window.addEventListener("pagehide", () => {
+  verifyBatchToken++;
+  navigator.sendBeacon("/api/options/verify/cancel-all");
+});
 
 main().catch((err) => setStatus(err.message, "error"));
