@@ -20,7 +20,6 @@ let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots resp
 let optionsRequestSeq = 0; // same, for /api/options
 let lastClick = { row: null, col: null, time: 0 }; // same-cell click timing, used to detect a double-click ourselves
 const DOUBLE_CLICK_MS = 350;
-let pendingBlockToggle = null; // setTimeout id for a scheduled toggle, cancelable by a following double-click
 let undoStack = []; // deep-cloned puzzle snapshots, most recent last
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
@@ -34,6 +33,19 @@ let lastVerifiedKey = null;
 let verifyBatchToken = 0; // incremented per batch; a stale batch stops issuing further checks
 const VERIFY_LIMIT = 10; // how many top-scored candidates get checked per slot
 const VERIFY_THREADS = 2; // kept modest since these run one at a time, in the background
+
+// How the Options list is ordered: "smart" (verified first, then score,
+// then A-Z -- the default) sorts a candidate the moment it's confirmed
+// verified, not just when the list is first fetched, so a row visibly
+// jumps to the top as its background check completes. "score" and
+// "alpha" ignore verified status entirely.
+let optionsSortMode = "smart";
+// The full candidate list + slot from the last successful /api/options
+// fetch, kept so changing the sort dropdown can just re-render (see
+// wireOptionsSort) instead of re-fetching from the server for a purely
+// client-side reordering.
+let lastRenderedSlot = null;
+let lastRenderedCandidates = [];
 
 // The grid preview shown when a verified candidate is clicked: a full
 // solved grid (row strings, '#' for block) from that candidate's own
@@ -328,58 +340,34 @@ function renderGrid() {
   }
 }
 
-// Double-click changes direction instead of toggling a block. This can't
-// be done by also listening for the native 'dblclick' event: renderGrid()
-// rebuilds every cell <div> from scratch on each render (including the one
-// that was just clicked, since a click on a new cell re-renders to show
-// the new selection), and relying on the browser's own click-target
-// tracking across a DOM node being replaced mid-gesture proved unreliable
-// -- double-clicking was landing as two single clicks (select, then
-// toggle-block) instead of being recognized as a double-click at all. So
-// double-click detection is done by hand here, purely from click
-// timestamps on the same (row, col), independent of DOM node identity.
+// Clicking NEVER places or removes a block, no matter how many times or
+// how fast -- only "." and Backspace do that (see the keydown handler).
+// An earlier version toggled a block on a second click of an
+// already-selected cell, which produced exactly the bug this comment used
+// to describe workarounds for: a double-click (meant to change direction)
+// landing as two ordinary clicks could still leave a scheduled toggle
+// armed, and a *triple* click -- the double-click consuming clicks 1-2,
+// then click 3 landing on the now-selected cell as an unrelated "second
+// click" with a reset click-timer -- reliably placed a block nobody
+// asked for. Removing click-driven toggling entirely removes the
+// ambiguity at its root instead of chasing further edge cases in it.
 //
-// A click on the already-selected cell can't tell, by itself, whether a
-// second click is about to follow (making the pair a double-click) --
-// that's only knowable in hindsight, once either a matching second click
-// arrives or the double-click window passes without one. So that click
-// schedules its toggle instead of firing it immediately; a genuine
-// double-click's second click cancels the pending toggle before it fires.
-// (An earlier version fired the toggle immediately whenever the clicked
-// cell was already selected, which meant the *first* click of a
-// double-click on an already-selected cell -- the common way to invoke
-// the double-click-to-change-direction gesture on the cell you're
-// currently on -- placed a block before the second click ever got a
-// chance to cancel anything.)
+// Double-click detection itself is still done by hand, purely from click
+// timestamps on the same (row, col): renderGrid() rebuilds every cell
+// <div> from scratch on each render (including the one just clicked,
+// since a click on a new cell re-renders to show the new selection), and
+// relying on the browser's own click-target tracking across a DOM node
+// being replaced mid-gesture proved unreliable -- double-clicks were
+// landing as two independent single clicks instead of being recognized as
+// one gesture at all.
 function onCellClick(r, c) {
   const now = Date.now();
   const isDoubleClick =
     lastClick.row === r && lastClick.col === c && now - lastClick.time < DOUBLE_CLICK_MS;
+  lastClick = isDoubleClick ? { row: null, col: null, time: 0 } : { row: r, col: c, time: now };
 
-  if (isDoubleClick) {
-    if (pendingBlockToggle) {
-      clearTimeout(pendingBlockToggle);
-      pendingBlockToggle = null;
-    }
-    lastClick = { row: null, col: null, time: 0 }; // consumed -- don't chain into a triple-click
-    selected = { row: r, col: c };
-    direction = direction === "across" ? "down" : "across";
-    renderGrid();
-    updateOptionsPanel();
-    highlightActiveClue();
-    return;
-  }
-  lastClick = { row: r, col: c, time: now };
-
-  if (selected && selected.row === r && selected.col === c) {
-    if (pendingBlockToggle) clearTimeout(pendingBlockToggle);
-    pendingBlockToggle = setTimeout(() => {
-      pendingBlockToggle = null;
-      toggleBlockAt(r, c);
-    }, DOUBLE_CLICK_MS);
-    return;
-  }
   selected = { row: r, col: c };
+  if (isDoubleClick) direction = direction === "across" ? "down" : "across";
   renderGrid();
   updateOptionsPanel();
   highlightActiveClue();
@@ -685,6 +673,8 @@ async function updateOptionsPanel() {
     heading.textContent = "Options for selected slot";
     patternEl.textContent = "";
     listEl.innerHTML = "";
+    lastRenderedSlot = null;
+    lastRenderedCandidates = [];
     return;
   }
   heading.textContent = `${s.direction === "across" ? "Across" : "Down"} ${s.number} — options`;
@@ -693,6 +683,8 @@ async function updateOptionsPanel() {
   const sel = s.direction === "across" ? dictSelections.across : dictSelections.down;
   if (!sel.path) {
     listEl.innerHTML = '<div class="hint">Select a dictionary in the Dictionaries tab.</div>';
+    lastRenderedSlot = null;
+    lastRenderedCandidates = [];
     return;
   }
   const seq = ++optionsRequestSeq;
@@ -720,11 +712,28 @@ async function updateOptionsPanel() {
       startVerificationBatch(s, data.candidates);
     }
 
+    lastRenderedSlot = s;
+    lastRenderedCandidates = data.candidates;
     renderOptionsList(s, data.candidates);
   } catch (err) {
     if (seq !== optionsRequestSeq) return;
     listEl.innerHTML = `<div class="hint">${err.message}</div>`;
   }
+}
+
+function sortCandidates(candidates) {
+  const arr = [...candidates];
+  const verified = (c) => verifiedResults.get(c.word)?.feasible === true;
+  arr.sort((a, b) => {
+    if (optionsSortMode === "smart") {
+      const av = verified(a) ? 1 : 0;
+      const bv = verified(b) ? 1 : 0;
+      if (av !== bv) return bv - av;
+    }
+    if (optionsSortMode !== "alpha" && a.score !== b.score) return b.score - a.score;
+    return a.word.localeCompare(b.word);
+  });
+  return arr;
 }
 
 // Renders the candidate list against whatever verifiedResults currently
@@ -733,10 +742,12 @@ async function updateOptionsPanel() {
 // dropped from the list entirely; anything not yet checked (or checked
 // and inconclusive -- see verify_option's "feasible: null" error case)
 // stays plain. Called both right after fetching candidates and again,
-// incrementally, as each background verification result comes in.
+// incrementally, as each background verification result comes in -- so a
+// row re-sorts to the top the moment it's confirmed verified under the
+// default "smart" order, not only when the list is first built.
 function renderOptionsList(slot, candidates) {
   const listEl = document.getElementById("options-list");
-  const visible = candidates.filter((c) => verifiedResults.get(c.word)?.feasible !== false);
+  const visible = sortCandidates(candidates.filter((c) => verifiedResults.get(c.word)?.feasible !== false));
   if (!visible.length) {
     listEl.innerHTML = '<div class="hint">No matches.</div>';
     return;
@@ -1223,6 +1234,13 @@ function wireStyleControls() {
   });
 }
 
+function wireOptionsSort() {
+  document.getElementById("options-sort-select").addEventListener("change", (e) => {
+    optionsSortMode = e.target.value;
+    if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
+  });
+}
+
 // The two diagonal modes only make sense on a square grid -- disable them
 // otherwise rather than silently no-op-ing a selection that can't apply.
 function updateSymmetryOptionAvailability() {
@@ -1271,6 +1289,7 @@ async function main() {
   wireDictTab();
   wireInfoTab();
   wireStyleControls();
+  wireOptionsSort();
   await loadDictionaries();
   await newPuzzle(15, 15);
 }

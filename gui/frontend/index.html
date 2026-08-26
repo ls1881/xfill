@@ -56,7 +56,7 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it; click it again (or press “.” or Backspace) to toggle a block on/off. Type letters to fill; Backspace clears and steps back. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
+      <div id="grid-hint">Click a cell to select it. Press “.” or Backspace to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears and steps back. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
     </section>
 
     <aside id="side-panel">
@@ -91,7 +91,17 @@
       </div>
 
       <div class="tab-panel" id="tab-fill">
-        <h3 id="options-heading">Options for selected slot</h3>
+        <div class="options-header-row">
+          <h3 id="options-heading">Options for selected slot</h3>
+          <label class="select-label">
+            Sort
+            <select id="options-sort-select">
+              <option value="smart" selected>Verified → score → A-Z</option>
+              <option value="score">Score → A-Z</option>
+              <option value="alpha">Alphabetical</option>
+            </select>
+          </label>
+        </div>
         <div id="options-pattern" class="pattern-display"></div>
         <div id="options-list"></div>
       </div>

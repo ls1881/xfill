@@ -300,6 +300,23 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 }
 .tab-panel h3:first-child { margin-top: 0; }
 
+.options-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.options-header-row h3 { margin: 0; }
+.options-header-row .select-label { color: var(--text-dim); flex-shrink: 0; }
+.options-header-row .select-label select {
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 5px;
+  font-size: 0.78rem;
+}
+
 .stats-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .stats-table td { padding: 3px 4px; border-bottom: 1px solid var(--border); }
 .stats-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
