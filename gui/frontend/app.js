@@ -20,6 +20,7 @@ let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots resp
 let optionsRequestSeq = 0; // same, for /api/options
 let lastClick = { row: null, col: null, time: 0 }; // same-cell click timing, used to detect a double-click ourselves
 const DOUBLE_CLICK_MS = 350;
+let pendingBlockToggle = null; // setTimeout id for a scheduled toggle, cancelable by a following double-click
 let undoStack = []; // deep-cloned puzzle snapshots, most recent last
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
@@ -297,13 +298,30 @@ function renderGrid() {
 // toggle-block) instead of being recognized as a double-click at all. So
 // double-click detection is done by hand here, purely from click
 // timestamps on the same (row, col), independent of DOM node identity.
+//
+// A click on the already-selected cell can't tell, by itself, whether a
+// second click is about to follow (making the pair a double-click) --
+// that's only knowable in hindsight, once either a matching second click
+// arrives or the double-click window passes without one. So that click
+// schedules its toggle instead of firing it immediately; a genuine
+// double-click's second click cancels the pending toggle before it fires.
+// (An earlier version fired the toggle immediately whenever the clicked
+// cell was already selected, which meant the *first* click of a
+// double-click on an already-selected cell -- the common way to invoke
+// the double-click-to-change-direction gesture on the cell you're
+// currently on -- placed a block before the second click ever got a
+// chance to cancel anything.)
 function onCellClick(r, c) {
   const now = Date.now();
   const isDoubleClick =
     lastClick.row === r && lastClick.col === c && now - lastClick.time < DOUBLE_CLICK_MS;
-  lastClick = isDoubleClick ? { row: null, col: null, time: 0 } : { row: r, col: c, time: now };
 
   if (isDoubleClick) {
+    if (pendingBlockToggle) {
+      clearTimeout(pendingBlockToggle);
+      pendingBlockToggle = null;
+    }
+    lastClick = { row: null, col: null, time: 0 }; // consumed -- don't chain into a triple-click
     selected = { row: r, col: c };
     direction = direction === "across" ? "down" : "across";
     renderGrid();
@@ -311,13 +329,14 @@ function onCellClick(r, c) {
     highlightActiveClue();
     return;
   }
+  lastClick = { row: r, col: c, time: now };
 
   if (selected && selected.row === r && selected.col === c) {
-    // A second, unhurried click on the already-selected cell (not fast
-    // enough to have been caught as a double-click above) toggles its
-    // block -- no artificial delay needed, since double-click status was
-    // already resolved, one way or the other, by the check above.
-    toggleBlockAt(r, c);
+    if (pendingBlockToggle) clearTimeout(pendingBlockToggle);
+    pendingBlockToggle = setTimeout(() => {
+      pendingBlockToggle = null;
+      toggleBlockAt(r, c);
+    }, DOUBLE_CLICK_MS);
     return;
   }
   selected = { row: r, col: c };
@@ -349,6 +368,31 @@ function advanceInDirection(step) {
   const c = selected.col + dc;
   if (r < 0 || r >= puzzle.height || c < 0 || c >= puzzle.width) return;
   if (puzzle.blocks[r][c]) return;
+  selected = { row: r, col: c };
+  renderGrid();
+  updateOptionsPanel();
+  highlightActiveClue();
+}
+
+// Backspace's backward step, used instead of advanceInDirection(-1): when
+// the cell one step back (in the current across/down direction) is a
+// block, this removes it and moves onto it, rather than refusing to move
+// at all. Lets holding Backspace "eat backward" through a block the same
+// way it already eats through letters, instead of getting stuck right in
+// front of one. Deliberately NOT folded into advanceInDirection itself --
+// that function is also used for the forward step after typing a letter,
+// where hitting a block should keep stopping the cursor there, not erase
+// grid structure just because the user kept typing.
+function backspaceStepBack() {
+  if (!selected) return;
+  const dr = direction === "down" ? -1 : 0;
+  const dc = direction === "across" ? -1 : 0;
+  const r = selected.row + dr;
+  const c = selected.col + dc;
+  if (r < 0 || r >= puzzle.height || c < 0 || c >= puzzle.width) return;
+  if (puzzle.blocks[r][c]) {
+    toggleBlockAt(r, c); // removes it (also snapshots for undo, re-renders)
+  }
   selected = { row: r, col: c };
   renderGrid();
   updateOptionsPanel();
@@ -433,9 +477,9 @@ document.addEventListener("keydown", (e) => {
       setLetterAt(row, col, EMPTY);
       renderGrid();
       refreshSlotsAndStats();
-      advanceInDirection(-1);
+      backspaceStepBack();
     } else {
-      advanceInDirection(-1);
+      backspaceStepBack();
     }
   } else if (/^[a-zA-Z]$/.test(e.key)) {
     e.preventDefault();
