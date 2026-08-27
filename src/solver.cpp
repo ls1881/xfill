@@ -173,6 +173,21 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
         WordBitset(dict_.NumWordsOfLength(length), false);
   }
 
+  // "Forced" (see forced's own doc comment in solver.hpp) is a *root*
+  // property, computed once here from domains as BuildInitialDomains left
+  // them -- fully AC-3-propagated from whatever letters were already on
+  // the grid, but before any search decision has been made. It deliberately
+  // does NOT use each slot's domain size at the moment the search happens
+  // to branch on it: that would almost always read as 1, since MRV branches
+  // on the most-constrained slot first and by the tail of a real crossword
+  // solve nearly every remaining slot's domain has been narrowed to a
+  // single word by its now-assigned crossings -- an artifact of search
+  // order, not a "no real alternative" the user would recognize (their own
+  // example: ZZ? forced to ZZZ because no other dictionary word fits,
+  // decided by what was on the grid already, not by solver-order luck).
+  std::vector<bool> forced(grid_.slots().size());
+  for (size_t s = 0; s < forced.size(); ++s) forced[s] = (domains[s].Count() == 1);
+
   // Randomized restarts (ingrid_core-derived, see the class comment in
   // solver.hpp): each attempt starts fresh from the post-root-propagation
   // domains above, with a newly-seeded RNG for slot-selection tie-breaks,
@@ -224,7 +239,6 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
     std::vector<WordBitset> attempt_domains = domains;
     std::vector<WordBitset> attempt_used_by_length = used_by_length;
     std::vector<bool> assigned(grid_.slots().size(), false);
-    std::vector<bool> forced(grid_.slots().size(), false);
     Trail trail;
 
     component_remaining_.resize(slots_by_component_.size());
@@ -1009,7 +1023,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            std::vector<bool>& assigned,
                                            Trail& trail,
                                            CrossingWeights& crossing_weights,
-                                           std::vector<bool>& forced) {
+                                           const std::vector<bool>& forced) {
   if (aborted_) return std::nullopt;
   // Checked once per node, same cadence as aborted_ above (which this
   // deliberately mimics -- setting aborted_ here, rather than a separate
@@ -1030,14 +1044,6 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   if (slot == -1) {
     return ExtractSolution(domains, &forced);
   }
-
-  // domain_count came straight from SelectBranchSlot's popcount of this
-  // slot's (domain & ~used) -- exactly 1 means every word but one was
-  // already ruled out by crossing propagation before this slot was even
-  // chosen for branching, i.e. this assignment has no real alternative.
-  // See forced's own doc comment (solver.hpp) for why this plain,
-  // unconditional overwrite (no trail/Undo involvement) is still correct.
-  forced[static_cast<size_t>(slot)] = (domain_count == 1);
 
   // See kWordShuffleRestartThreshold: word-choice shuffling (the large-
   // domain branch below) only kicks in once plain slot-choice

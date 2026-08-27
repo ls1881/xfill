@@ -17,12 +17,13 @@ namespace xfill {
 
 struct Solution {
   std::unordered_map<int, std::string> assignment;  // slot id -> word
-  // Slot ids whose word had no real alternative at the moment they were
-  // assigned: constraint propagation from crossings had already narrowed
-  // that slot's domain to exactly one remaining candidate, so the solver
-  // didn't choose among options there, it was determined. Only ever
-  // populated by the default (Solve/SolveParallel) search -- see
-  // Backtrack's own comment for how it's derived from domain_count. The
+  // Slot ids whose word had no real alternative *before the search ever
+  // made a choice*: root-level constraint propagation (from whatever
+  // letters were already on the grid, via BuildInitialDomains) had already
+  // narrowed that slot's domain to exactly one dictionary candidate. Only
+  // ever populated by the default (Solve/SolveParallel) search -- see
+  // Solve's own comment for how and why this is computed once at the root
+  // rather than from each slot's domain size at branch time. The
   // maximize-score search doesn't populate this (ExtractSolution's
   // `forced` parameter defaults to null there), since "forced" isn't a
   // meaningful concept for a search that's actively hunting for the
@@ -547,20 +548,17 @@ class Solver {
             std::vector<bool>& assigned, Trail& trail, size_t domain_mark,
             size_t used_mark) const;
 
-  // `forced[slot]` is set to true right when `slot` is selected for
-  // branching, IF its domain (via SelectBranchSlot's domain_count) was
-  // already down to exactly one candidate at that moment -- i.e. it was
-  // determined by propagation, not chosen among alternatives. Written
-  // unconditionally into this shared, non-trailed vector (no Undo
-  // support needed): a slot that later gets backtracked and re-assigned
-  // differently just has this overwritten again, so by the time a
-  // solution is actually found, every entry reflects that FINAL
-  // assignment's own forced-ness, which is the only one that matters.
+  // `forced` is a fixed, read-only, per-slot table computed once by the
+  // caller (Solve()) from the root-propagated domains, before any search
+  // decision is made -- see its computation there for why branch-time
+  // domain size was rejected as the basis (it's an artifact of MRV search
+  // order, not a "no real alternative" a user would recognize). Threaded
+  // through purely so the base case can hand it to ExtractSolution.
   std::optional<Solution> Backtrack(std::vector<WordBitset>& domains,
                                      std::vector<WordBitset>& used_by_length,
                                      std::vector<bool>& assigned, Trail& trail,
                                      CrossingWeights& crossing_weights,
-                                     std::vector<bool>& forced);
+                                     const std::vector<bool>& forced);
 
   // Records a nogood from the current assignment: every currently-assigned
   // slot's (slot, word) pair, taken together, is infeasible. Sound to call
