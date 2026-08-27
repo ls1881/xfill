@@ -999,7 +999,8 @@ async function updateOptionsPanel() {
   // happened, and if the selection has since moved elsewhere before its
   // DOUBLE_CLICK_MS window elapsed, letting it fire late would act on a
   // slot the user isn't even looking at anymore.
-  if (s?.id !== optionsPanelSlotId) cancelPendingOptionClick();
+  const slotChanged = s?.id !== optionsPanelSlotId;
+  if (slotChanged) cancelPendingOptionClick();
   optionsPanelSlotId = s ? s.id : null;
 
   if (previewSlotId !== null && (!s || s.id !== previewSlotId)) {
@@ -1047,7 +1048,19 @@ async function updateOptionsPanel() {
 
     lastRenderedSlot = s;
     lastRenderedCandidates = data.candidates;
-    scheduleVerification(s, data.candidates);
+    // Only debounce a RESTART -- an edit while already looking at this
+    // same slot (typing into it, or elsewhere in the grid). Freshly
+    // SELECTING a slot starts verification immediately, with no delay:
+    // that's not part of a rapid-edit burst the debounce exists to
+    // coalesce, and waiting here made every slot selection feel like it
+    // stalled for VERIFY_DEBOUNCE_MS before showing any progress at all
+    // -- confirmed directly by timing real verify requests, not just a
+    // suspected regression from adding the debounce.
+    if (slotChanged) {
+      extendVerificationIfNeeded(s, data.candidates);
+    } else {
+      scheduleVerification(s, data.candidates);
+    }
     renderOptionsList(s, data.candidates);
   } catch (err) {
     if (seq !== optionsRequestSeq) return;
