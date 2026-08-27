@@ -14,5 +14,6 @@ compile_commands.json
 # GUI app -- see chat for setup/run instructions
 gui/.venv/
 gui/dictionaries/
+gui/saves/
 gui/__pycache__/
 gui/backend/__pycache__/

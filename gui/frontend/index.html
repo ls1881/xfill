@@ -3,6 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <title>xfill — Crossword Constructor</title>
+<script>
+  // Applied before style.css paints, so there's no flash of the wrong
+  // theme while the rest of the page loads -- see app.js's wireThemeToggle
+  // for the control that changes this later.
+  try {
+    document.documentElement.setAttribute("data-theme", localStorage.getItem("xfill-theme") || "dark");
+  } catch (_) {}
+</script>
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -25,6 +33,13 @@
       </div>
       <button id="btn-undo" title="⌘Z / Ctrl+Z">Undo</button>
       <button id="btn-clear" title="Clear all letters, keep the grid shape">Clear</button>
+    </div>
+
+    <div class="toolbar-group">
+      <button id="btn-save" title="Save this puzzle under a name, in-app -- no file picker each time">Save</button>
+      <select id="load-select" title="Load a puzzle saved in-app">
+        <option value="">Load…</option>
+      </select>
     </div>
 
     <fieldset class="toolbar-group symmetry-group">
@@ -52,6 +67,11 @@
       </label>
     </div>
 
+    <label id="theme-toggle-label" title="Switch between dark and light mode">
+      <input type="checkbox" id="theme-toggle" />
+      Light mode
+    </label>
+
     <div id="status-line"><span id="fill-spinner" class="spinner" hidden></span><span id="status-text"></span></div>
   </header>
 
@@ -60,7 +80,7 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it. Press “.” or Backspace to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears and steps back. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
+      <div id="grid-hint">Click a cell to select it. Press “.” to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears the current letter and steps back one press at a time, then removes the block behind it on the next press from an already-empty cell. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
     </section>
 
     <aside id="side-panel">
@@ -70,6 +90,7 @@
         <button class="tab-btn" data-tab="fill">Options</button>
         <button class="tab-btn" data-tab="dict">Dictionaries</button>
         <button class="tab-btn" data-tab="info">Info</button>
+        <button class="tab-btn" data-tab="about">About</button>
       </div>
 
       <div class="tab-panel active" id="tab-summary">
@@ -107,21 +128,39 @@
           </label>
         </div>
         <div id="options-pattern" class="pattern-display"></div>
+        <div class="hint">Click a verified (green) option to preview a full sample fill using it; double-click any option to just place that word. Click the preview again, or use the button below, to accept the whole fill.</div>
+        <button type="button" id="btn-accept-fill" class="accept-fill-btn" hidden>Accept full sample fill</button>
         <div id="options-list"></div>
       </div>
 
       <div class="tab-panel" id="tab-dict">
         <h3>Across dictionary</h3>
         <select id="across-dict-select"></select>
-        <label>Min score <input type="number" id="across-min-score" value="0" min="0" max="100" /></label>
-        <div class="length-overrides" id="across-overrides"></div>
-        <button type="button" class="link-btn" id="across-add-override">+ different min score for a word length</button>
-
         <h3>Down dictionary</h3>
         <select id="down-dict-select"></select>
-        <label>Min score <input type="number" id="down-min-score" value="0" min="0" max="100" /></label>
-        <div class="length-overrides" id="down-overrides"></div>
-        <button type="button" class="link-btn" id="down-add-override">+ different min score for a word length</button>
+
+        <label class="checkbox-label separate-min-toggle">
+          <input type="checkbox" id="separate-min-scores" />
+          Use different min scores for across &amp; down
+        </label>
+
+        <div id="linked-min-score-section">
+          <label>Min score <input type="number" id="linked-min-score" value="0" min="0" max="100" /></label>
+          <div class="length-overrides" id="linked-overrides"></div>
+          <button type="button" class="link-btn" id="linked-add-override">+ different min score for a word length</button>
+        </div>
+
+        <div id="separate-min-score-section" hidden>
+          <h4>Across min score</h4>
+          <label>Min score <input type="number" id="across-min-score" value="0" min="0" max="100" /></label>
+          <div class="length-overrides" id="across-overrides"></div>
+          <button type="button" class="link-btn" id="across-add-override">+ different min score for a word length</button>
+
+          <h4>Down min score</h4>
+          <label>Min score <input type="number" id="down-min-score" value="0" min="0" max="100" /></label>
+          <div class="length-overrides" id="down-overrides"></div>
+          <button type="button" class="link-btn" id="down-add-override">+ different min score for a word length</button>
+        </div>
 
         <h3>Upload a dictionary</h3>
         <div class="hint">WORD;SCORE format, one entry per line.</div>
@@ -134,6 +173,12 @@
         <label>Author <input type="text" id="meta-author" /></label>
         <label>Copyright <input type="text" id="meta-copyright" /></label>
         <label>Note <textarea id="meta-notes" rows="4"></textarea></label>
+      </div>
+
+      <div class="tab-panel" id="tab-about">
+        <h3>About xfill</h3>
+        <p>A crossword construction tool: grid editing, dictionary-driven fill, and a branch-and-bound score maximizer, backed by a C++ constraint solver.</p>
+        <p><a href="https://github.com/ls1881/xfill" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a></p>
       </div>
     </aside>
   </main>

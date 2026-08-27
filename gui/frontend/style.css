@@ -15,7 +15,27 @@
   --good: #4caf82;
   --warn: #e0a94c;
   --issue-red: #e0393e;
+  --danger-text: #ffb3b3;
+  --status-error: #ff8080;
   font-size: 15px;
+}
+
+/* --cell-* stay the same in both themes -- the grid always reads as paper,
+   independent of the surrounding app chrome. */
+:root[data-theme="light"] {
+  --bg: #f4f5f7;
+  --bg-panel: #ffffff;
+  --bg-panel-2: #eef0f3;
+  --border: #d5d9df;
+  --text: #1c2024;
+  --text-dim: #666e7a;
+  --accent: #2f6fe0;
+  --accent-dim: #dbe8ff;
+  --good: #21855a;
+  --warn: #9a6a15;
+  --issue-red: #c22b2b;
+  --danger-text: #b3261e;
+  --status-error: #c22b2b;
 }
 
 * { box-sizing: border-box; }
@@ -62,6 +82,17 @@ body {
 }
 #maximize-toggle-label input { cursor: pointer; }
 
+#theme-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+#theme-toggle-label input { cursor: pointer; }
+
 button {
   background: var(--bg-panel-2);
   color: var(--text);
@@ -74,7 +105,7 @@ button {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent-dim); border-color: var(--accent); font-weight: 600; }
 button.primary:hover { background: var(--accent); }
-button.danger { border-color: var(--issue-red); color: #ffb3b3; }
+button.danger { border-color: var(--issue-red); color: var(--danger-text); }
 button.danger:hover { background: var(--issue-red); color: var(--text); }
 
 .file-btn {
@@ -122,6 +153,16 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   font-size: 0.85rem;
 }
 
+#load-select {
+  background: var(--bg-panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-size: 0.85rem;
+  max-width: 160px;
+}
+
 /* Grouped and labeled so the symmetry controls read as one clearly-scoped
    settings block rather than getting lost among unrelated toolbar
    buttons. */
@@ -164,7 +205,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   color: var(--text-dim);
   min-height: 1.2em;
 }
-#status-line.error { color: #ff8080; }
+#status-line.error { color: var(--status-error); }
 #status-line.ok { color: var(--good); }
 
 #app {
@@ -310,6 +351,27 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   margin: 16px 0 8px;
 }
 .tab-panel h3:first-child { margin-top: 0; }
+
+.tab-panel h4 {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin: 14px 0 6px;
+}
+.separate-min-toggle { margin: 10px 0 14px; }
+
+.accept-fill-btn {
+  display: block;
+  width: 100%;
+  margin: 8px 0;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.accept-fill-btn:hover { background: var(--accent); }
 
 .options-header-row {
   display: flex;

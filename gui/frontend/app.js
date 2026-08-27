@@ -27,6 +27,16 @@ function effectiveMinScore(sel, length) {
   const override = sel.lengthOverrides[length];
   return override === undefined ? sel.minScore : override;
 }
+// When true (the default), editing across's min score or a length
+// override also writes the same value into down's, and vice versa -- so
+// the common case (one grid, one dictionary "quality bar") doesn't
+// silently leave a slot's own direction unfilterable at a threshold the
+// user only meant to set once. Explicitly opting into "separate" is what
+// unlocks genuinely independent across/down thresholds again. See
+// setLinkedMinScore/setLinkedOverride/deleteLinkedOverride and
+// renderLinkedOverrides.
+let separateMinScores = false;
+let currentSaveName = null; // last name Save/Load used -- so a later Save reuses it instead of prompting fresh
 let symmetryMode = "rotational180";
 let americanStyle = true;
 let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots response arriving after a newer one
@@ -117,7 +127,15 @@ function saveStateNow() {
   try {
     localStorage.setItem(
       SAVE_KEY,
-      JSON.stringify({ puzzle, dictSelections, symmetryMode, americanStyle, optionsSortMode })
+      JSON.stringify({
+        puzzle,
+        dictSelections,
+        symmetryMode,
+        americanStyle,
+        optionsSortMode,
+        separateMinScores,
+        currentSaveName,
+      })
     );
   } catch (_) {
     // localStorage can throw (quota exceeded, some browsers' private
@@ -221,6 +239,42 @@ function clearPreview() {
   previewSlotId = null;
   previewWord = null;
   previewGrid = null;
+  updateAcceptFillButton();
+}
+
+function setPreview(slotId, word, grid) {
+  previewSlotId = slotId;
+  previewWord = word;
+  previewGrid = grid;
+  updateAcceptFillButton();
+}
+
+// The deferred single-click action from renderOptionsList's click handler
+// (see its comment for why it's deferred at all), if one hasn't fired yet.
+// Module-level, not scoped inside renderOptionsList, specifically so
+// updateOptionsPanel's selection-changed check below can cancel it: that
+// action was captured against whatever slot was selected at click time,
+// and if the user has since moved on to a different slot before the
+// DOUBLE_CLICK_MS window elapsed, letting it fire late would silently
+// preview or place a word into a slot the user isn't even looking at
+// anymore.
+let pendingOptionClick = null;
+let optionsPanelSlotId = null; // which slot updateOptionsPanel last ran for -- see its own comment
+
+function cancelPendingOptionClick() {
+  if (pendingOptionClick) {
+    clearTimeout(pendingOptionClick);
+    pendingOptionClick = null;
+  }
+}
+
+// Shows/hides the "Accept full sample fill" button in lockstep with
+// whether a preview is currently active -- the button is just an explicit,
+// discoverable way to trigger the same commitPreview() a second click on
+// the previewed option already does.
+function updateAcceptFillButton() {
+  const btn = document.getElementById("btn-accept-fill");
+  if (btn) btn.hidden = previewGrid === null;
 }
 
 function undo() {
@@ -542,6 +596,29 @@ function backspaceStepBack() {
   highlightActiveClue();
 }
 
+// Like backspaceStepBack, but never touches a block -- used right after
+// Backspace clears a letter, so that single press only ever does the one
+// thing (clear the letter): a block sitting right behind the cursor is
+// left alone, and the cursor stops in front of it instead of moving onto
+// or removing it. A second Backspace, now pressed from that already-empty
+// cell, falls through to the plain backspaceStepBack() call below (in the
+// keydown handler's "else" branch) and removes it then -- so clearing a
+// letter and removing the block behind it are always two separate
+// presses, never one.
+function backspaceStepBackOntoOpenCell() {
+  if (!selected) return;
+  const dr = direction === "down" ? -1 : 0;
+  const dc = direction === "across" ? -1 : 0;
+  const r = selected.row + dr;
+  const c = selected.col + dc;
+  if (r < 0 || r >= puzzle.height || c < 0 || c >= puzzle.width) return;
+  if (puzzle.blocks[r][c]) return; // stop right in front of it -- don't move onto or remove it yet
+  selected = { row: r, col: c };
+  renderGrid();
+  updateOptionsPanel();
+  highlightActiveClue();
+}
+
 // Cmd+F/Ctrl+F (fill), Cmd+Z/Ctrl+Z (undo), and Escape (cancel an
 // in-progress fill) are registered on their own CAPTURE-phase listener,
 // ahead of everything else including the browser's own handling: a
@@ -625,11 +702,16 @@ document.addEventListener("keydown", (e) => {
       // the cursor there, so the *next* press just moved (without
       // clearing) onto the still-filled previous cell, and only the press
       // after *that* cleared it: two presses per letter instead of one.
+      // The step-back here deliberately never removes a block, even if
+      // one sits right behind the cursor -- that's a second press's job
+      // (the "else" branch below, once this cell is the empty one), so a
+      // single Backspace never does both at once (see
+      // backspaceStepBackOntoOpenCell's own comment).
       snapshotForUndo();
       setLetterAt(row, col, EMPTY);
       renderGrid();
       refreshSlotsAndStats();
-      backspaceStepBack();
+      backspaceStepBackOntoOpenCell();
     } else {
       backspaceStepBack();
     }
@@ -808,12 +890,18 @@ async function updateOptionsPanel() {
   const listEl = document.getElementById("options-list");
   const s = currentSlot();
 
-  // A preview is only meaningful for the slot it was generated for --
-  // this is the single choke point every selection change already
-  // funnels through, so it's the one place that needs to know "the user
-  // moved on" rather than sprinkling the same check across every
-  // selection-changing function (click, arrows, double-click, Space,
-  // clue-row click, ...).
+  // This is the single choke point every selection change already funnels
+  // through (click, arrows, double-click, Space, clue-row click, ...), so
+  // it's the one place that needs to know "the user moved on" -- both for
+  // a preview (only meaningful for the slot it was generated for) and for
+  // a still-pending deferred single-click (see renderOptionsList): that
+  // click was captured against whatever slot was selected when it
+  // happened, and if the selection has since moved elsewhere before its
+  // DOUBLE_CLICK_MS window elapsed, letting it fire late would act on a
+  // slot the user isn't even looking at anymore.
+  if (s?.id !== optionsPanelSlotId) cancelPendingOptionClick();
+  optionsPanelSlotId = s ? s.id : null;
+
   if (previewSlotId !== null && (!s || s.id !== previewSlotId)) {
     clearPreview();
     renderGrid();
@@ -924,8 +1012,37 @@ function renderOptionsList(slot, candidates) {
   }
   listEl.innerHTML = html;
 
+  // A real double-click fires click, click, THEN dblclick -- so without
+  // this, a verified (green) option's own click handler would already run
+  // twice (previewing, then committing the WHOLE grid via commitPreview)
+  // before dblclick ever got a chance to "just add the word" instead.
+  // Deferring the single-click action (via the module-level
+  // pendingOptionClick, so it can also be cancelled from
+  // updateOptionsPanel if the user navigates away before it fires -- see
+  // cancelPendingOptionClick) and cancelling it if a dblclick follows
+  // within the window is the standard way to disambiguate the two; a
+  // genuine single click just runs its action DOUBLE_CLICK_MS later than
+  // before, the accepted tradeoff for making double-click mean something
+  // clearly different.
   listEl.querySelectorAll(".option-row").forEach((row) => {
-    row.addEventListener("click", () => onOptionClick(slot, row.getAttribute("data-word")));
+    row.addEventListener("click", () => {
+      cancelPendingOptionClick();
+      const word = row.getAttribute("data-word");
+      pendingOptionClick = setTimeout(() => {
+        pendingOptionClick = null;
+        onOptionClick(slot, word);
+      }, DOUBLE_CLICK_MS);
+    });
+    // Double-click always just places that one word into this slot,
+    // regardless of verified status -- a direct shortcut past the
+    // preview-then-commit dance single-click uses for a verified (green)
+    // option, for whenever the whole-grid sample fill that preview offers
+    // isn't what's wanted.
+    row.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      cancelPendingOptionClick();
+      applyWordToSlot(slot, row.getAttribute("data-word"));
+    });
   });
   const moreBtn = document.getElementById("options-show-more");
   if (moreBtn) {
@@ -1044,18 +1161,19 @@ async function startVerificationBatch(slot, allCandidates, target) {
 
 // A confirmed-feasible candidate previews its full solved grid on click
 // (dimmed, into cells the user hasn't actually filled -- see renderGrid);
-// clicking that same candidate again commits it. An unverified candidate
-// has no precomputed completion to preview, so it keeps the original
-// behavior: click commits just that one slot's word immediately.
+// clicking that same candidate again commits it (same action as the
+// "Accept full sample fill" button, see updateAcceptFillButton). An
+// unverified candidate has no precomputed completion to preview, so it
+// keeps the original behavior: click commits just that one slot's word
+// immediately -- same as what a double-click now does regardless of
+// verified status (see the dblclick listener in renderOptionsList).
 function onOptionClick(slot, word) {
   const verified = getVerifiedMap(slot).get(word);
   if (verified?.feasible && verified.grid) {
     if (previewSlotId === slot.id && previewWord === word) {
       commitPreview();
     } else {
-      previewSlotId = slot.id;
-      previewWord = word;
-      previewGrid = verified.grid;
+      setPreview(slot.id, word, verified.grid);
       renderGrid();
     }
   } else {
@@ -1109,18 +1227,40 @@ async function loadDictionaries() {
   }
 }
 
-// Rebuilds a direction's length-override rows from
-// dictSelections[direction].lengthOverrides and wires each one's inputs.
-// Called after any change to that object (add/remove/edit a row) since
-// there's no cheap way to patch just one row when a length key itself
-// changes -- the whole small list is rebuilt instead, same tradeoff
-// renderClues makes for the same reason.
-function renderLengthOverrides(direction) {
-  const container = document.getElementById(`${direction}-overrides`);
-  const overrides = dictSelections[direction].lengthOverrides;
+// Rebuilds one length-override section's rows and wires each one's
+// inputs. `mode` is "across" or "down" (in separate mode, editing that
+// direction's own dictSelections[mode].lengthOverrides) or "linked" (the
+// default: displays across's overrides as canonical and writes any edit
+// into BOTH across's and down's, via setLinkedOverride/deleteLinkedOverride
+// below). Called after any change to the underlying object (add/remove/
+// edit a row) since there's no cheap way to patch just one row when a
+// length key itself changes -- the whole small list is rebuilt instead,
+// same tradeoff renderClues makes for the same reason.
+function renderLengthOverrides(mode) {
+  const container = document.getElementById(mode === "linked" ? "linked-overrides" : `${mode}-overrides`);
+  // Linked mode keeps across's and down's overrides identical (see
+  // setLinkedOverride), so across's object is the display source for both.
+  const overrides = mode === "down" ? dictSelections.down.lengthOverrides : dictSelections.across.lengthOverrides;
   const lengths = Object.keys(overrides)
     .map(Number)
     .sort((a, b) => a - b);
+
+  const setOverride = (length, score) => {
+    if (mode === "linked") {
+      dictSelections.across.lengthOverrides[length] = score;
+      dictSelections.down.lengthOverrides[length] = score;
+    } else {
+      dictSelections[mode].lengthOverrides[length] = score;
+    }
+  };
+  const deleteOverride = (length) => {
+    if (mode === "linked") {
+      delete dictSelections.across.lengthOverrides[length];
+      delete dictSelections.down.lengthOverrides[length];
+    } else {
+      delete dictSelections[mode].lengthOverrides[length];
+    }
+  };
 
   container.innerHTML = lengths
     .map(
@@ -1142,24 +1282,54 @@ function renderLengthOverrides(direction) {
     lengthInput.addEventListener("change", () => {
       const newLength = parseInt(lengthInput.value || "0", 10);
       const score = overrides[oldLength];
-      delete overrides[oldLength];
-      if (newLength > 0) overrides[newLength] = score; // last-write-wins if it collides with another row's length
-      renderLengthOverrides(direction);
+      deleteOverride(oldLength);
+      if (newLength > 0) setOverride(newLength, score); // last-write-wins if it collides with another row's length
+      renderLengthOverrides(mode);
+      invalidatePreview();
       updateOptionsPanel();
       scheduleSave();
     });
     scoreInput.addEventListener("input", () => {
-      overrides[oldLength] = parseInt(scoreInput.value || "0", 10);
+      setOverride(oldLength, parseInt(scoreInput.value || "0", 10));
+      invalidatePreview();
       updateOptionsPanel();
       scheduleSave();
     });
     row.querySelector(".remove-override").addEventListener("click", () => {
-      delete overrides[oldLength];
-      renderLengthOverrides(direction);
+      deleteOverride(oldLength);
+      renderLengthOverrides(mode);
+      invalidatePreview();
       updateOptionsPanel();
       scheduleSave();
     });
   });
+}
+
+// A verify-confirmed preview (see onOptionClick/commitPreview) is only
+// trustworthy for the exact dictionary/min-score it was verified against
+// -- clicking the same word text a second time re-applies that *cached*
+// grid rather than re-verifying, so any change here has to invalidate it,
+// even though the selected slot itself hasn't changed (updateOptionsPanel
+// only clears a preview on its own when the slot changes).
+function invalidatePreview() {
+  if (previewSlotId === null) return;
+  clearPreview();
+  renderGrid();
+}
+
+// Reflects `separateMinScores` into which of the two min-score sections
+// is visible, and the toggle checkbox itself (needed on restore from
+// saved state, where the checkbox otherwise never learns the value).
+function updateMinScoreSectionVisibility() {
+  document.getElementById("linked-min-score-section").hidden = separateMinScores;
+  document.getElementById("separate-min-score-section").hidden = !separateMinScores;
+  document.getElementById("separate-min-scores").checked = separateMinScores;
+}
+
+function syncMinScoreInputs() {
+  document.getElementById("across-min-score").value = dictSelections.across.minScore;
+  document.getElementById("down-min-score").value = dictSelections.down.minScore;
+  document.getElementById("linked-min-score").value = dictSelections.across.minScore;
 }
 
 function wireDictTab() {
@@ -1167,45 +1337,88 @@ function wireDictTab() {
   const downSel = document.getElementById("down-dict-select");
   const acrossMin = document.getElementById("across-min-score");
   const downMin = document.getElementById("down-min-score");
+  const linkedMin = document.getElementById("linked-min-score");
 
   acrossSel.addEventListener("change", () => {
     dictSelections.across.path = acrossSel.value;
+    invalidatePreview();
     updateOptionsPanel();
     scheduleSave();
   });
   downSel.addEventListener("change", () => {
     dictSelections.down.path = downSel.value;
+    invalidatePreview();
     updateOptionsPanel();
     scheduleSave();
   });
   acrossMin.addEventListener("input", () => {
     dictSelections.across.minScore = parseInt(acrossMin.value || "0", 10);
+    invalidatePreview();
     updateOptionsPanel();
     scheduleSave();
   });
   downMin.addEventListener("input", () => {
     dictSelections.down.minScore = parseInt(downMin.value || "0", 10);
+    invalidatePreview();
+    updateOptionsPanel();
+    scheduleSave();
+  });
+  linkedMin.addEventListener("input", () => {
+    const v = parseInt(linkedMin.value || "0", 10);
+    dictSelections.across.minScore = v;
+    dictSelections.down.minScore = v;
+    invalidatePreview();
     updateOptionsPanel();
     scheduleSave();
   });
 
-  for (const direction of ["across", "down"]) {
-    document.getElementById(`${direction}-add-override`).addEventListener("click", () => {
-      const overrides = dictSelections[direction].lengthOverrides;
+  document.getElementById("separate-min-scores").addEventListener("change", (e) => {
+    separateMinScores = e.target.checked;
+    if (!separateMinScores) {
+      // Switching back to linked -- across's current values become the
+      // single source of truth for both directions again, so what's
+      // displayed (across's) actually matches what's in effect for down
+      // too, rather than down silently keeping whatever it had before.
+      dictSelections.down.minScore = dictSelections.across.minScore;
+      dictSelections.down.lengthOverrides = { ...dictSelections.across.lengthOverrides };
+    }
+    updateMinScoreSectionVisibility();
+    syncMinScoreInputs();
+    renderLengthOverrides("across");
+    renderLengthOverrides("down");
+    renderLengthOverrides("linked");
+    invalidatePreview();
+    updateOptionsPanel();
+    scheduleSave();
+  });
+
+  for (const mode of ["across", "down", "linked"]) {
+    document.getElementById(`${mode}-add-override`).addEventListener("click", () => {
+      const overrides = mode === "down" ? dictSelections.down.lengthOverrides : dictSelections.across.lengthOverrides;
       // Starts from the shortest slot length a real crossword ever has;
       // steps up past whatever's already overridden so a repeated click
       // adds a new row instead of landing back on one that already
       // exists.
       let length = 3;
       while (overrides[length] !== undefined) length++;
-      overrides[length] = dictSelections[direction].minScore;
-      renderLengthOverrides(direction);
+      const defaultScore = mode === "down" ? dictSelections.down.minScore : dictSelections.across.minScore;
+      if (mode === "linked") {
+        dictSelections.across.lengthOverrides[length] = defaultScore;
+        dictSelections.down.lengthOverrides[length] = defaultScore;
+      } else {
+        dictSelections[mode].lengthOverrides[length] = defaultScore;
+      }
+      renderLengthOverrides(mode);
+      invalidatePreview();
       updateOptionsPanel();
       scheduleSave();
     });
   }
+  updateMinScoreSectionVisibility();
+  syncMinScoreInputs();
   renderLengthOverrides("across");
   renderLengthOverrides("down");
+  renderLengthOverrides("linked");
 
   document.getElementById("input-dict-upload").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -1334,6 +1547,70 @@ function wireToolbar() {
     renderGrid();
     refreshSlotsAndStats();
     setStatus("Cleared letters (grid shape and clues kept)", "ok");
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Save / Load -- an in-app named save slot (see app.py's docstring on
+// POST /api/puzzle/save), distinct from Import/Export: those round-trip
+// through real crossword formats for other tools; this is just "remember
+// this puzzle under a name I pick" so Save doesn't need a file picker
+// every time. The first Save in a session prompts for a name; every Save
+// after that (including in a later session, since currentSaveName is
+// itself part of the autosaved state) reuses it silently.
+// ---------------------------------------------------------------------------
+
+async function saveToServer() {
+  if (!puzzle) return;
+  const name = prompt("Save as:", currentSaveName || puzzle.title || "My puzzle");
+  if (!name) return;
+  try {
+    const result = await apiJson("/api/puzzle/save", { puzzle, name });
+    currentSaveName = result.name;
+    await refreshSavesList();
+    setStatus(`Saved as "${currentSaveName}"`, "ok");
+    scheduleSave();
+  } catch (err) {
+    setStatus(`Save failed: ${err.message}`, "error");
+  }
+}
+
+async function refreshSavesList() {
+  const sel = document.getElementById("load-select");
+  try {
+    const data = await api("/api/puzzle/saves");
+    const options = data.saves.map((n) => `<option value="${escapeAttr(n)}">${escapeAttr(n)}</option>`).join("");
+    sel.innerHTML = `<option value="">Load…</option>${options}`;
+    sel.value = currentSaveName && data.saves.includes(currentSaveName) ? currentSaveName : "";
+  } catch (_) {
+    // Best-effort -- an empty/stale list here shouldn't block anything else.
+  }
+}
+
+function wireSaveLoad() {
+  document.getElementById("btn-save").addEventListener("click", saveToServer);
+  document.getElementById("load-select").addEventListener("change", async (e) => {
+    const name = e.target.value;
+    if (!name) return;
+    try {
+      const data = await apiJson("/api/puzzle/load", { name });
+      if (puzzle) {
+        undoStack.push(puzzle);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+      }
+      currentSaveName = data.name;
+      puzzle = data.puzzle;
+      slots = data.slots;
+      selected = null;
+      clearFillFailedHighlight();
+      clearVerificationCache();
+      renderAll();
+      setStatus(`Loaded "${data.name}"`, "ok");
+      scheduleSave();
+    } catch (err) {
+      setStatus(`Load failed: ${err.message}`, "error");
+      e.target.value = currentSaveName || "";
+    }
   });
 }
 
@@ -1561,12 +1838,33 @@ function wireStyleControls() {
   });
 }
 
+// Theme is intentionally its OWN, separate localStorage key
+// ("xfill-theme"), not folded into SAVE_KEY's debounced puzzle-state
+// blob: it has to be readable synchronously before any of that state
+// loads (see index.html's inline <head> script, which already applied it
+// before this ever runs) so there's no flash of the wrong theme, and it
+// should keep working even with no puzzle open yet.
+function wireThemeToggle() {
+  const toggle = document.getElementById("theme-toggle");
+  toggle.checked = document.documentElement.getAttribute("data-theme") === "light";
+  toggle.addEventListener("change", () => {
+    const next = toggle.checked ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("xfill-theme", next);
+    } catch (_) {
+      // Losing the preference across reloads beats crashing over it.
+    }
+  });
+}
+
 function wireOptionsSort() {
   document.getElementById("options-sort-select").addEventListener("change", (e) => {
     optionsSortMode = e.target.value;
     if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
     scheduleSave();
   });
+  document.getElementById("btn-accept-fill").addEventListener("click", commitPreview);
 }
 
 // The two diagonal modes only make sense on a square grid -- disable them
@@ -1617,11 +1915,12 @@ function renderAll() {
 // already set its own defaults into those same elements.
 function syncControlsToState() {
   document.getElementById("across-dict-select").value = dictSelections.across.path;
-  document.getElementById("across-min-score").value = dictSelections.across.minScore;
   document.getElementById("down-dict-select").value = dictSelections.down.path;
-  document.getElementById("down-min-score").value = dictSelections.down.minScore;
+  updateMinScoreSectionVisibility();
+  syncMinScoreInputs();
   renderLengthOverrides("across");
   renderLengthOverrides("down");
+  renderLengthOverrides("linked");
   document.getElementById("chk-american-style").checked = americanStyle;
   document.getElementById("symmetry-select").value = symmetryMode;
   document.getElementById("options-sort-select").value = optionsSortMode;
@@ -1629,12 +1928,15 @@ function syncControlsToState() {
 
 async function main() {
   wireToolbar();
+  wireSaveLoad();
   wireTabs();
   wireDictTab();
   wireInfoTab();
   wireStyleControls();
+  wireThemeToggle();
   wireOptionsSort();
   await loadDictionaries();
+  refreshSavesList();
 
   const saved = loadSavedState();
   if (saved) {
@@ -1642,6 +1944,8 @@ async function main() {
     if (saved.symmetryMode) symmetryMode = saved.symmetryMode;
     if (typeof saved.americanStyle === "boolean") americanStyle = saved.americanStyle;
     if (saved.optionsSortMode) optionsSortMode = saved.optionsSortMode;
+    if (typeof saved.separateMinScores === "boolean") separateMinScores = saved.separateMinScores;
+    if (saved.currentSaveName) currentSaveName = saved.currentSaveName;
     // Only restore a dictionary selection if that exact file still exists
     // -- it may have been deleted or renamed since the save, in which case
     // loadDictionaries()'s own default (already applied above) stands.

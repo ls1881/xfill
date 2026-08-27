@@ -35,6 +35,8 @@ FRONTEND_DIR = GUI_ROOT / "frontend"
 DICT_DIR = GUI_ROOT / "dictionaries"
 DICT_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_DICT = REPO_ROOT / "data" / "spreadthewordlist_caps.txt"
+SAVES_DIR = GUI_ROOT / "saves"
+SAVES_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="xfill crossword GUI")
 
@@ -187,17 +189,22 @@ async def import_puzzle(file: UploadFile):
     return resp
 
 
-def _safe_download_filename(title: str, ext: str) -> str:
-    """A puzzle's title is arbitrary user text with no character
-    restrictions -- embedding it in a Content-Disposition header as-is
-    would let a title containing '"' break the header's quoting, or one
-    containing CR/LF inject additional headers into the response
-    entirely. Stripping down to a conservative safe set avoids both,
-    while still keeping the title recognizable in the downloaded
-    filename."""
-    base = re.sub(r"[^A-Za-z0-9 _-]", "", title.strip())
+def _safe_filename_stem(name: str, fallback: str) -> str:
+    """Arbitrary user text (a puzzle title, a save name) is not safe to
+    embed as-is in a filename or a Content-Disposition header -- a '"'
+    would break the header's quoting, CR/LF could inject additional
+    headers, and '/' or '..' could escape the intended directory entirely
+    (a real concern for the save/load endpoints below, which use this to
+    build a path on disk from a name the client fully controls). Stripping
+    down to a conservative safe set avoids all of that at once, while
+    still keeping the name recognizable."""
+    base = re.sub(r"[^A-Za-z0-9 _-]", "", name.strip())
     base = re.sub(r"\s+", "_", base).strip("_")
-    return f"{base or 'puzzle'}.{ext}"
+    return base or fallback
+
+
+def _safe_download_filename(title: str, ext: str) -> str:
+    return f"{_safe_filename_stem(title, 'puzzle')}.{ext}"
 
 
 @app.post("/api/puzzle/export")
@@ -213,6 +220,61 @@ def export_puzzle(puzzle: PuzzleModel, format: str):
         media_type=_MEDIA_TYPES[format],
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Save / Load -- an in-app named save slot, distinct from Import/Export:
+# those round-trip through real crossword-editor formats (.puz/.ipuz/.cfp)
+# for interop with other tools; this is just "remember this puzzle under a
+# name I pick, on this machine, so clicking Save again later doesn't need a
+# file picker" (the frontend prompts for a name once, then reuses it -- see
+# app.js's saveToServer). Stored as plain PuzzleModel JSON, one file per
+# save, under SAVES_DIR.
+# ---------------------------------------------------------------------------
+
+class SaveRequest(BaseModel):
+    puzzle: PuzzleModel
+    name: str
+
+
+class LoadRequest(BaseModel):
+    name: str
+
+
+def _save_path(name: str) -> pathlib.Path:
+    # _safe_filename_stem strips '/' and '..' along with everything else
+    # unsafe, so the result can't escape SAVES_DIR regardless of what the
+    # client sends as `name`.
+    return SAVES_DIR / f"{_safe_filename_stem(name, 'untitled')}.json"
+
+
+@app.get("/api/puzzle/saves")
+def list_saves():
+    return {"saves": sorted(p.stem for p in SAVES_DIR.glob("*.json"))}
+
+
+@app.post("/api/puzzle/save")
+def save_puzzle(req: SaveRequest):
+    path = _save_path(req.name)
+    path.write_text(json.dumps(req.puzzle.model_dump()), encoding="utf-8")
+    return {"name": path.stem}
+
+
+@app.post("/api/puzzle/load")
+def load_puzzle(req: LoadRequest):
+    path = _save_path(req.name)
+    if not path.exists():
+        raise HTTPException(404, f"no save named {req.name!r}")
+    p = PuzzleModel(**json.loads(path.read_text(encoding="utf-8"))).to_puzzle()
+    return {"name": path.stem, "puzzle": PuzzleModel.from_puzzle(p), "slots": _slots_payload(p)}
+
+
+@app.delete("/api/puzzle/saves")
+def delete_save(name: str):
+    path = _save_path(name)
+    if path.exists():
+        path.unlink()
+    return {"deleted": True}
 
 
 # ---------------------------------------------------------------------------
