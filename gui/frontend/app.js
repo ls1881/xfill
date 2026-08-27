@@ -665,6 +665,13 @@ document.addEventListener("keydown", (e) => {
   if (!puzzle || !selected) return;
   const tag = (document.activeElement && document.activeElement.tagName) || "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  // None of the shortcuts below are meant to require a modifier -- without
+  // this, a browser/OS shortcut whose base key happens to match one of
+  // them (Cmd+R reload, Cmd+A select-all, Cmd+C/V copy/paste, ...) gets
+  // hijacked: e.key is still just "r"/"a"/"c" with a modifier held, so the
+  // letter-typing branch below would preventDefault() it and type that
+  // letter into the grid instead of letting the browser handle it.
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
 
   const { row, col } = selected;
   const blocked = puzzle.blocks[row][col];
@@ -1635,6 +1642,16 @@ async function runFill() {
 
   filling = true;
   clearFillFailedHighlight();
+  // A leftover preview (from clicking a verified option earlier without
+  // committing or navigating away -- see setPreview/clearPreview) is only
+  // ever a full, real solved grid, so it always spells out complete
+  // words. Left uncleared through a Fill attempt that then fails, those
+  // dimmed preview letters still render into every blank cell (see
+  // renderGrid) including ones diagnoseFillFailure marks fill-failed --
+  // making it look like a specific, non-dictionary "word" is the
+  // diagnosed problem, when it's really just a stale, unrelated preview
+  // bleeding through underneath the red highlighting.
+  clearPreview();
   renderGrid();
   setFillSpinner(true);
   setCancelButtonVisible(true);
