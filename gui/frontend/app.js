@@ -775,6 +775,17 @@ function renderLetterGrid() {
 // Clues tab
 // ---------------------------------------------------------------------------
 
+// s.score (see /api/puzzle/slots) is absent for a slot that isn't fully
+// filled or has no dictionary selected for its direction (nothing to
+// show), a real number for a fully-filled word found in that dictionary,
+// or explicit `null` for a fully-filled word that ISN'T in it -- shown as
+// "(N/A)" rather than silently looking the same as an unfilled slot.
+function clueScoreSuffix(s) {
+  if (s.score === undefined) return "";
+  if (s.score === null) return ` <span class="clue-score clue-score-na">(N/A)</span>`;
+  return ` <span class="clue-score">(${s.score})</span>`;
+}
+
 function renderClues() {
   const across = slots.filter((s) => s.direction === "across").sort((a, b) => a.number - b.number);
   const down = slots.filter((s) => s.direction === "down").sort((a, b) => a.number - b.number);
@@ -804,7 +815,7 @@ function renderClues() {
       .map(
         (s) => `
       <div class="clue-row${s.id === activeId ? " active-slot" : ""}" data-slot="${s.id}">
-        <span class="clue-num">${s.number}</span>${s.pattern}${s.score != null ? ` <span class="clue-score">(${s.score})</span>` : ""}
+        <span class="clue-num">${s.number}</span>${s.pattern}${clueScoreSuffix(s)}
         <input type="text" value="${escapeAttr(puzzle.clues[s.id] || "")}" data-slot-input="${s.id}" placeholder="Clue text…" />
       </div>`
       )
@@ -1174,18 +1185,49 @@ async function startVerificationBatch(slot, allCandidates, target) {
 // keeps the original behavior: click commits just that one slot's word
 // immediately -- same as what a double-click now does regardless of
 // verified status (see the dblclick listener in renderOptionsList).
+// A previewGrid-shaped array (row strings, '#' meaning "nothing to
+// preview here", exactly like a real solved grid's block cells) holding
+// only `word`'s own letters in `slot`'s cells. Lets a candidate that
+// isn't verified yet (or might never be -- it could turn out infeasible)
+// reuse the exact same preview rendering (renderGrid) and commit
+// (commitPreview) machinery a verified option's real, whole-puzzle solved
+// grid uses, without needing one of those to exist.
+function singleSlotPreviewGrid(slot, word) {
+  const rows = [];
+  for (let r = 0; r < puzzle.height; r++) rows.push(new Array(puzzle.width).fill("#"));
+  slot.cells.forEach(([r, c], i) => {
+    rows[r][c] = word[i];
+  });
+  return rows.map((row) => row.join(""));
+}
+
+// A confirmed-feasible (green) candidate previews its full solved grid;
+// a candidate that isn't verified yet -- still pending, or never checked
+// at all -- previews just its own slot's word instead (see
+// singleSlotPreviewGrid), dimmed the same way, but never written into
+// the real grid on this first click: clicking blind on an unconfirmed
+// guess shouldn't commit anything, only show what it would look like.
+// Either way, clicking the SAME candidate again commits it -- upgrading
+// to the real verified grid first if the background batch confirmed it
+// feasible in the meantime, so the commit uses the better, whole-puzzle
+// completion rather than just the one word. Double-click (see
+// renderOptionsList) is the direct, single-step alternative to this
+// two-click dance, regardless of verified status.
 function onOptionClick(slot, word) {
   const verified = getVerifiedMap(slot).get(word);
-  if (verified?.feasible && verified.grid) {
-    if (previewSlotId === slot.id && previewWord === word) {
-      commitPreview();
-    } else {
+  if (previewSlotId === slot.id && previewWord === word) {
+    if (verified?.feasible && verified.grid) {
       setPreview(slot.id, word, verified.grid);
-      renderGrid();
     }
-  } else {
-    applyWordToSlot(slot, word);
+    commitPreview();
+    return;
   }
+  if (verified?.feasible && verified.grid) {
+    setPreview(slot.id, word, verified.grid);
+  } else {
+    setPreview(slot.id, word, singleSlotPreviewGrid(slot, word));
+  }
+  renderGrid();
 }
 
 function commitPreview() {

@@ -131,9 +131,16 @@ def puzzle_slots(
     word's score in the relevant direction's dictionary (unfiltered by
     whatever min-score threshold is currently selected there, since this
     reports the word's real score, not whether it'd currently pass a
-    filter), omitted if the word isn't in that dictionary at all. `stats`
-    gets a parallel "avg_word_score": the mean of every scored slot found
-    this way, or None if none were.
+    filter). A slot that isn't fully filled, or whose direction has no
+    dictionary selected at all, gets no "score" key -- there's nothing
+    meaningful to report yet. A slot that IS fully filled but whose word
+    isn't in that dictionary gets "score": null (JSON), distinguishable
+    from the key being absent -- the frontend's Clues tab shows that as
+    "(N/A)" rather than silently showing nothing, same as a real score
+    but flagging it as unrecognized instead of scored. `stats` gets a
+    parallel "avg_word_score": the mean of every REAL score found this
+    way (N/A entries don't count, same as an unfilled slot), or None if
+    none were.
     """
     p = puzzle.to_puzzle()
     word_lists: dict[str, dict_lookup.WordList] = {}
@@ -152,11 +159,10 @@ def puzzle_slots(
         if word is None:
             continue
         score = word_list.score_of(word)
-        if score is None:
-            continue
-        entry["score"] = score
-        total_score += score
-        scored_count += 1
+        entry["score"] = score  # a real int if found, else None -> JSON null ("N/A")
+        if score is not None:
+            total_score += score
+            scored_count += 1
 
     stats = p.stats()
     stats["avg_word_score"] = round(total_score / scored_count, 1) if scored_count else None

@@ -357,7 +357,14 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   color: var(--text-dim);
   margin: 14px 0 6px;
 }
-.separate-min-toggle { margin: 10px 0 14px; }
+.min-score-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.min-score-header h3 { margin-bottom: 0; }
+.separate-min-toggle { margin: 0 0 8px; white-space: nowrap; }
 
 .accept-fill-btn {
   display: block;
@@ -417,6 +424,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .clue-row { font-size: 0.82rem; }
 .clue-row .clue-num { color: var(--accent); font-weight: 600; margin-right: 4px; }
 .clue-row .clue-score { color: var(--text-dim); }
+.clue-row .clue-score-na { color: var(--warn); font-style: italic; }
 .clue-row input {
   width: 100%;
   background: var(--bg-panel-2);
