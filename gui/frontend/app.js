@@ -64,6 +64,33 @@ let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; 
 let verificationCache = new Map();
 let verifiedCompleteCount = new Map();
 let verifyBatchToken = 0; // incremented per batch; a stale batch stops issuing further checks
+// Which verifyKeyFor() a batch is CURRENTLY (actively, right now) running
+// for, and up to what target -- distinct from verifiedCompleteCount,
+// which is only ever written once a batch finishes ALL the way through.
+// Without this, extendVerificationIfNeeded had no way to tell "already in
+// progress" from "not started yet": updateOptionsPanel calls it after
+// EVERY grid edit, anywhere, even in a totally unrelated slot -- and
+// since verifiedCompleteCount stays at its stale (pre-batch) value for
+// the batch's entire, possibly multi-second run, every one of those
+// calls looked identical to the very first one, restarting the batch
+// (via cancelAllVerifyChecks killing the in-flight subprocess) from
+// scratch each time. A user typing continuously anywhere in the grid
+// could keep the currently-viewed slot's verification perpetually
+// interrupted before it ever finished a single candidate -- confirmed
+// directly as the cause of verification appearing to load very slowly or
+// not at all, not just a theoretical risk.
+let activeVerificationKey = null;
+let activeVerificationTarget = 0;
+// Bumped every time verificationCache itself gets replaced with a fresh
+// Map (invalidateVerificationCache/clearVerificationCache). A batch
+// captures the epoch it started under; if the epoch has since moved on
+// by the time it finishes, its verifiedMap reference (from getVerifiedMap,
+// captured once up front) points at a Map that's been detached from the
+// current verificationCache -- its results are invisible to anyone, and
+// it must NOT mark its key "complete" (verifiedCompleteCount), which
+// would wrongly tell a later, genuine check "nothing left to verify"
+// for a key whose real, current results were never actually gathered.
+let verificationCacheEpoch = 0;
 const VERIFY_BATCH_SIZE = 10; // how many additional candidates one batch step verifies
 const VERIFY_MAX = 40; // hard cap on total verified candidates per slot, regardless of pagination
 const VERIFY_THREADS = 2; // kept modest since these run one at a time, in the background
@@ -223,6 +250,7 @@ function snapshotForUndo() {
   if (undoStack.length > MAX_UNDO) undoStack.shift();
   clearFillFailedHighlight();
   clearPreview();
+  invalidateVerificationCache();
 }
 
 function clearFillFailedHighlight() {
@@ -288,6 +316,13 @@ function undo() {
   // pointing outside the restored grid.
   selected = null;
   clearFillFailedHighlight();
+  // This is a real grid-state change (reverting to an earlier one) that
+  // doesn't go through snapshotForUndo() -- doing so would push a new
+  // undo entry for the undo itself -- so it needs its own call to the
+  // same cache invalidation for the same reason: a cached verification
+  // result reflects the grid state at the time it was checked, and undo
+  // just changed that state out from under it.
+  invalidateVerificationCache();
   renderAll();
   setStatus("Undid last change", "ok");
 }
@@ -304,8 +339,42 @@ function undo() {
 function clearVerificationCache() {
   verificationCache = new Map();
   verifiedCompleteCount = new Map();
+  verificationCacheEpoch++;
+  activeVerificationKey = null;
+  activeVerificationTarget = 0;
   visibleLimit = OPTIONS_PAGE_SIZE;
   visibleLimitKey = null;
+}
+
+// A "feasible" (or "infeasible") result is a property of the WHOLE grid --
+// it comes from a full CSP solve, not just the checked slot's own pattern
+// -- so an edit ANYWHERE, even in a totally different, non-crossing slot,
+// can make a previously-feasible candidate infeasible (or vice versa)
+// without verifyKeyFor()'s cache key for that OTHER slot changing at all
+// (that key only tracks THIS slot's own pattern/dictionary/min-score).
+// Left uninvalidated, the Options panel could keep showing a candidate as
+// verified (green) after it had genuinely stopped working -- confirmed
+// directly as a real, reported bug, not just a theoretical risk. Called
+// from snapshotForUndo(), the universal "about to mutate the puzzle"
+// choke point every real edit already funnels through, so this doesn't
+// need its own call site at each mutation function. Deliberately doesn't
+// touch visibleLimit/visibleLimitKey (unlike clearVerificationCache) --
+// there's no reason a single keystroke should reset which page of an
+// unrelated slot's options list the user was scrolled to.
+function invalidateVerificationCache() {
+  verificationCache = new Map();
+  verifiedCompleteCount = new Map();
+  verificationCacheEpoch++;
+  // Also releases any batch's "actively running" claim -- its
+  // verifiedMap reference (captured before this call) is about to be
+  // detached from the fresh verificationCache above, so it can no
+  // longer be trusted to actually finish gathering real, visible
+  // results for that key. Clearing the claim here lets a genuine new
+  // batch start on the very next extendVerificationIfNeeded call (e.g.
+  // from this same edit's own refreshSlotsAndStats -> updateOptionsPanel)
+  // instead of that call wrongly believing one is already in progress.
+  activeVerificationKey = null;
+  activeVerificationTarget = 0;
 }
 
 async function newPuzzle(width, height) {
@@ -978,7 +1047,7 @@ async function updateOptionsPanel() {
 
     lastRenderedSlot = s;
     lastRenderedCandidates = data.candidates;
-    extendVerificationIfNeeded(s, data.candidates);
+    scheduleVerification(s, data.candidates);
     renderOptionsList(s, data.candidates);
   } catch (err) {
     if (seq !== optionsRequestSeq) return;
@@ -1043,36 +1112,41 @@ function renderOptionsList(slot, candidates) {
   }
   listEl.innerHTML = html;
 
-  // A real double-click fires click, click, THEN dblclick -- so without
-  // this, a verified (green) option's own click handler would already run
-  // twice (previewing, then committing the WHOLE grid via commitPreview)
-  // before dblclick ever got a chance to "just add the word" instead.
-  // Deferring the single-click action (via the module-level
-  // pendingOptionClick, so it can also be cancelled from
-  // updateOptionsPanel if the user navigates away before it fires -- see
-  // cancelPendingOptionClick) and cancelling it if a dblclick follows
-  // within the window is the standard way to disambiguate the two; a
-  // genuine single click just runs its action DOUBLE_CLICK_MS later than
-  // before, the accepted tradeoff for making double-click mean something
-  // clearly different.
+  // A real double-click fires click(detail=1), click(detail=2), THEN
+  // dblclick. Relying on a fixed timer to guess "was that a double-click"
+  // (the previous approach here) has a real failure mode: if the actual
+  // gap between the two clicks -- governed by the OS/browser's own
+  // double-click-speed setting, which this code has no way to know --
+  // exceeds whatever window was chosen, the first click's deferred action
+  // fires anyway (setting a preview), and if a SECOND deferred action was
+  // also scheduled for the second click, it can then see "same candidate
+  // clicked again" and commit the WHOLE previewed grid -- which is
+  // exactly the "double-click still fills the whole grid" bug this
+  // replaced. `e.detail` sidesteps the guesswork entirely: it's the
+  // browser's own native running click-count for a rapid sequence (1 for
+  // a lone click, 2 for the second click of a double-click, using the
+  // SAME threshold `dblclick` itself is based on) -- so a second click
+  // (detail >= 2) is recognized immediately, synchronously, with no timer
+  // race possible, and acts directly via applyWordToSlot rather than
+  // going through onOptionClick's preview/commit state machine at all,
+  // so there's no path left by which a double-click could ever trigger a
+  // whole-grid commitPreview().
   listEl.querySelectorAll(".option-row").forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
       cancelPendingOptionClick();
       const word = row.getAttribute("data-word");
+      if (e.detail >= 2) {
+        applyWordToSlot(slot, word);
+        return;
+      }
+      // A lone click so far -- deferred briefly in case a second click
+      // (handled above, on ITS OWN event) follows and upgrades this into
+      // a double-click instead. Only ever reachable with detail === 1,
+      // so this is never the second half of a double-click itself.
       pendingOptionClick = setTimeout(() => {
         pendingOptionClick = null;
         onOptionClick(slot, word);
       }, DOUBLE_CLICK_MS);
-    });
-    // Double-click always just places that one word into this slot,
-    // regardless of verified status -- a direct shortcut past the
-    // preview-then-commit dance single-click uses for a verified (green)
-    // option, for whenever the whole-grid sample fill that preview offers
-    // isn't what's wanted.
-    row.addEventListener("dblclick", (e) => {
-      e.preventDefault();
-      cancelPendingOptionClick();
-      applyWordToSlot(slot, row.getAttribute("data-word"));
     });
   });
   const moreBtn = document.getElementById("options-show-more");
@@ -1085,18 +1159,46 @@ function renderOptionsList(slot, candidates) {
   }
 }
 
+// Debounces the actual verification KICKOFF (not the candidate list
+// itself, which updateOptionsPanel already renders immediately either
+// way) -- called from there on every render, including one for every
+// single keystroke, since a cached "verified" result is invalidated on
+// every real edit (see invalidateVerificationCache) and correctness
+// requires re-checking against the LATEST grid state before showing
+// anything as verified again. Left undebounced, rapid typing anywhere in
+// the grid would restart the currently-viewed slot's verification batch
+// (a real subprocess spawn + solve per candidate) on every keystroke,
+// never letting it run long enough to actually finish -- confirmed
+// directly as a real cause of verification appearing to load very
+// slowly or not at all. Waiting for a brief pause before actually
+// starting means intermediate, about-to-be-superseded states never get
+// verified at all (not wasted work), while the final state, once the
+// user actually pauses, gets a real, uninterrupted batch.
+let verifyDebounceTimer = null;
+const VERIFY_DEBOUNCE_MS = 400;
+
+function scheduleVerification(slot, candidates) {
+  if (verifyDebounceTimer) clearTimeout(verifyDebounceTimer);
+  verifyDebounceTimer = setTimeout(() => {
+    verifyDebounceTimer = null;
+    extendVerificationIfNeeded(slot, candidates);
+  }, VERIFY_DEBOUNCE_MS);
+}
+
 // Extends background verification to cover up to `visibleLimit`
 // candidates (capped at VERIFY_MAX total) whenever more of the list
-// becomes visible -- called on every render and again each time "Show
+// becomes visible -- called (debounced, see scheduleVerification above)
+// on every render and again (directly, undebounced -- a deliberate,
+// infrequent user action, not rapid-fire like typing) each time "Show
 // more" is clicked, so newly-revealed candidates actually get checked
 // instead of staying permanently unverified just because they weren't
 // among the first page.
 function extendVerificationIfNeeded(slot, candidates) {
   const key = verifyKeyFor(slot);
   const target = Math.min(visibleLimit, VERIFY_MAX, candidates.length);
-  if ((verifiedCompleteCount.get(key) || 0) < target) {
-    startVerificationBatch(slot, candidates, target);
-  }
+  if ((verifiedCompleteCount.get(key) || 0) >= target) return; // already fully covered
+  if (activeVerificationKey === key && activeVerificationTarget >= target) return; // already in progress, covers this much or more -- don't restart it
+  startVerificationBatch(slot, candidates, target);
 }
 
 // Terminates whatever verify-check subprocess the backend is currently
@@ -1129,6 +1231,24 @@ async function cancelAllVerifyChecks() {
 // next one, so nothing ever actually stopped.
 async function stopAllVerification() {
   verifyBatchToken++;
+  // Bumping the token alone stops a running batch's loop from *issuing
+  // further* checks (see its own token guard), but its "this key is
+  // actively being verified" claim is only ever cleared from the
+  // batch's OWN successful-completion path -- which a stop-mid-flight
+  // never reaches. Left uncleared here, extendVerificationIfNeeded would
+  // wrongly keep believing this key's verification is still in progress
+  // (nothing running to ever finish and clear it), permanently blocking
+  // a real, later attempt to verify it again.
+  activeVerificationKey = null;
+  activeVerificationTarget = 0;
+  // A debounced kickoff (see scheduleVerification) that hasn't fired yet
+  // would otherwise still go off VERIFY_DEBOUNCE_MS later regardless of
+  // this call -- e.g. mid-Fill, exactly the CPU contention this function
+  // exists to prevent right before starting one.
+  if (verifyDebounceTimer) {
+    clearTimeout(verifyDebounceTimer);
+    verifyDebounceTimer = null;
+  }
   await cancelAllVerifyChecks();
 }
 
@@ -1145,6 +1265,19 @@ async function stopAllVerification() {
 // re-running with a bigger target only does the work for the new tail.
 async function startVerificationBatch(slot, allCandidates, target) {
   const token = ++verifyBatchToken;
+  const key = verifyKeyFor(slot);
+  // Claimed immediately (synchronously, before the first await) so any
+  // OTHER extendVerificationIfNeeded call for this exact key -- e.g. from
+  // an edit elsewhere in the grid triggering updateOptionsPanel again --
+  // sees this batch as already in progress and skips starting a second,
+  // redundant one that would just cancel this one's in-flight subprocess.
+  // A genuinely newer call (different key, or a bigger target for this
+  // one) still legitimately overwrites this claim -- that's the correct
+  // "supersede" behavior the token check below already handles; only a
+  // same-key/same-or-smaller-target call is what this exists to stop.
+  activeVerificationKey = key;
+  activeVerificationTarget = target;
+  const epoch = verificationCacheEpoch;
   await cancelAllVerifyChecks();
   if (token !== verifyBatchToken) return; // superseded again while the cancel was in flight
   const verifiedMap = getVerifiedMap(slot);
@@ -1176,8 +1309,20 @@ async function startVerificationBatch(slot, allCandidates, target) {
       // just this slot -- every other slot's word within it is equally
       // feasible, so record it there too instead of letting a slot you
       // haven't checked yet show no verified options despite one clearly
-      // existing (visible in this word's own preview).
-      recordFeasibleGridForAllSlots(result.grid);
+      // existing (visible in this word's own preview). BUT: this result
+      // was gathered against whatever grid state existed when the
+      // request was SENT (see the `puzzle` field above), which -- thanks
+      // to scheduleVerification's debounce -- can be well before an edit
+      // that's since invalidated the cache the token check alone doesn't
+      // catch this: verifyBatchToken only moves when a NEW batch actually
+      // starts, which the debounce delays, so a same-key request that was
+      // already in flight when the cache was wiped can still resolve
+      // with a valid-looking token, despite being stale. Without this
+      // epoch check, recordFeasibleGridForAllSlots would re-populate the
+      // freshly-wiped cache with pre-edit feasibility data for OTHER
+      // slots via cross-slot sharing -- confirmed directly as a real bug
+      // this introduced, not just a theoretical risk.
+      if (epoch === verificationCacheEpoch) recordFeasibleGridForAllSlots(result.grid);
     } else if (result.feasible === false) {
       verifiedMap.set(c.word, { feasible: false, grid: null });
     } // feasible === null (a verify-side error, not a real infeasibility finding) -- leave unset
@@ -1187,7 +1332,24 @@ async function startVerificationBatch(slot, allCandidates, target) {
     // above can have just updated it via cross-slot sharing.
     if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
   }
-  if (token === verifyBatchToken) verifiedCompleteCount.set(verifyKeyFor(slot), target);
+  // The epoch check guards against a cache wipe (invalidateVerificationCache,
+  // from an edit elsewhere) having detached `verifiedMap` from the
+  // CURRENT verificationCache partway through this loop: if that
+  // happened, every result gathered above went into a Map nothing can
+  // see anymore, so marking this key "complete" here would wrongly tell
+  // a later, genuine check "nothing left to verify" for results that
+  // were never actually gathered into anything reachable.
+  if (token === verifyBatchToken && epoch === verificationCacheEpoch) {
+    verifiedCompleteCount.set(key, target);
+    // Only clear the claim if it's still this call's own -- a NEWER call
+    // (for a different key, or this same key at a bigger target) would
+    // have already overwritten it with ITS OWN claim, which this older,
+    // now-finished call must not clobber.
+    if (activeVerificationKey === key && activeVerificationTarget === target) {
+      activeVerificationKey = null;
+      activeVerificationTarget = 0;
+    }
+  }
 }
 
 // A confirmed-feasible candidate previews its full solved grid on click

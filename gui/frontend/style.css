@@ -456,6 +456,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   border-radius: 4px;
   font-size: 0.85rem;
   cursor: pointer;
+  user-select: none; /* rows are clicked, often rapidly (double-click), not selected as text */
 }
 .option-row:hover { background: var(--accent-dim); }
 .option-row .word { font-family: "SF Mono", Menlo, monospace; letter-spacing: 0.05em; }
