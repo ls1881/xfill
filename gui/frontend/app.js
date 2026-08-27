@@ -557,6 +557,20 @@ function moveSelection(dr, dc) {
   highlightActiveClue();
 }
 
+// Deliberately does NOT call updateOptionsPanel() -- its one caller (the
+// letter-typing keydown handler) has already fired off refreshSlotsAndStats()
+// a moment earlier without awaiting it, specifically so the just-typed
+// letter shows up on screen immediately rather than waiting on a network
+// round trip. That refresh's own eventual updateOptionsPanel() call is the
+// one that's actually correct here, since by then `slots` reflects the
+// edit that was just made; calling it again from here, synchronously,
+// would race it using the STILL-STALE `slots` from before that edit --
+// whichever response lands first wins (see updateOptionsPanel's
+// optionsRequestSeq guard, which only protects against staleness by
+// *issue* order, not by which call actually had fresh data to issue with)
+// -- and the stale one winning is exactly what made the Options panel
+// intermittently show outdated candidates right after typing. Confirmed
+// directly: this was the cause, not merely a suspected one.
 function advanceInDirection(step) {
   if (!selected) return;
   const dr = direction === "down" ? step : 0;
@@ -567,7 +581,6 @@ function advanceInDirection(step) {
   if (puzzle.blocks[r][c]) return;
   selected = { row: r, col: c };
   renderGrid();
-  updateOptionsPanel();
   highlightActiveClue();
 }
 
