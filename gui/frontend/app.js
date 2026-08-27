@@ -25,11 +25,16 @@ const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
 
 // Per-candidate solve-feasibility checks for the Options panel (see
-// updateOptionsPanel): word -> {feasible: true|false, grid: [...] | null}.
-// Reset whenever the (slot, pattern, dictionary) combination changes --
-// see lastVerifiedKey.
-let verifiedResults = new Map();
-let lastVerifiedKey = null;
+// updateOptionsPanel), cached by (slot, pattern, dictionary) key so
+// switching away from a slot and back reuses what's already known instead
+// of re-solving from scratch -- key -> Map(word -> {feasible, grid}).
+// verifiedKeysComplete tracks which keys have had every one of their top
+// VERIFY_LIMIT candidates actually checked (not just started -- a batch
+// interrupted by switching slots again leaves its key OFF this set, so a
+// later revisit resumes instead of silently staying half-verified
+// forever); see startVerificationBatch and verifyKeyFor.
+let verificationCache = new Map();
+let verifiedKeysComplete = new Set();
 let verifyBatchToken = 0; // incremented per batch; a stale batch stops issuing further checks
 const VERIFY_LIMIT = 10; // how many top-scored candidates get checked per slot
 const VERIFY_THREADS = 2; // kept modest since these run one at a time, in the background
@@ -207,6 +212,16 @@ function undo() {
 // Puzzle mutation + sync
 // ---------------------------------------------------------------------------
 
+// A New or Import swaps in a whole different puzzle -- cached verification
+// results are keyed by slot id + pattern, which have no relationship to
+// the previous puzzle's slots, so hanging onto them would just be dead
+// memory (harmless, but unbounded across many New/Import calls in one
+// session) rather than anything that could still apply.
+function clearVerificationCache() {
+  verificationCache = new Map();
+  verifiedKeysComplete = new Set();
+}
+
 async function newPuzzle(width, height) {
   const previous = puzzle;
   const data = await apiJson(`/api/puzzle/new?width=${width}&height=${height}`, {});
@@ -217,6 +232,7 @@ async function newPuzzle(width, height) {
   puzzle = data.puzzle;
   slots = data.slots;
   selected = null;
+  clearVerificationCache();
   renderAll();
 }
 
@@ -717,6 +733,39 @@ function escapeAttr(s) {
 // Options ("Fill") tab
 // ---------------------------------------------------------------------------
 
+function verifyKeyFor(slot) {
+  const sel = slot.direction === "across" ? dictSelections.across : dictSelections.down;
+  return `${slot.id}|${slot.pattern}|${sel.path}|${sel.minScore}`;
+}
+
+function getVerifiedMap(slot) {
+  const key = verifyKeyFor(slot);
+  let m = verificationCache.get(key);
+  if (!m) {
+    m = new Map();
+    verificationCache.set(key, m);
+  }
+  return m;
+}
+
+// A verify check that comes back feasible doesn't just prove ONE slot's
+// candidate works -- its `grid` is a complete, valid solution for the
+// *entire* puzzle, which means every other slot's word within that same
+// grid is, by definition, also a feasible candidate for that slot (at
+// least one full completion exists using it). Recording that for every
+// slot at once, not just the one slot whose check happened to produce it,
+// is what lets a genuinely longer/different slot already show a verified
+// option the moment you select it, if its word happened to appear in a
+// solution some other slot's check already found.
+function recordFeasibleGridForAllSlots(grid) {
+  for (const s of slots) {
+    const word = s.cells.map(([r, c]) => grid[r][c]).join("");
+    if (!/^[A-Z]+$/.test(word)) continue; // guard against a malformed/short grid row
+    const map = getVerifiedMap(s);
+    if (!map.has(word)) map.set(word, { feasible: true, grid });
+  }
+}
+
 async function updateOptionsPanel() {
   const heading = document.getElementById("options-heading");
   const patternEl = document.getElementById("options-pattern");
@@ -766,14 +815,15 @@ async function updateOptionsPanel() {
       return;
     }
 
-    // Solve-feasibility checks (verifiedResults) are scoped to one exact
-    // (slot, pattern, dictionary) combination -- if any of those changed,
-    // start a fresh background verification pass and drop whatever was
-    // known before, since it no longer applies to what's now on screen.
-    const key = `${s.id}|${s.pattern}|${sel.path}|${sel.minScore}`;
-    if (key !== lastVerifiedKey) {
-      lastVerifiedKey = key;
-      verifiedResults = new Map();
+    // Solve-feasibility checks are cached per (slot, pattern, dictionary)
+    // key (see getVerifiedMap) -- only kick off a background verification
+    // pass if this exact key hasn't already been fully checked. Switching
+    // back to a slot you already looked at reuses that cache instead of
+    // re-solving from scratch; a batch interrupted by switching away
+    // (verifiedKeysComplete only gains the key once its loop runs to
+    // completion, see startVerificationBatch) resumes here instead of
+    // being silently abandoned forever.
+    if (!verifiedKeysComplete.has(verifyKeyFor(s))) {
       startVerificationBatch(s, data.candidates);
     }
 
@@ -786,9 +836,9 @@ async function updateOptionsPanel() {
   }
 }
 
-function sortCandidates(candidates) {
+function sortCandidates(candidates, verifiedMap) {
   const arr = [...candidates];
-  const verified = (c) => verifiedResults.get(c.word)?.feasible === true;
+  const verified = (c) => verifiedMap.get(c.word)?.feasible === true;
   arr.sort((a, b) => {
     if (optionsSortMode === "smart") {
       const av = verified(a) ? 1 : 0;
@@ -801,25 +851,30 @@ function sortCandidates(candidates) {
   return arr;
 }
 
-// Renders the candidate list against whatever verifiedResults currently
-// knows: a candidate confirmed feasible (a full grid completion actually
-// exists with it in this slot) is bolded; one confirmed infeasible is
-// dropped from the list entirely; anything not yet checked (or checked
-// and inconclusive -- see verify_option's "feasible: null" error case)
-// stays plain. Called both right after fetching candidates and again,
-// incrementally, as each background verification result comes in -- so a
-// row re-sorts to the top the moment it's confirmed verified under the
-// default "smart" order, not only when the list is first built.
+// Renders the candidate list against whatever this slot's cached
+// verification results currently know (see getVerifiedMap): a candidate
+// confirmed feasible (a full grid completion actually exists with it in
+// this slot) is bolded; one confirmed infeasible is dropped from the list
+// entirely; anything not yet checked (or checked and inconclusive -- see
+// verify_option's "feasible: null" error case) stays plain. Called both
+// right after fetching candidates and again, incrementally, as each
+// background verification result comes in -- so a row re-sorts to the top
+// the moment it's confirmed verified under the default "smart" order, not
+// only when the list is first built.
 function renderOptionsList(slot, candidates) {
   const listEl = document.getElementById("options-list");
-  const visible = sortCandidates(candidates.filter((c) => verifiedResults.get(c.word)?.feasible !== false));
+  const verifiedMap = getVerifiedMap(slot);
+  const visible = sortCandidates(
+    candidates.filter((c) => verifiedMap.get(c.word)?.feasible !== false),
+    verifiedMap
+  );
   if (!visible.length) {
     listEl.innerHTML = '<div class="hint">No matches.</div>';
     return;
   }
   listEl.innerHTML = visible
     .map((c) => {
-      const verified = verifiedResults.get(c.word)?.feasible === true;
+      const verified = verifiedMap.get(c.word)?.feasible === true;
       return `<div class="option-row${verified ? " verified" : ""}" data-word="${c.word}"><span class="word">${c.word}</span><span class="score">${c.score}</span></div>`;
     })
     .join("");
@@ -872,9 +927,11 @@ async function startVerificationBatch(slot, allCandidates) {
   const token = ++verifyBatchToken;
   await cancelAllVerifyChecks();
   if (token !== verifyBatchToken) return; // superseded again while the cancel was in flight
+  const verifiedMap = getVerifiedMap(slot);
   const toCheck = allCandidates.slice(0, VERIFY_LIMIT);
   for (const c of toCheck) {
-    if (token !== verifyBatchToken) return; // superseded by a newer slot/pattern/dictionary
+    if (token !== verifyBatchToken) return; // superseded by a newer slot/pattern/dictionary -- key stays incomplete, so a revisit resumes
+    if (verifiedMap.has(c.word)) continue; // already known -- this slot's own prior check, or shared from another slot's solve (see recordFeasibleGridForAllSlots)
     let result;
     try {
       result = await apiJson("/api/options/verify", {
@@ -892,15 +949,23 @@ async function startVerificationBatch(slot, allCandidates) {
     }
     if (token !== verifyBatchToken) return;
     if (result.feasible === true) {
-      verifiedResults.set(c.word, { feasible: true, grid: result.grid });
+      verifiedMap.set(c.word, { feasible: true, grid: result.grid });
+      // This word's grid is a complete solution for the whole puzzle, not
+      // just this slot -- every other slot's word within it is equally
+      // feasible, so record it there too instead of letting a slot you
+      // haven't checked yet show no verified options despite one clearly
+      // existing (visible in this word's own preview).
+      recordFeasibleGridForAllSlots(result.grid);
     } else if (result.feasible === false) {
-      verifiedResults.set(c.word, { feasible: false, grid: null });
+      verifiedMap.set(c.word, { feasible: false, grid: null });
     } // feasible === null (a verify-side error, not a real infeasibility finding) -- leave unset
 
-    if (currentSlot() && currentSlot().id === slot.id) {
-      renderOptionsList(slot, allCandidates);
-    }
+    // Re-render whatever's actually on screen right now, which may be a
+    // DIFFERENT slot than the one this batch is for -- recordFeasibleGridForAllSlots
+    // above can have just updated it via cross-slot sharing.
+    if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
   }
+  if (token === verifyBatchToken) verifiedKeysComplete.add(verifyKeyFor(slot));
 }
 
 // A confirmed-feasible candidate previews its full solved grid on click
@@ -909,7 +974,7 @@ async function startVerificationBatch(slot, allCandidates) {
 // has no precomputed completion to preview, so it keeps the original
 // behavior: click commits just that one slot's word immediately.
 function onOptionClick(slot, word) {
-  const verified = verifiedResults.get(word);
+  const verified = getVerifiedMap(slot).get(word);
   if (verified?.feasible && verified.grid) {
     if (previewSlotId === slot.id && previewWord === word) {
       commitPreview();
@@ -1062,6 +1127,7 @@ function wireToolbar() {
       slots = data.slots;
       selected = null;
       clearFillFailedHighlight();
+      clearVerificationCache();
       renderAll();
       setStatus(data.warning ? `Imported "${file.name}" — ${data.warning}` : `Imported "${file.name}"`, data.warning ? "error" : "ok");
     } catch (err) {
