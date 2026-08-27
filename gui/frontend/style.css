@@ -354,6 +354,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .clue-list { display: flex; flex-direction: column; gap: 6px; }
 .clue-row { font-size: 0.82rem; }
 .clue-row .clue-num { color: var(--accent); font-weight: 600; margin-right: 4px; }
+.clue-row .clue-score { color: var(--text-dim); }
 .clue-row input {
   width: 100%;
   background: var(--bg-panel-2);
@@ -423,3 +424,41 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   margin-bottom: 10px;
 }
 .hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 6px; }
+
+.link-btn {
+  display: block;
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.75rem;
+  padding: 0;
+  margin: -4px 0 10px;
+  cursor: pointer;
+}
+.link-btn:hover { text-decoration: underline; }
+
+.length-overrides:empty { margin: 0; }
+.length-override-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+#tab-dict .length-override-row input[type="number"] {
+  width: 52px;
+  margin-bottom: 0;
+  padding: 4px 6px;
+  text-align: center;
+}
+.length-override-row .remove-override {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.length-override-row .remove-override:hover { color: var(--issue-red); }

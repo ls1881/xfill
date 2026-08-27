@@ -38,6 +38,13 @@ class WordList:
         for words in by_length.values():
             words.sort(key=lambda ws: -ws[1])
         self.by_length = by_length
+        # Flat, since a word's length already scopes it to exactly one
+        # by_length bucket -- no cross-length collisions possible. Built
+        # once here rather than scanning by_length[len(word)] per lookup,
+        # since score_of is called once per fully-filled slot every time
+        # the Clues tab re-renders and a dictionary can be hundreds of
+        # thousands of words.
+        self._score_by_word: dict[str, int] = {word: score for words in by_length.values() for word, score in words}
 
     def candidates(self, pattern: str, limit: int = 50) -> list[tuple[str, int]]:
         """Top `limit` words (by score) of len(pattern) matching it, where
@@ -54,6 +61,12 @@ class WordList:
 
     def has_length(self, length: int) -> bool:
         return length in self.by_length
+
+    def score_of(self, word: str) -> int | None:
+        """This word's score in the dictionary, or None if it's not
+        present -- e.g. a word the user typed directly into the grid that
+        isn't in the chosen dictionary."""
+        return self._score_by_word.get(word.upper())
 
 
 @lru_cache(maxsize=16)

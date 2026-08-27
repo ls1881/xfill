@@ -10,10 +10,23 @@ let stats = {};
 let selected = null;    // {row, col}
 let direction = "across";
 let dictionaries = [];
+// lengthOverrides: {length (number) -> minScore}, for word lengths that
+// need a different threshold than minScore's default -- see
+// effectiveMinScore below, the one place that resolves the two together.
 let dictSelections = {
-  across: { path: "", minScore: 0 },
-  down: { path: "", minScore: 0 },
+  across: { path: "", minScore: 0, lengthOverrides: {} },
+  down: { path: "", minScore: 0, lengthOverrides: {} },
 };
+
+// The min score that actually applies to a word of `length` in `sel`
+// (one of dictSelections.across/down): its length-specific override if
+// one's set, else sel's plain default. The one place this resolution
+// happens, so every caller -- the Options panel, verify checks, Fill --
+// agrees with the C++ engine's own MinScoreByLength::For (dictionary.hpp).
+function effectiveMinScore(sel, length) {
+  const override = sel.lengthOverrides[length];
+  return override === undefined ? sel.minScore : override;
+}
 let symmetryMode = "rotational180";
 let americanStyle = true;
 let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots response arriving after a newer one
@@ -261,7 +274,10 @@ async function refreshSlotsAndStats() {
   // response should ever get applied, regardless of which one's response
   // happens to land first over the network.
   const seq = ++slotsRequestSeq;
-  const data = await apiJson("/api/puzzle/slots", puzzle);
+  const params = new URLSearchParams();
+  if (dictSelections.across.path) params.set("across_dict_path", dictSelections.across.path);
+  if (dictSelections.down.path) params.set("down_dict_path", dictSelections.down.path);
+  const data = await apiJson(`/api/puzzle/slots?${params}`, puzzle);
   if (seq !== slotsRequestSeq) return;
   slots = data.slots;
   stats = data.stats;
@@ -638,6 +654,7 @@ function renderSummary() {
   const rows = [
     ["Words", stats.word_count],
     ["Avg. word length", stats.avg_word_length],
+    ["Avg. word score", stats.avg_word_score ?? "—"],
     ["Blocks", `${stats.block_count} (${stats.block_percent}%)`],
     ["Letters filled", stats.letter_count],
   ];
@@ -698,7 +715,7 @@ function renderClues() {
       .map(
         (s) => `
       <div class="clue-row${s.id === activeId ? " active-slot" : ""}" data-slot="${s.id}">
-        <span class="clue-num">${s.number}</span>${s.pattern}
+        <span class="clue-num">${s.number}</span>${s.pattern}${s.score != null ? ` <span class="clue-score">(${s.score})</span>` : ""}
         <input type="text" value="${escapeAttr(puzzle.clues[s.id] || "")}" data-slot-input="${s.id}" placeholder="Clue text…" />
       </div>`
       )
@@ -754,7 +771,7 @@ function escapeAttr(s) {
 
 function verifyKeyFor(slot) {
   const sel = slot.direction === "across" ? dictSelections.across : dictSelections.down;
-  return `${slot.id}|${slot.pattern}|${sel.path}|${sel.minScore}`;
+  return `${slot.id}|${slot.pattern}|${sel.path}|${effectiveMinScore(sel, slot.length)}`;
 }
 
 function getVerifiedMap(slot) {
@@ -825,7 +842,7 @@ async function updateOptionsPanel() {
     const data = await apiJson("/api/options", {
       pattern: s.pattern,
       dict_path: sel.path,
-      min_score: sel.minScore,
+      min_score: effectiveMinScore(sel, s.length),
       limit: OPTIONS_FETCH_LIMIT,
     });
     if (seq !== optionsRequestSeq) return; // a newer selection has since superseded this request
@@ -997,6 +1014,8 @@ async function startVerificationBatch(slot, allCandidates, target) {
         across_min_score: dictSelections.across.minScore,
         down_dict_path: dictSelections.down.path,
         down_min_score: dictSelections.down.minScore,
+        across_min_overrides: dictSelections.across.lengthOverrides,
+        down_min_overrides: dictSelections.down.lengthOverrides,
         threads: VERIFY_THREADS,
       });
     } catch (_) {
@@ -1090,6 +1109,59 @@ async function loadDictionaries() {
   }
 }
 
+// Rebuilds a direction's length-override rows from
+// dictSelections[direction].lengthOverrides and wires each one's inputs.
+// Called after any change to that object (add/remove/edit a row) since
+// there's no cheap way to patch just one row when a length key itself
+// changes -- the whole small list is rebuilt instead, same tradeoff
+// renderClues makes for the same reason.
+function renderLengthOverrides(direction) {
+  const container = document.getElementById(`${direction}-overrides`);
+  const overrides = dictSelections[direction].lengthOverrides;
+  const lengths = Object.keys(overrides)
+    .map(Number)
+    .sort((a, b) => a - b);
+
+  container.innerHTML = lengths
+    .map(
+      (len) => `
+    <div class="length-override-row" data-length="${len}">
+      <input type="number" class="override-length" value="${len}" min="1" max="50" title="Word length" />
+      letters need min score
+      <input type="number" class="override-score" value="${overrides[len]}" min="0" max="100" title="Min score for this length" />
+      <button type="button" class="remove-override" title="Remove this override">×</button>
+    </div>`
+    )
+    .join("");
+
+  container.querySelectorAll(".length-override-row").forEach((row) => {
+    const oldLength = Number(row.getAttribute("data-length"));
+    const lengthInput = row.querySelector(".override-length");
+    const scoreInput = row.querySelector(".override-score");
+
+    lengthInput.addEventListener("change", () => {
+      const newLength = parseInt(lengthInput.value || "0", 10);
+      const score = overrides[oldLength];
+      delete overrides[oldLength];
+      if (newLength > 0) overrides[newLength] = score; // last-write-wins if it collides with another row's length
+      renderLengthOverrides(direction);
+      updateOptionsPanel();
+      scheduleSave();
+    });
+    scoreInput.addEventListener("input", () => {
+      overrides[oldLength] = parseInt(scoreInput.value || "0", 10);
+      updateOptionsPanel();
+      scheduleSave();
+    });
+    row.querySelector(".remove-override").addEventListener("click", () => {
+      delete overrides[oldLength];
+      renderLengthOverrides(direction);
+      updateOptionsPanel();
+      scheduleSave();
+    });
+  });
+}
+
 function wireDictTab() {
   const acrossSel = document.getElementById("across-dict-select");
   const downSel = document.getElementById("down-dict-select");
@@ -1116,6 +1188,24 @@ function wireDictTab() {
     updateOptionsPanel();
     scheduleSave();
   });
+
+  for (const direction of ["across", "down"]) {
+    document.getElementById(`${direction}-add-override`).addEventListener("click", () => {
+      const overrides = dictSelections[direction].lengthOverrides;
+      // Starts from the shortest slot length a real crossword ever has;
+      // steps up past whatever's already overridden so a repeated click
+      // adds a new row instead of landing back on one that already
+      // exists.
+      let length = 3;
+      while (overrides[length] !== undefined) length++;
+      overrides[length] = dictSelections[direction].minScore;
+      renderLengthOverrides(direction);
+      updateOptionsPanel();
+      scheduleSave();
+    });
+  }
+  renderLengthOverrides("across");
+  renderLengthOverrides("down");
 
   document.getElementById("input-dict-upload").addEventListener("change", async (e) => {
     const file = e.target.files[0];
@@ -1301,6 +1391,8 @@ async function runFill() {
         across_min_score: dictSelections.across.minScore,
         down_dict_path: dictSelections.down.path,
         down_min_score: dictSelections.down.minScore,
+        across_min_overrides: dictSelections.across.lengthOverrides,
+        down_min_overrides: dictSelections.down.lengthOverrides,
         threads: 0,
         maximize,
       }),
@@ -1440,7 +1532,7 @@ async function diagnoseFillFailure() {
       const data = await apiJson("/api/options", {
         pattern: s.pattern,
         dict_path: sel.path,
-        min_score: sel.minScore,
+        min_score: effectiveMinScore(sel, s.length),
         limit: 1,
       });
       if (data.candidates.length === 0) {
@@ -1528,6 +1620,8 @@ function syncControlsToState() {
   document.getElementById("across-min-score").value = dictSelections.across.minScore;
   document.getElementById("down-dict-select").value = dictSelections.down.path;
   document.getElementById("down-min-score").value = dictSelections.down.minScore;
+  renderLengthOverrides("across");
+  renderLengthOverrides("down");
   document.getElementById("chk-american-style").checked = americanStyle;
   document.getElementById("symmetry-select").value = symmetryMode;
   document.getElementById("options-sort-select").value = optionsSortMode;
@@ -1552,11 +1646,21 @@ async function main() {
     // -- it may have been deleted or renamed since the save, in which case
     // loadDictionaries()'s own default (already applied above) stands.
     const knownPaths = new Set(dictionaries.map((d) => d.path));
+    // lengthOverrides defaults to {} explicitly -- a state saved before
+    // this feature existed won't have the key at all, and every reader
+    // (effectiveMinScore, renderLengthOverrides) assumes it's always a
+    // real object, never missing.
     if (saved.dictSelections?.across?.path && knownPaths.has(saved.dictSelections.across.path)) {
-      dictSelections.across = { ...saved.dictSelections.across };
+      dictSelections.across = {
+        ...saved.dictSelections.across,
+        lengthOverrides: saved.dictSelections.across.lengthOverrides || {},
+      };
     }
     if (saved.dictSelections?.down?.path && knownPaths.has(saved.dictSelections.down.path)) {
-      dictSelections.down = { ...saved.dictSelections.down };
+      dictSelections.down = {
+        ...saved.dictSelections.down,
+        lengthOverrides: saved.dictSelections.down.lengthOverrides || {},
+      };
     }
     syncControlsToState();
     selected = null;

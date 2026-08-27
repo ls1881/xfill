@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "xfill/dictionary.hpp"
@@ -138,11 +139,36 @@ struct Args {
   std::string down_dict_path;
   int across_min_score = 0;
   int down_min_score = 0;
+  // length -> min score, for lengths that need a different threshold than
+  // the direction's across_min_score/down_min_score default. See
+  // ParseLengthScoreMap for the "3:25,5:60" wire format these come from.
+  std::unordered_map<int, int> across_min_overrides;
+  std::unordered_map<int, int> down_min_overrides;
   unsigned num_threads = 0;
   bool json = false;
   bool progress = false;
   bool maximize = false;
 };
+
+// Parses "<length>:<score>,<length>:<score>,..." (e.g. "3:25,5:60") into a
+// length->score map. Empty string yields an empty map. Used for
+// --across-min-overrides/--down-min-overrides, below.
+std::unordered_map<int, int> ParseLengthScoreMap(const std::string& s) {
+  std::unordered_map<int, int> out;
+  std::stringstream ss(s);
+  std::string pair;
+  while (std::getline(ss, pair, ',')) {
+    if (pair.empty()) continue;
+    size_t colon = pair.find(':');
+    if (colon == std::string::npos) {
+      throw std::runtime_error("malformed length:score pair: " + pair);
+    }
+    int length = std::stoi(pair.substr(0, colon));
+    int score = std::stoi(pair.substr(colon + 1));
+    out[length] = score;
+  }
+  return out;
+}
 
 // New flag-based invocation, used by the GUI backend so across/down can
 // have independent dictionaries and min scores:
@@ -177,6 +203,10 @@ Args ParseFlagArgs(int argc, char** argv) {
       args.down_dict_path = next();
     } else if (flag == "--down-min") {
       args.down_min_score = std::stoi(next());
+    } else if (flag == "--across-min-overrides") {
+      args.across_min_overrides = ParseLengthScoreMap(next());
+    } else if (flag == "--down-min-overrides") {
+      args.down_min_overrides = ParseLengthScoreMap(next());
     } else if (flag == "--threads") {
       args.num_threads = static_cast<unsigned>(std::stoul(next()));
     } else if (flag == "--json") {
@@ -218,7 +248,16 @@ int main(int argc, char** argv) {
            "[--min-score <n>] [--threads <n>] [--json]\n"
            "   or: xfill_cli <grid_spec_file> --across-dict <path> "
            "--across-min <n> --down-dict <path> --down-min <n> "
+           "[--across-min-overrides <spec>] [--down-min-overrides <spec>] "
            "[--threads <n>] [--json] [--progress] [--maximize]\n"
+           "  --across-min-overrides/--down-min-overrides <spec>: per-"
+           "word-length min score thresholds, overriding --across-min/"
+           "--down-min for just those lengths.\n"
+           "  <spec> is \"<length>:<score>,<length>:<score>,...\", e.g. "
+           "\"3:25,5:60\" -- 3-letter words there need only 25, 5-letter "
+           "need 60,\n"
+           "  every other length still uses --across-min/--down-min. "
+           "Flag-mode only.\n"
            "  --progress: while solving, write a "
            "{\"progress\":true,\"nodes\":N} line to stdout roughly every "
            "150ms\n"
@@ -264,11 +303,18 @@ int main(int argc, char** argv) {
     }
 
     xfill::Grid grid = xfill::Grid::FromFile(args.grid_path);
+    xfill::MinScoreByLength across_min(args.across_min_score);
+    across_min.overrides = args.across_min_overrides;
+    xfill::MinScoreByLength down_min(args.down_min_score);
+    down_min.overrides = args.down_min_overrides;
+    bool same_across_down = args.across_dict_path == args.down_dict_path &&
+                             args.across_min_score == args.down_min_score &&
+                             args.across_min_overrides == args.down_min_overrides;
     xfill::Dictionary dict =
-        args.across_dict_path == args.down_dict_path && args.across_min_score == args.down_min_score
-            ? xfill::Dictionary::LoadFromFile(args.across_dict_path, args.across_min_score)
-            : xfill::Dictionary::LoadDual(args.across_dict_path, args.across_min_score,
-                                           args.down_dict_path, args.down_min_score);
+        same_across_down
+            ? xfill::Dictionary::LoadFromFile(args.across_dict_path, across_min)
+            : xfill::Dictionary::LoadDual(args.across_dict_path, across_min, args.down_dict_path,
+                                           down_min);
 
     if (args.maximize) {
       // Entirely separate call path from Solve()/SolveParallel() below --

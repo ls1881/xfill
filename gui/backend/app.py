@@ -108,10 +108,57 @@ def new_puzzle(width: int, height: int):
     return {"puzzle": PuzzleModel.from_puzzle(p), "slots": _slots_payload(p)}
 
 
+def _slot_word(p: Puzzle, s) -> str | None:
+    """This slot's word if every one of its cells is filled in, else
+    None -- a partially- or un-filled slot has no score to look up."""
+    letters = [p.letters[r][c] for r, c in s.cells]
+    if any(ch == EMPTY for ch in letters):
+        return None
+    return "".join(letters)
+
+
 @app.post("/api/puzzle/slots")
-def puzzle_slots(puzzle: PuzzleModel):
+def puzzle_slots(
+    puzzle: PuzzleModel,
+    across_dict_path: str | None = None,
+    down_dict_path: str | None = None,
+):
+    """`across_dict_path`/`down_dict_path` are optional: when given (the
+    frontend always passes its current dictionary selections), each fully-
+    filled slot's entry in the response gets a "score" field -- that
+    word's score in the relevant direction's dictionary (unfiltered by
+    whatever min-score threshold is currently selected there, since this
+    reports the word's real score, not whether it'd currently pass a
+    filter), omitted if the word isn't in that dictionary at all. `stats`
+    gets a parallel "avg_word_score": the mean of every scored slot found
+    this way, or None if none were.
+    """
     p = puzzle.to_puzzle()
-    return {"slots": _slots_payload(p), "stats": p.stats()}
+    word_lists: dict[str, dict_lookup.WordList] = {}
+    for direction, path in (("across", across_dict_path), ("down", down_dict_path)):
+        if path and pathlib.Path(path).exists():
+            word_lists[direction] = dict_lookup.get_word_list(path, 0)
+
+    slots = _slots_payload(p)
+    total_score = 0
+    scored_count = 0
+    for entry, s in zip(slots, p.compute_slots()):
+        word_list = word_lists.get(s.direction)
+        if word_list is None:
+            continue
+        word = _slot_word(p, s)
+        if word is None:
+            continue
+        score = word_list.score_of(word)
+        if score is None:
+            continue
+        entry["score"] = score
+        total_score += score
+        scored_count += 1
+
+    stats = p.stats()
+    stats["avg_word_score"] = round(total_score / scored_count, 1) if scored_count else None
+    return {"slots": slots, "stats": stats}
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +268,8 @@ class VerifyOptionRequest(BaseModel):
     across_min_score: int = 0
     down_dict_path: str
     down_min_score: int = 0
+    across_min_overrides: dict[int, int] = {}
+    down_min_overrides: dict[int, int] = {}
     threads: int = 2
 
 
@@ -255,6 +304,8 @@ def verify_option(req: VerifyOptionRequest):
         req.down_dict_path, req.down_min_score,
         threads=req.threads,
         kind="verify",
+        across_min_overrides=req.across_min_overrides,
+        down_min_overrides=req.down_min_overrides,
         # A bound the automatic verification batch can't itself request
         # cancellation for individually (see solve_stream's docstring) --
         # the frontend proactively cancels a whole stale batch via
@@ -296,6 +347,8 @@ class FillRequest(BaseModel):
     across_min_score: int = 0
     down_dict_path: str
     down_min_score: int = 0
+    across_min_overrides: dict[int, int] = {}
+    down_min_overrides: dict[int, int] = {}
     threads: int = 0
     maximize: bool = False
 
@@ -334,6 +387,8 @@ def fill(req: FillRequest):
                 req.down_dict_path, req.down_min_score,
                 threads=req.threads,
                 maximize=req.maximize,
+                across_min_overrides=req.across_min_overrides,
+                down_min_overrides=req.down_min_overrides,
             ):
                 if event["type"] == "improved":
                     # Not a real Solution-shaped dict (no "solved" key --

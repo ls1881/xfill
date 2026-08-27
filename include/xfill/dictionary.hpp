@@ -5,9 +5,29 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace xfill {
+
+// A minimum score threshold that can differ by word length -- e.g. "25 for
+// 3-letter words, 50 for everything else". Implicitly constructible from a
+// plain int (the common case: the same threshold for every length), so
+// every existing call site that passes a bare int keeps compiling
+// unchanged. `For(length)` is what LoadFromFile/LoadDual actually consult,
+// once per word, at load time -- see ParseWordFile in dictionary.cpp.
+struct MinScoreByLength {
+  MinScoreByLength() = default;
+  MinScoreByLength(int default_score) : default_score(default_score) {}  // NOLINT(google-explicit-constructor)
+
+  int default_score = 0;
+  std::unordered_map<int, int> overrides;  // length -> min score, for lengths that differ from default_score
+
+  int For(int length) const {
+    auto it = overrides.find(length);
+    return it != overrides.end() ? it->second : default_score;
+  }
+};
 
 // A fixed-size bitset over word indices for a given word length, sized to
 // fit the dictionary's word count for that length. Backed by a flat
@@ -190,7 +210,7 @@ class Dictionary {
   // entirely -- not just deprioritized -- so the solver can never place them.
   // AllowedMask() on a Dictionary loaded this way returns "every word" for
   // both directions -- i.e. no per-direction restriction.
-  static Dictionary LoadFromFile(const std::string& path, int min_score = 0);
+  static Dictionary LoadFromFile(const std::string& path, MinScoreByLength min_score = MinScoreByLength());
 
   // Loads two "WORD;SCORE" files -- one for across slots, one for down --
   // each with its own min_score threshold, and merges them into a single
@@ -206,8 +226,8 @@ class Dictionary {
   // that (see solver.hpp's Propagate), so restricting it once at the root
   // is sufficient to keep a direction's disallowed words out of that slot's
   // domain for the rest of the search -- no hot-path change required.
-  static Dictionary LoadDual(const std::string& across_path, int min_score_across,
-                              const std::string& down_path, int min_score_down);
+  static Dictionary LoadDual(const std::string& across_path, MinScoreByLength min_score_across,
+                              const std::string& down_path, MinScoreByLength min_score_down);
 
   bool HasLength(int length) const;
   size_t NumWordsOfLength(int length) const;

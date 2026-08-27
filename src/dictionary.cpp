@@ -29,10 +29,14 @@ struct ParsedEntry {
 
 // Parses a "WORD;SCORE" file (semicolon-delimited; a missing/unparseable
 // score defaults to 0) into per-length lists, dropping entries below
-// `min_score` and any entry that isn't pure A-Z after uppercasing (see the
-// UBSan note below). Shared by LoadFromFile and LoadDual.
+// `min_score`'s threshold *for that entry's own length* and any entry
+// that isn't pure A-Z after uppercasing (see the UBSan note below). The
+// score check has to happen after the word is normalized (trimmed,
+// uppercased) and its length is known -- min_score.For() needs that
+// length, whereas the old single-int threshold didn't care. Shared by
+// LoadFromFile and LoadDual.
 std::unordered_map<int, std::vector<ParsedEntry>> ParseWordFile(
-    const std::string& path, int min_score) {
+    const std::string& path, const MinScoreByLength& min_score) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("could not open dictionary: " + path);
 
@@ -53,7 +57,6 @@ std::unordered_map<int, std::vector<ParsedEntry>> ParseWordFile(
         score = 0;
       }
     }
-    if (score < min_score) continue;
     word = Trim(word);
     if (word.empty()) continue;
     for (char& c : word) {
@@ -70,7 +73,9 @@ std::unordered_map<int, std::vector<ParsedEntry>> ParseWordFile(
                                     [](char c) { return c >= 'A' && c <= 'Z'; });
     if (!all_letters) continue;
 
-    by_length[static_cast<int>(word.size())].push_back({std::move(word), score});
+    int length = static_cast<int>(word.size());
+    if (score < min_score.For(length)) continue;
+    by_length[length].push_back({std::move(word), score});
   }
   return by_length;
 }
@@ -121,7 +126,7 @@ void Dictionary::BuildDerivedIndexes() {
   }
 }
 
-Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
+Dictionary Dictionary::LoadFromFile(const std::string& path, MinScoreByLength min_score) {
   std::unordered_map<int, std::vector<ParsedEntry>> parsed = ParseWordFile(path, min_score);
 
   int max_length = 0;
@@ -155,8 +160,8 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, int min_score) {
   return dict;
 }
 
-Dictionary Dictionary::LoadDual(const std::string& across_path, int min_score_across,
-                                 const std::string& down_path, int min_score_down) {
+Dictionary Dictionary::LoadDual(const std::string& across_path, MinScoreByLength min_score_across,
+                                 const std::string& down_path, MinScoreByLength min_score_down) {
   std::unordered_map<int, std::vector<ParsedEntry>> across =
       ParseWordFile(across_path, min_score_across);
   std::unordered_map<int, std::vector<ParsedEntry>> down =

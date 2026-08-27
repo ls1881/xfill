@@ -13,7 +13,7 @@ import pathlib
 import subprocess
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from grid_model import Puzzle
 
@@ -45,19 +45,43 @@ def _locked_words_by_direction(puzzle: Puzzle) -> dict[str, set[str]]:
     return words
 
 
-def _augment_dict(original_path: str, locked_words: set[str], min_score: int) -> tuple[str, bool]:
+def _format_min_overrides(overrides: dict[int, int]) -> str:
+    """"<length>:<score>,<length>:<score>,..." -- the wire format
+    main.cpp's --across-min-overrides/--down-min-overrides parse (see
+    ParseLengthScoreMap in main.cpp)."""
+    return ",".join(f"{length}:{score}" for length, score in overrides.items())
+
+
+def _min_score_resolver(default_min_score: int, overrides: dict[int, int] | None) -> Callable[[int], int]:
+    """`overrides` (length -> min score) takes priority over
+    `default_min_score` for the lengths it lists, same rule the C++ engine
+    applies (see MinScoreByLength::For in dictionary.hpp)."""
+    overrides = overrides or {}
+    return lambda length: overrides.get(length, default_min_score)
+
+
+def _augment_dict(
+    original_path: str, locked_words: set[str], min_score_for: Callable[[int], int]
+) -> tuple[str, bool]:
     """Returns a path to solve with for this direction, plus whether it's a
     temp file the caller must clean up. If there's nothing to inject, this
     is just `original_path` unchanged -- the common case, so no extra I/O
-    or temp file when nothing on the grid needs it."""
+    or temp file when nothing on the grid needs it.
+
+    `min_score_for(length)`: since `locked_words` can span multiple word
+    lengths, and per-length min-score overrides mean different lengths can
+    have different thresholds, "already clears the threshold" has to be
+    checked per word, at that word's own length -- there's no single
+    scalar that's correct for every locked word at once.
+    """
     if not locked_words:
         return original_path, False
     with open(original_path, encoding="utf-8", errors="replace") as f:
         original_content = f.read()
     # A word already present is only "already fine" if it would actually
-    # clear the chosen min_score -- present-but-below-threshold is exactly
-    # the case a low-scored real word typed into the grid needs this same
-    # override for, not just an absent one.
+    # clear its length's min_score -- present-but-below-threshold is
+    # exactly the case a low-scored real word typed into the grid needs
+    # this same override for, not just an absent one.
     already_included = set()
     for line in original_content.splitlines():
         if not line.strip():
@@ -67,8 +91,9 @@ def _augment_dict(original_path: str, locked_words: set[str], min_score: int) ->
             score = int(score_s)
         except ValueError:
             score = 0
-        if score >= min_score:
-            already_included.add(word.strip().upper())
+        word = word.strip().upper()
+        if score >= min_score_for(len(word)):
+            already_included.add(word)
     to_add = locked_words - already_included
     if not to_add:
         return original_path, False
@@ -146,6 +171,8 @@ def solve_stream(
     kind: str = "fill",
     timeout_seconds: float | None = None,
     maximize: bool = False,
+    across_min_overrides: dict[int, int] | None = None,
+    down_min_overrides: dict[int, int] | None = None,
 ) -> Iterator[dict]:
     """Yields {"type": "progress", "nodes": N} dicts as xfill_cli reports
     them (see main.cpp's --progress), then exactly one final dict:
@@ -171,6 +198,13 @@ def solve_stream(
     because the caller cancelled it (same cancel_current_fill() as the
     default search; there's deliberately no separate cancel path for
     this mode) -- not necessarily a proven global optimum.
+
+    `across_min_overrides`/`down_min_overrides`: length -> min score,
+    for word lengths that need a different threshold than
+    across_min_score/down_min_score's default (see main.cpp's
+    --across-min-overrides/--down-min-overrides and
+    MinScoreByLength in dictionary.hpp). A length not listed here still
+    uses the direction's plain min_score.
 
     `kind`: which tracked-process set this call's subprocess belongs to --
     "fill" (the default) is cancel_current_fill()'s (the Cancel button);
@@ -216,8 +250,10 @@ def solve_stream(
     # to_grid_spec) then pin the slot to exactly this word during solving,
     # the same mechanism a partially-filled slot already relies on.
     locked = _locked_words_by_direction(puzzle)
-    across_path, across_is_temp = _augment_dict(across_dict_path, locked["across"], across_min_score)
-    down_path, down_is_temp = _augment_dict(down_dict_path, locked["down"], down_min_score)
+    across_min_for = _min_score_resolver(across_min_score, across_min_overrides)
+    down_min_for = _min_score_resolver(down_min_score, down_min_overrides)
+    across_path, across_is_temp = _augment_dict(across_dict_path, locked["across"], across_min_for)
+    down_path, down_is_temp = _augment_dict(down_dict_path, locked["down"], down_min_for)
 
     proc: subprocess.Popen | None = None
     watchdog: threading.Timer | None = None
@@ -233,6 +269,10 @@ def solve_stream(
             "--json",
             "--progress",
         ]
+        if across_min_overrides:
+            cmd += ["--across-min-overrides", _format_min_overrides(across_min_overrides)]
+        if down_min_overrides:
+            cmd += ["--down-min-overrides", _format_min_overrides(down_min_overrides)]
         if maximize:
             cmd.append("--maximize")
         try:
@@ -318,6 +358,8 @@ def solve_blocking(
     kind: str = "fill",
     timeout_seconds: float | None = None,
     maximize: bool = False,
+    across_min_overrides: dict[int, int] | None = None,
+    down_min_overrides: dict[int, int] | None = None,
 ) -> dict:
     """Runs solve_stream to completion and returns just its final "done"/
     "cancelled"/"error" event, discarding "progress" and (if `maximize`)
@@ -328,6 +370,7 @@ def solve_blocking(
     for event in solve_stream(
         puzzle, across_dict_path, across_min_score, down_dict_path, down_min_score,
         threads=threads, kind=kind, timeout_seconds=timeout_seconds, maximize=maximize,
+        across_min_overrides=across_min_overrides, down_min_overrides=down_min_overrides,
     ):
         if event["type"] not in ("progress", "improved"):
             final = event
