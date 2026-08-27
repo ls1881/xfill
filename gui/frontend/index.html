@@ -59,7 +59,7 @@
     </fieldset>
 
     <div class="toolbar-group">
-      <button id="btn-fill" class="primary" title="⌘F / Ctrl+F">Fill ▶</button>
+      <button id="btn-fill" class="primary" title="⌘F / Ctrl+F — fills just the region connected to the selected cell; the whole grid if nothing's selected">Fill ▶</button>
       <button id="btn-cancel-fill" class="danger" title="Esc" hidden>Cancel</button>
       <label id="maximize-toggle-label" title="Instead of stopping at the first valid fill, keep searching for higher-scoring ones and show the best found so far. Slower, and usually needs Cancel to stop it.">
         <input type="checkbox" id="maximize-toggle" />
@@ -80,7 +80,7 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it. Press “.” to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears the current letter and steps back one press at a time, then removes the block behind it on the next press from an already-empty cell. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills the puzzle; ⌘Z / Ctrl+Z undoes.</div>
+      <div id="grid-hint">Click a cell to select it. Press “.” to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears the current letter and steps back one press at a time, then removes the block behind it on the next press from an already-empty cell. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills just the region connected to the selected cell (the whole grid if nothing's selected) — letters shown in gray-red had no real alternative once solved. ⌘Z / Ctrl+Z undoes.</div>
     </section>
 
     <aside id="side-panel">

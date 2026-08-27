@@ -224,6 +224,7 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
     std::vector<WordBitset> attempt_domains = domains;
     std::vector<WordBitset> attempt_used_by_length = used_by_length;
     std::vector<bool> assigned(grid_.slots().size(), false);
+    std::vector<bool> forced(grid_.slots().size(), false);
     Trail trail;
 
     component_remaining_.resize(slots_by_component_.size());
@@ -232,7 +233,7 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
     }
 
     auto result = Backtrack(attempt_domains, attempt_used_by_length, assigned,
-                             trail, crossing_weights);
+                             trail, crossing_weights, forced);
     if (result) return result;
     if (!aborted_) return std::nullopt;
 
@@ -1007,7 +1008,8 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
                                            std::vector<WordBitset>& used_by_length,
                                            std::vector<bool>& assigned,
                                            Trail& trail,
-                                           CrossingWeights& crossing_weights) {
+                                           CrossingWeights& crossing_weights,
+                                           std::vector<bool>& forced) {
   if (aborted_) return std::nullopt;
   // Checked once per node, same cadence as aborted_ above (which this
   // deliberately mimics -- setting aborted_ here, rather than a separate
@@ -1026,8 +1028,16 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights,
                                &domain_count);
   if (slot == -1) {
-    return ExtractSolution(domains);
+    return ExtractSolution(domains, &forced);
   }
+
+  // domain_count came straight from SelectBranchSlot's popcount of this
+  // slot's (domain & ~used) -- exactly 1 means every word but one was
+  // already ruled out by crossing propagation before this slot was even
+  // chosen for branching, i.e. this assignment has no real alternative.
+  // See forced's own doc comment (solver.hpp) for why this plain,
+  // unconditional overwrite (no trail/Undo involvement) is still correct.
+  forced[static_cast<size_t>(slot)] = (domain_count == 1);
 
   // See kWordShuffleRestartThreshold: word-choice shuffling (the large-
   // domain branch below) only kicks in once plain slot-choice
@@ -1081,7 +1091,7 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
     if (Assign(slot, idx, domains, used_by_length, assigned, trail,
                crossing_weights)) {
       auto result = Backtrack(domains, used_by_length, assigned, trail,
-                               crossing_weights);
+                               crossing_weights, forced);
       if (result) return result;
     }
     Undo(slot, domains, used_by_length, assigned, trail, domain_mark, used_mark);
@@ -1216,7 +1226,8 @@ std::optional<Solution> Solver::Backtrack(std::vector<WordBitset>& domains,
   return std::nullopt;
 }
 
-Solution Solver::ExtractSolution(const std::vector<WordBitset>& domains) const {
+Solution Solver::ExtractSolution(const std::vector<WordBitset>& domains,
+                                  const std::vector<bool>* forced) const {
   Solution solution;
   for (const Slot& slot : grid_.slots()) {
     // Every slot passed through Assign() by the time the search concludes,
@@ -1224,6 +1235,9 @@ Solution Solver::ExtractSolution(const std::vector<WordBitset>& domains) const {
     auto bits = domains[static_cast<size_t>(slot.id)].SetBits();
     size_t idx = bits.empty() ? 0 : bits.front();
     solution.assignment[slot.id] = dict_.WordsOfLength(slot.length)[idx];
+    if (forced != nullptr && (*forced)[static_cast<size_t>(slot.id)]) {
+      solution.forced_slot_ids.insert(slot.id);
+    }
   }
   return solution;
 }

@@ -7,6 +7,7 @@
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "xfill/dictionary.hpp"
@@ -16,6 +17,17 @@ namespace xfill {
 
 struct Solution {
   std::unordered_map<int, std::string> assignment;  // slot id -> word
+  // Slot ids whose word had no real alternative at the moment they were
+  // assigned: constraint propagation from crossings had already narrowed
+  // that slot's domain to exactly one remaining candidate, so the solver
+  // didn't choose among options there, it was determined. Only ever
+  // populated by the default (Solve/SolveParallel) search -- see
+  // Backtrack's own comment for how it's derived from domain_count. The
+  // maximize-score search doesn't populate this (ExtractSolution's
+  // `forced` parameter defaults to null there), since "forced" isn't a
+  // meaningful concept for a search that's actively hunting for the
+  // highest-scoring completion rather than just any valid one.
+  std::unordered_set<int> forced_slot_ids;
 };
 
 struct SolverStats {
@@ -535,10 +547,20 @@ class Solver {
             std::vector<bool>& assigned, Trail& trail, size_t domain_mark,
             size_t used_mark) const;
 
+  // `forced[slot]` is set to true right when `slot` is selected for
+  // branching, IF its domain (via SelectBranchSlot's domain_count) was
+  // already down to exactly one candidate at that moment -- i.e. it was
+  // determined by propagation, not chosen among alternatives. Written
+  // unconditionally into this shared, non-trailed vector (no Undo
+  // support needed): a slot that later gets backtracked and re-assigned
+  // differently just has this overwritten again, so by the time a
+  // solution is actually found, every entry reflects that FINAL
+  // assignment's own forced-ness, which is the only one that matters.
   std::optional<Solution> Backtrack(std::vector<WordBitset>& domains,
                                      std::vector<WordBitset>& used_by_length,
                                      std::vector<bool>& assigned, Trail& trail,
-                                     CrossingWeights& crossing_weights);
+                                     CrossingWeights& crossing_weights,
+                                     std::vector<bool>& forced);
 
   // Records a nogood from the current assignment: every currently-assigned
   // slot's (slot, word) pair, taken together, is infeasible. Sound to call
@@ -564,8 +586,13 @@ class Solver {
                                           const std::vector<bool>& assigned) const;
 
   // Reads off the final word for every slot once Backtrack has assigned
-  // them all (each domain is by then a true singleton).
-  Solution ExtractSolution(const std::vector<WordBitset>& domains) const;
+  // them all (each domain is by then a true singleton). `forced`, when
+  // given, populates the returned Solution's forced_slot_ids from it
+  // (see Backtrack's own comment on the vector it passes here) -- null
+  // (the default) leaves forced_slot_ids empty, used by callers (the
+  // maximize-score search) where "forced" isn't meaningful.
+  Solution ExtractSolution(const std::vector<WordBitset>& domains,
+                            const std::vector<bool>* forced = nullptr) const;
 
   // Builds every slot's initial domain (direction-restricted via
   // Dictionary::AllowedMask, then narrowed by any pre-filled letters) and

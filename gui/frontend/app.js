@@ -46,6 +46,11 @@ const DOUBLE_CLICK_MS = 350;
 let undoStack = []; // deep-cloned puzzle snapshots, most recent last
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
+// "r,c" keys of a successful Fill's letters that had no real alternative
+// -- see main.cpp's ForcedCells/Solution::forced_slot_ids -- vs. cells
+// the solver was actually free to choose among several valid words for.
+// Cleared on the next edit, same lifecycle as fillFailedCells.
+let forcedCells = new Set();
 
 // Per-candidate solve-feasibility checks for the Options panel (see
 // updateOptionsPanel), cached by (slot, pattern, dictionary) key so
@@ -249,12 +254,17 @@ function snapshotForUndo() {
   undoStack.push(JSON.parse(JSON.stringify(puzzle)));
   if (undoStack.length > MAX_UNDO) undoStack.shift();
   clearFillFailedHighlight();
+  clearForcedCells();
   clearPreview();
   invalidateVerificationCache();
 }
 
 function clearFillFailedHighlight() {
   if (fillFailedCells.size) fillFailedCells = new Set();
+}
+
+function clearForcedCells() {
+  if (forcedCells.size) forcedCells = new Set();
 }
 
 // A previewed candidate's grid is only meaningful relative to the exact
@@ -548,6 +558,7 @@ function renderGrid() {
       if (selected && selected.row === r && selected.col === c) cell.classList.add("selected");
       if (styleIssues.has(key) || symmetryIssues.has(key)) cell.classList.add("style-issue");
       if (fillFailedCells.has(key)) cell.classList.add("fill-failed");
+      if (forcedCells.has(key)) cell.classList.add("forced-letter");
 
       if (!blocked) {
         const num = numbers.get(`${r},${c}`);
@@ -1857,6 +1868,76 @@ function setCancelButtonVisible(visible) {
   document.getElementById("btn-cancel-fill").hidden = !visible;
 }
 
+// The set of "r,c" keys reachable from the currently selected cell's
+// slot(s) via crossings (BFS over the crossing-adjacency graph slots
+// form) -- i.e. everything Fill should actually touch when run from
+// here, leaving the rest of the grid untouched. Returns null (meaning
+// "no scope -- the whole grid") if no cell is selected, or if the
+// selected cell isn't part of any real slot at all (e.g. an isolated
+// gap too short to be one) -- there's nothing to scope to in either
+// case. Starts from BOTH the across and down slot at the selected cell
+// (not just whichever direction the cursor is currently facing), since
+// the connected region physically includes both from that cell.
+function connectedFillScope() {
+  if (!selected) return null;
+  const key = (r, c) => `${r},${c}`;
+  const startKey = key(selected.row, selected.col);
+
+  const slotsByCell = new Map();
+  for (const s of slots) {
+    for (const [r, c] of s.cells) {
+      const k = key(r, c);
+      if (!slotsByCell.has(k)) slotsByCell.set(k, []);
+      slotsByCell.get(k).push(s);
+    }
+  }
+
+  const startSlots = slotsByCell.get(startKey);
+  if (!startSlots || !startSlots.length) return null;
+
+  const visitedSlotIds = new Set();
+  const queue = [...startSlots];
+  while (queue.length) {
+    const s = queue.pop();
+    if (visitedSlotIds.has(s.id)) continue;
+    visitedSlotIds.add(s.id);
+    for (const [r, c] of s.cells) {
+      for (const other of slotsByCell.get(key(r, c)) || []) {
+        if (!visitedSlotIds.has(other.id)) queue.push(other);
+      }
+    }
+  }
+
+  const scopeCells = new Set();
+  for (const s of slots) {
+    if (!visitedSlotIds.has(s.id)) continue;
+    for (const [r, c] of s.cells) scopeCells.add(key(r, c));
+  }
+  return scopeCells;
+}
+
+// Writes `resultLetters` (a row-string array from a /api/fill response's
+// puzzle.letters, or the plain-string rows FilledGridRows produces) into
+// the REAL puzzle.letters, but only for cells inside `scopeCells` (or
+// every open cell, if `scopeCells` is null -- no scoping, i.e. the whole
+// grid was the request's scope). Cells outside the scope were
+// artificially blocked in the request actually sent to the solver (see
+// runFill), so the response's letters there are meaningless "#"
+// placeholders standing in for a block, not real solver output --
+// merging instead of wholesale-replacing puzzle (the old, unscoped
+// behavior) is what keeps those from silently overwriting cells Fill
+// was never asked to touch.
+function applyScopedResultLetters(resultLetters, scopeCells) {
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      if (puzzle.blocks[r][c]) continue;
+      if (scopeCells && !scopeCells.has(`${r},${c}`)) continue;
+      const ch = resultLetters[r][c];
+      if (ch && ch !== "#") puzzle.letters[r][c] = ch;
+    }
+  }
+}
+
 // Shared by the Fill button and the Cmd+F / Ctrl+F shortcut. Streams
 // newline-delimited JSON from POST /api/fill (see app.py's docstring on
 // that endpoint) instead of awaiting one parsed response: a plain
@@ -1869,9 +1950,16 @@ async function runFill() {
     return;
   }
   const maximize = document.getElementById("maximize-toggle").checked;
+  // Scoped to the connected region around the cursor (via crossings) if
+  // a cell is selected; null ("no scope", the whole grid) if not -- see
+  // connectedFillScope's own doc comment for exactly what "connected"
+  // means here and why blocking everything outside it in the REQUEST is
+  // safe (never changes any in-scope slot's own shape).
+  const scopeCells = connectedFillScope();
 
   filling = true;
   clearFillFailedHighlight();
+  clearForcedCells();
   // A leftover preview (from clicking a verified option earlier without
   // committing or navigating away -- see setPreview/clearPreview) is only
   // ever a full, real solved grid, so it always spells out complete
@@ -1905,12 +1993,26 @@ async function runFill() {
   const tickInterval = setInterval(showProgress, 200);
 
   const beforeFill = JSON.parse(JSON.stringify(puzzle));
+  // Everything outside the scope is blocked in THIS request only -- the
+  // real puzzle (and beforeFill, captured above) is untouched. Every
+  // in-scope slot's own cells are unaffected: scopeCells is closed under
+  // crossings by construction, so no in-scope slot shares a cell with
+  // anything now being blocked.
+  let requestPuzzle = puzzle;
+  if (scopeCells) {
+    requestPuzzle = JSON.parse(JSON.stringify(puzzle));
+    for (let r = 0; r < requestPuzzle.height; r++) {
+      for (let c = 0; c < requestPuzzle.width; c++) {
+        if (!scopeCells.has(`${r},${c}`)) requestPuzzle.blocks[r][c] = true;
+      }
+    }
+  }
   try {
     const resp = await fetch("/api/fill", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        puzzle,
+        puzzle: requestPuzzle,
         across_dict_path: dictSelections.across.path,
         across_min_score: dictSelections.across.minScore,
         down_dict_path: dictSelections.down.path,
@@ -1968,7 +2070,7 @@ async function runFill() {
             if (undoStack.length > MAX_UNDO) undoStack.shift();
           }
           bestScore = event.score;
-          puzzle = event.puzzle;
+          applyScopedResultLetters(event.puzzle.letters, scopeCells);
           renderGrid(); // cheap, local; also autosaves (see renderGrid's scheduleSave call) -- the "and save it" half of this feature
           showProgress();
         } else {
@@ -1986,13 +2088,17 @@ async function runFill() {
           undoStack.push(beforeFill);
           if (undoStack.length > MAX_UNDO) undoStack.shift();
         } // maximize: already pushed above, on the first "improved" event
-        puzzle = finalEvent.puzzle;
+        applyScopedResultLetters(finalEvent.puzzle.letters, scopeCells);
+        // Absent (defaults to []) in maximize mode -- see app.py's /api/fill
+        // docstring -- where "forced" isn't a meaningful concept.
+        forcedCells = new Set((finalEvent.forced_cells || []).map(([r, c]) => `${r},${c}`));
         await refreshSlotsAndStats();
         renderGrid();
+        const scopeNote = scopeCells ? " (connected region only)" : "";
         setStatus(
-          maximize
+          (maximize
             ? `Proven optimal — score ${st.score.toLocaleString()} (${st.time_seconds.toFixed(2)}s, ${st.nodes.toLocaleString()} nodes)`
-            : `Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`,
+            : `Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`) + scopeNote,
           "ok"
         );
       } else {

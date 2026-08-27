@@ -83,6 +83,43 @@ void WriteJsonGridArray(std::ostream& out, const xfill::Grid& grid, const xfill:
   out << "]";
 }
 
+// [row, col] pairs for every cell belonging to a forced slot (see
+// Solution::forced_slot_ids) -- a slot whose word had no real
+// alternative when it was assigned. A cell shared by a forced across
+// slot and a non-forced down slot (or vice versa) still counts as
+// forced: at least one direction had no choice there, so the letter had
+// to be what it is regardless of the other direction's freedom.
+// Deduplicated (a crossing cell belongs to two slots, either of which
+// could independently mark it) and left in whatever order forced_slot_ids
+// iterates in -- the caller (WriteJsonForcedCells) doesn't need any
+// particular order, just the full set.
+std::vector<std::pair<int, int>> ForcedCells(const xfill::Grid& grid,
+                                              const xfill::Solution& solution) {
+  int width = grid.width();
+  std::vector<std::pair<int, int>> cells;
+  std::vector<bool> seen(static_cast<size_t>(width) * static_cast<size_t>(grid.height()), false);
+  for (const auto& slot : grid.slots()) {
+    if (solution.forced_slot_ids.find(slot.id) == solution.forced_slot_ids.end()) continue;
+    for (int cell : slot.cells) {
+      if (seen[static_cast<size_t>(cell)]) continue;
+      seen[static_cast<size_t>(cell)] = true;
+      cells.emplace_back(cell / width, cell % width);
+    }
+  }
+  return cells;
+}
+
+void WriteJsonForcedCells(std::ostream& out, const xfill::Grid& grid,
+                           const xfill::Solution& solution) {
+  out << "[";
+  std::vector<std::pair<int, int>> cells = ForcedCells(grid, solution);
+  for (size_t i = 0; i < cells.size(); ++i) {
+    if (i != 0) out << ",";
+    out << "[" << cells[i].first << "," << cells[i].second << "]";
+  }
+  out << "]";
+}
+
 void WriteJsonResult(std::ostream& out, const xfill::Grid& grid,
                       const xfill::ParallelSolveResult& result, double seconds) {
   out << "{";
@@ -97,6 +134,12 @@ void WriteJsonResult(std::ostream& out, const xfill::Grid& grid,
     WriteJsonGridArray(out, grid, *result.solution);
   } else {
     out << "null";
+  }
+  out << ",\"forced_cells\":";
+  if (result.solution) {
+    WriteJsonForcedCells(out, grid, *result.solution);
+  } else {
+    out << "[]";
   }
   out << "}";
 }

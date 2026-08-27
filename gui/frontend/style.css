@@ -283,6 +283,20 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   background: #6b1f22 !important;
   color: #ffd7d7;
 }
+/* A committed Fill letter that had no real alternative -- constraint
+   propagation from crossings had already narrowed it to exactly one
+   candidate before the solver even reached it, unlike an ordinary
+   letter it picked among several valid options for (no special
+   styling). Distinct from BOTH .fill-failed (a genuine problem, not
+   this -- a forced letter is a normal, successfully-placed one) and
+   .preview-letter (a not-yet-committed suggestion -- this is a REAL,
+   already-placed letter). A grayish red, not the solid alarm red
+   .fill-failed uses, since this is informational, not a problem.
+   Cleared on the next edit (see clearForcedCells). */
+.cell.forced-letter:not(.block) {
+  background: #d9c3c3;
+  color: #6b3a3a;
+}
 .cell .num {
   position: absolute;
   top: 1px;

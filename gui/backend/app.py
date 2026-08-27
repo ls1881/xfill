@@ -480,6 +480,12 @@ def fill(req: FillRequest):
                             k: event.get(k)
                             for k in ("nodes", "backtracks", "restarts", "time_seconds", "threads")
                         },
+                        # [row, col] pairs whose letter had no real
+                        # alternative -- see main.cpp's ForcedCells. Only
+                        # ever populated by the default (non-maximize)
+                        # search; absent (defaults to []) in maximize mode,
+                        # where "forced" isn't a meaningful concept.
+                        "forced_cells": event.get("forced_cells", []),
                     }
                     if req.maximize:
                         payload["stats"]["score"] = event.get("score")
