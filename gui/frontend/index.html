@@ -46,6 +46,10 @@
     <div class="toolbar-group">
       <button id="btn-fill" class="primary" title="⌘F / Ctrl+F">Fill ▶</button>
       <button id="btn-cancel-fill" class="danger" title="Esc" hidden>Cancel</button>
+      <label id="maximize-toggle-label" title="Instead of stopping at the first valid fill, keep searching for higher-scoring ones and show the best found so far. Slower, and usually needs Cancel to stop it.">
+        <input type="checkbox" id="maximize-toggle" />
+        Maximize score
+      </label>
     </div>
 
     <div id="status-line"><span id="fill-spinner" class="spinner" hidden></span><span id="status-text"></span></div>

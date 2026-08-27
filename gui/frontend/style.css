@@ -51,6 +51,17 @@ body {
 
 .toolbar-group { display: flex; align-items: center; gap: 8px; }
 
+#maximize-toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+#maximize-toggle-label input { cursor: pointer; }
+
 button {
   background: var(--bg-panel-2);
   color: var(--text);
@@ -384,6 +395,16 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
    completion; click again to commit it (see onOptionClick). */
 .option-row.verified { border: 1px solid var(--good); }
 .option-row.verified .word { font-weight: 700; color: var(--good); }
+
+.show-more-btn {
+  width: 100%;
+  margin-top: 2px;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+.show-more-btn:hover { border-color: var(--accent); color: var(--text); }
 
 #tab-dict select, #tab-dict input, #tab-info input, #tab-info textarea {
   width: 100%;

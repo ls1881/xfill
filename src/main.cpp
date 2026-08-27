@@ -1,3 +1,4 @@
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -7,6 +8,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "xfill/dictionary.hpp"
@@ -70,6 +72,16 @@ std::string JsonEscape(const std::string& s) {
   return out;
 }
 
+void WriteJsonGridArray(std::ostream& out, const xfill::Grid& grid, const xfill::Solution& solution) {
+  out << "[";
+  std::vector<std::string> rows = FilledGridRows(grid, solution);
+  for (size_t i = 0; i < rows.size(); ++i) {
+    if (i != 0) out << ",";
+    out << "\"" << JsonEscape(rows[i]) << "\"";
+  }
+  out << "]";
+}
+
 void WriteJsonResult(std::ostream& out, const xfill::Grid& grid,
                       const xfill::ParallelSolveResult& result, double seconds) {
   out << "{";
@@ -81,13 +93,39 @@ void WriteJsonResult(std::ostream& out, const xfill::Grid& grid,
   out << "\"threads\":" << result.num_threads << ",";
   out << "\"grid\":";
   if (result.solution) {
-    out << "[";
-    std::vector<std::string> rows = FilledGridRows(grid, *result.solution);
-    for (size_t i = 0; i < rows.size(); ++i) {
-      if (i != 0) out << ",";
-      out << "\"" << JsonEscape(rows[i]) << "\"";
-    }
-    out << "]";
+    WriteJsonGridArray(out, grid, *result.solution);
+  } else {
+    out << "null";
+  }
+  out << "}";
+}
+
+// One line per improvement found by --maximize, streamed to stdout as soon
+// as it's found (this is an anytime search -- see Solver::MaximizeScoreParallel's
+// doc comment). The "type" key distinguishes this from both the "progress"
+// lines (which have a "progress" key instead) and the final "done" line
+// below, so a line-by-line NDJSON reader (the GUI backend) can tell all
+// three apart without ambiguity.
+void WriteJsonImprovement(std::ostream& out, const xfill::Grid& grid, const xfill::Solution& solution,
+                           int64_t score) {
+  out << "{\"type\":\"improved\",\"score\":" << score << ",\"grid\":";
+  WriteJsonGridArray(out, grid, solution);
+  out << "}";
+}
+
+void WriteJsonMaximizeResult(std::ostream& out, const xfill::Grid& grid,
+                              const std::optional<xfill::Solution>& best_solution, int64_t best_score,
+                              uint64_t nodes, double seconds, unsigned num_threads) {
+  out << "{";
+  out << "\"type\":\"done\",";
+  out << "\"solved\":" << (best_solution ? "true" : "false") << ",";
+  out << "\"score\":" << (best_solution ? std::to_string(best_score) : "null") << ",";
+  out << "\"nodes\":" << nodes << ",";
+  out << "\"time_seconds\":" << seconds << ",";
+  out << "\"threads\":" << num_threads << ",";
+  out << "\"grid\":";
+  if (best_solution) {
+    WriteJsonGridArray(out, grid, *best_solution);
   } else {
     out << "null";
   }
@@ -103,6 +141,7 @@ struct Args {
   unsigned num_threads = 0;
   bool json = false;
   bool progress = false;
+  bool maximize = false;
 };
 
 // New flag-based invocation, used by the GUI backend so across/down can
@@ -144,6 +183,8 @@ Args ParseFlagArgs(int argc, char** argv) {
       args.json = true;
     } else if (flag == "--progress") {
       args.progress = true;
+    } else if (flag == "--maximize") {
+      args.maximize = true;
     } else {
       throw std::runtime_error("unknown flag: " + flag);
     }
@@ -177,12 +218,26 @@ int main(int argc, char** argv) {
            "[--min-score <n>] [--threads <n>] [--json]\n"
            "   or: xfill_cli <grid_spec_file> --across-dict <path> "
            "--across-min <n> --down-dict <path> --down-min <n> "
-           "[--threads <n>] [--json] [--progress]\n"
+           "[--threads <n>] [--json] [--progress] [--maximize]\n"
            "  --progress: while solving, write a "
            "{\"progress\":true,\"nodes\":N} line to stdout roughly every "
            "150ms\n"
            "  (N = total nodes visited across every worker so far), "
            "ahead of the final result line. Flag-mode only.\n"
+           "  --maximize: run the separate branch-and-bound score-"
+           "maximizing search instead of the default first-solution "
+           "search.\n"
+           "  This is an anytime algorithm: every time it finds a "
+           "complete fill with a higher total score than any found so "
+           "far,\n"
+           "  it streams a {\"type\":\"improved\",\"score\":N,\"grid\":"
+           "[...]} line immediately, then keeps searching for something "
+           "better\n"
+           "  until it either proves optimality or is killed by the "
+           "caller. A final {\"type\":\"done\",...} line reports the "
+           "best fill found.\n"
+           "  Always streams NDJSON to stdout regardless of --json. "
+           "Flag-mode only.\n"
            "  num_threads: 0 (default) = "
            "std::thread::hardware_concurrency(); 1 = single-threaded,\n"
            "  for reproducible timing or comparing against a build "
@@ -214,6 +269,46 @@ int main(int argc, char** argv) {
             ? xfill::Dictionary::LoadFromFile(args.across_dict_path, args.across_min_score)
             : xfill::Dictionary::LoadDual(args.across_dict_path, args.across_min_score,
                                            args.down_dict_path, args.down_min_score);
+
+    if (args.maximize) {
+      // Entirely separate call path from Solve()/SolveParallel() below --
+      // Solver::MaximizeScoreParallel is its own branch-and-bound search
+      // (see its doc comment in solver.hpp), so choosing --maximize here
+      // costs the default (untoggled) search path nothing.
+      std::atomic<uint64_t> last_nodes{0};
+      std::function<void(uint64_t)> on_progress = [&](uint64_t nodes) {
+        last_nodes.store(nodes, std::memory_order_relaxed);
+        if (args.progress) {
+          std::cout << "{\"progress\":true,\"nodes\":" << nodes << "}\n";
+          std::cout.flush();
+        }
+      };
+
+      int64_t best_score = 0;
+      auto on_improved = [&](const xfill::Solution& sol, int64_t score) {
+        best_score = score;
+        WriteJsonImprovement(std::cout, grid, sol, score);
+        std::cout << "\n";
+        std::cout.flush();
+      };
+
+      auto start = std::chrono::steady_clock::now();
+      std::optional<xfill::Solution> best = xfill::Solver::MaximizeScoreParallel(
+          grid, dict, args.num_threads, on_improved, /*cancel=*/nullptr, on_progress);
+      auto end = std::chrono::steady_clock::now();
+      double seconds = std::chrono::duration<double>(end - start).count();
+
+      unsigned reported_threads = args.num_threads;
+      if (reported_threads == 0) {
+        reported_threads = std::thread::hardware_concurrency();
+        if (reported_threads == 0) reported_threads = 1;
+      }
+
+      WriteJsonMaximizeResult(std::cout, grid, best, best_score, last_nodes.load(), seconds,
+                               reported_threads);
+      std::cout << "\n";
+      return best ? 0 : 1;
+    }
 
     std::function<void(uint64_t)> on_progress;
     if (args.progress) {

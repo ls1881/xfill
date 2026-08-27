@@ -109,12 +109,9 @@ Solver::Solver(const Grid& grid, const Dictionary& dict)
   }
 }
 
-std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
-                                       const std::atomic<bool>* cancel,
-                                       bool unlimited_budget) {
-  cancel_ = cancel;
-  attempt_offset_ = attempt_offset;
-  std::vector<WordBitset> domains(grid_.slots().size());
+bool Solver::BuildInitialDomains(std::vector<WordBitset>& domains,
+                                  CrossingWeights& crossing_weights) const {
+  domains.assign(grid_.slots().size(), WordBitset());
   for (const Slot& slot : grid_.slots()) {
     WordBitset& domain = domains[static_cast<size_t>(slot.id)];
     // Restrict to this slot's direction up front, once: AC-3 propagation
@@ -141,25 +138,34 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
   // Propagate only ever visits slots reachable from a seed via crossings,
   // so an isolated slot's domain would otherwise go unchecked.
   for (const WordBitset& domain : domains) {
-    if (!domain.Any()) return std::nullopt;
+    if (!domain.Any()) return false;
   }
 
   std::vector<int> all_slots;
   all_slots.reserve(grid_.slots().size());
   for (const Slot& slot : grid_.slots()) all_slots.push_back(slot.id);
 
-  CrossingWeights crossing_weights(grid_.crossings().size());
-
   Trail root_trail;
   bool changed = true;
   while (changed) {
     changed = false;
     if (!Propagate(domains, all_slots, root_trail, next_save_epoch_++, crossing_weights)) {
-      return std::nullopt;
+      return false;
     }
     root_trail.domains.clear();  // one-time pass -- nothing to undo to
-    if (!EnforceUniqueWordsOnce(domains, changed)) return std::nullopt;
+    if (!EnforceUniqueWordsOnce(domains, changed)) return false;
   }
+  return true;
+}
+
+std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
+                                       const std::atomic<bool>* cancel,
+                                       bool unlimited_budget) {
+  cancel_ = cancel;
+  attempt_offset_ = attempt_offset;
+  std::vector<WordBitset> domains;
+  CrossingWeights crossing_weights(grid_.crossings().size());
+  if (!BuildInitialDomains(domains, crossing_weights)) return std::nullopt;
 
   std::vector<WordBitset> used_by_length(static_cast<size_t>(max_length_) + 1);
   for (const auto& [length, ids] : slots_by_length_) {
@@ -437,6 +443,181 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
     }
   }
   return result;
+}
+
+void Solver::MaximizeBacktrack(std::vector<WordBitset>& domains,
+                                std::vector<WordBitset>& used_by_length,
+                                std::vector<bool>& assigned, Trail& trail,
+                                CrossingWeights& crossing_weights, int64_t current_score,
+                                std::atomic<int64_t>& shared_best_score,
+                                const std::function<void(const Solution&, int64_t)>& on_improved,
+                                std::mutex& callback_mutex, const std::atomic<bool>* cancel) {
+  if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
+  if (global_node_counter_ != nullptr) {
+    global_node_counter_->fetch_add(1, std::memory_order_relaxed);
+  }
+
+  // Upper bound: score already committed, plus the best score any word
+  // still in each unassigned slot's domain could contribute. This only
+  // ever shrinks as the recursion goes deeper (domains only narrow, never
+  // widen -- see Propagate), so a branch pruned here can never become
+  // worth exploring later within the same trajectory.
+  int64_t bound = current_score;
+  for (const Slot& s : grid_.slots()) {
+    int sid = s.id;
+    if (assigned[static_cast<size_t>(sid)]) continue;
+    bound += dict_.BestScoreInDomain(slot_length_[static_cast<size_t>(sid)],
+                                      domains[static_cast<size_t>(sid)]);
+  }
+  if (bound <= shared_best_score.load(std::memory_order_relaxed)) return;
+
+  int slot = SelectBranchSlot(domains, used_by_length, assigned, crossing_weights, nullptr);
+  if (slot == -1) {
+    // Complete, valid assignment -- current_score is its true total.
+    // Compare-and-swap loop: only the worker that actually wins the race
+    // to install a new best reports it, but every worker's improvement
+    // attempt is still checked against whatever the winner just set, not
+    // a stale value read before this loop started.
+    int64_t expected = shared_best_score.load(std::memory_order_relaxed);
+    while (current_score > expected) {
+      if (shared_best_score.compare_exchange_weak(expected, current_score)) {
+        Solution sol = ExtractSolution(domains);
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        on_improved(sol, current_score);
+        break;
+      }
+      // compare_exchange_weak already refreshed `expected` on failure.
+    }
+    return;
+  }
+
+  int length = slot_length_[static_cast<size_t>(slot)];
+  const WordBitset& slot_domain = domains[static_cast<size_t>(slot)];
+  WordBitset candidates = slot_domain;
+  candidates.AndNotAssign(used_by_length[static_cast<size_t>(length)]);
+
+  // Descending score order (same ScoreOrder the plain search already
+  // uses): tries the highest-value completions first, so a worker tends
+  // to report good totals early rather than needing to reach a
+  // high-scoring leaf by chance -- the anytime-quality property this
+  // whole feature depends on, not just eventual correctness.
+  for (size_t idx : dict_.ScoreOrder(length)) {
+    if (!candidates.Test(idx)) continue;
+    if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) return;
+    size_t domain_mark = trail.domains.size();
+    size_t used_mark = trail.used.size();
+    int word_score = dict_.WordScore(length, idx);
+    if (Assign(slot, idx, domains, used_by_length, assigned, trail, crossing_weights)) {
+      MaximizeBacktrack(domains, used_by_length, assigned, trail, crossing_weights,
+                         current_score + word_score, shared_best_score, on_improved,
+                         callback_mutex, cancel);
+    }
+    Undo(slot, domains, used_by_length, assigned, trail, domain_mark, used_mark);
+  }
+}
+
+void Solver::MaximizeSearchOneWorker(
+    std::atomic<int64_t>& shared_best_score,
+    const std::function<void(const Solution&, int64_t)>& on_improved, std::mutex& callback_mutex,
+    const std::atomic<bool>* cancel, bool randomize, uint64_t seed,
+    std::atomic<uint64_t>* global_node_counter) {
+  cancel_ = cancel;
+  global_node_counter_ = global_node_counter;
+  randomize_slot_choice_ = randomize;
+  rng_.seed(seed);
+
+  std::vector<WordBitset> domains;
+  CrossingWeights crossing_weights(grid_.crossings().size());
+  if (!BuildInitialDomains(domains, crossing_weights)) return;  // proves unsatisfiable at the root
+
+  std::vector<WordBitset> used_by_length(static_cast<size_t>(max_length_) + 1);
+  for (const auto& [length, ids] : slots_by_length_) {
+    used_by_length[static_cast<size_t>(length)] = WordBitset(dict_.NumWordsOfLength(length), false);
+  }
+  std::vector<bool> assigned(grid_.slots().size(), false);
+  Trail trail;
+
+  component_remaining_.resize(slots_by_component_.size());
+  for (size_t c = 0; c < slots_by_component_.size(); ++c) {
+    component_remaining_[c] = static_cast<int>(slots_by_component_[c].size());
+  }
+
+  MaximizeBacktrack(domains, used_by_length, assigned, trail, crossing_weights, 0,
+                     shared_best_score, on_improved, callback_mutex, cancel);
+}
+
+std::optional<Solution> Solver::MaximizeScoreParallel(
+    const Grid& grid, const Dictionary& dict, unsigned num_threads,
+    std::function<void(const Solution&, int64_t)> on_improved, const std::atomic<bool>* cancel,
+    std::function<void(uint64_t)> on_progress) {
+  if (num_threads == 0) {
+    num_threads = std::thread::hardware_concurrency();
+    if (num_threads == 0) num_threads = 1;
+  }
+
+  std::vector<std::unique_ptr<Solver>> solvers;
+  solvers.reserve(num_threads);
+  for (unsigned i = 0; i < num_threads; ++i) {
+    solvers.push_back(std::make_unique<Solver>(grid, dict));
+  }
+
+  // -1 sentinel ("nothing found yet") rather than 0: an all-zero-score
+  // dictionary is a legitimate (if unusual) input, and a real total of 0
+  // must still be able to register as the first improvement.
+  std::atomic<int64_t> shared_best_score{-1};
+  std::mutex callback_mutex;
+  std::optional<Solution> best_solution;  // guarded by callback_mutex
+
+  auto wrapped_on_improved = [&](const Solution& sol, int64_t score) {
+    best_solution = sol;  // called with callback_mutex already held, see MaximizeBacktrack
+    on_improved(sol, score);
+  };
+
+  // Same shared-node-counter + polling-monitor-thread pattern as
+  // SolveParallel's on_progress (see its comment there for the full
+  // rationale) -- duplicated rather than factored out, since the two
+  // callers' surrounding setup (worker construction, what each worker's
+  // thread lambda actually calls) differs enough that sharing just this
+  // middle section would need its own parameter list nearly as long as
+  // either caller's, without meaningfully reducing the code on either
+  // side.
+  std::atomic<uint64_t> total_nodes{0};
+  bool stop_monitor = false;
+  std::mutex monitor_mutex;
+  std::condition_variable monitor_cv;
+  std::thread monitor_thread;
+  if (on_progress) {
+    monitor_thread = std::thread([&]() {
+      std::unique_lock<std::mutex> lock(monitor_mutex);
+      while (!monitor_cv.wait_for(lock, std::chrono::milliseconds(150),
+                                   [&] { return stop_monitor; })) {
+        on_progress(total_nodes.load(std::memory_order_relaxed));
+      }
+    });
+  }
+
+  std::vector<std::thread> threads;
+  threads.reserve(num_threads);
+  for (unsigned i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      solvers[i]->MaximizeSearchOneWorker(shared_best_score, wrapped_on_improved, callback_mutex,
+                                           cancel, /*randomize=*/i != 0, /*seed=*/i,
+                                           on_progress ? &total_nodes : nullptr);
+    });
+  }
+  for (std::thread& t : threads) t.join();
+
+  if (on_progress) {
+    {
+      std::lock_guard<std::mutex> lock(monitor_mutex);
+      stop_monitor = true;
+    }
+    monitor_cv.notify_one();
+    monitor_thread.join();
+    on_progress(total_nodes.load(std::memory_order_relaxed));
+  }
+
+  return best_solution;
 }
 
 void Solver::SaveDomainOnce(int slot, const std::vector<WordBitset>& domains,

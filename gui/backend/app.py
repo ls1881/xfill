@@ -297,14 +297,22 @@ class FillRequest(BaseModel):
     down_dict_path: str
     down_min_score: int = 0
     threads: int = 0
+    maximize: bool = False
 
 
 @app.post("/api/fill")
 def fill(req: FillRequest):
     """Streams newline-delimited JSON: zero or more
-    {"type":"progress","nodes":N} lines while solving, then exactly one
-    final line -- {"type":"done",...}, {"type":"cancelled"} (see
-    POST /api/fill/cancel), or {"type":"error","message":...}.
+    {"type":"progress","nodes":N} lines while solving, plus (only when
+    `maximize` is set) zero or more {"type":"improved","score":N,
+    "puzzle":{...}} lines, one each time the search finds a complete fill
+    scoring higher than any found so far (see solver_bridge.solve_stream's
+    docstring) -- then exactly one final line: {"type":"done",...},
+    {"type":"cancelled"} (see POST /api/fill/cancel, which also cancels a
+    maximize search in progress), or {"type":"error","message":...}. With
+    `maximize` unset (the default), behavior is unchanged from before this
+    mode existed: exactly one {"type":"done",...} after zero or more
+    progress lines, no "improved" lines.
 
     A plain non-streaming JSON response (what this returned before) can't
     carry live progress at all -- it isn't sent until the whole request
@@ -325,8 +333,21 @@ def fill(req: FillRequest):
                 req.across_dict_path, req.across_min_score,
                 req.down_dict_path, req.down_min_score,
                 threads=req.threads,
+                maximize=req.maximize,
             ):
-                if event["type"] == "done":
+                if event["type"] == "improved":
+                    # Not a real Solution-shaped dict (no "solved" key --
+                    # WriteJsonImprovement in main.cpp only ever emits
+                    # this once a complete fill exists), so shape one
+                    # here rather than teaching apply_solution a second
+                    # input shape.
+                    solver_bridge.apply_solution(p, {"solved": True, "grid": event.get("grid")})
+                    payload = {
+                        "type": "improved",
+                        "score": event.get("score"),
+                        "puzzle": PuzzleModel.from_puzzle(p).model_dump(),
+                    }
+                elif event["type"] == "done":
                     solver_bridge.apply_solution(p, event)
                     payload = {
                         "type": "done",
@@ -337,6 +358,8 @@ def fill(req: FillRequest):
                             for k in ("nodes", "backtracks", "restarts", "time_seconds", "threads")
                         },
                     }
+                    if req.maximize:
+                        payload["stats"]["score"] = event.get("score")
                 else:
                     payload = event
                 yield json.dumps(payload) + "\n"

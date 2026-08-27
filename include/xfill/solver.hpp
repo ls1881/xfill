@@ -237,6 +237,63 @@ class Solver {
                                             unsigned num_threads = 0,
                                             std::function<void(uint64_t)> on_progress = nullptr);
 
+  // Searches for the crossword fill that maximizes the sum of every
+  // slot's word score -- a genuinely different search from Solve() /
+  // SolveParallel() above (branch-and-bound over total score, not
+  // stop-at-first-valid-assignment), reported here rather than folded
+  // into SolveParallel specifically so that method's hot path -- and
+  // every existing caller of it -- pays nothing for a feature it never
+  // asked for. Nothing in this method's implementation is reachable from
+  // Solve()/SolveParallel(), and nothing in theirs is reachable from
+  // this: the only code the two paths share is the handful of existing
+  // private helpers below (Propagate, Assign, Undo, SelectBranchSlot,
+  // BuildInitialDomains) that were already pure functions of their
+  // explicit arguments, not of any restart/nogood/budget state specific
+  // to the first-solution search.
+  //
+  // Calls `on_improved` (from an arbitrary worker thread; the caller is
+  // responsible for cross-thread safety when using its own state from
+  // inside it) every time a *complete, valid* assignment beats the best
+  // total found so far -- including the first one found. Finding, and
+  // especially proving, the true global maximum is intractable for any
+  // realistically sized grid, so this is meant to be run as an anytime
+  // algorithm: it only stops on its own once the search space is
+  // genuinely exhausted (at which point the last on_improved call was
+  // provably optimal) or `cancel` is set -- a caller that just wants
+  // "the best found so far" should let it run for a while and then
+  // cancel it, the same pattern SolveParallel's own caller already uses
+  // for a plain Fill (see the GUI's Cancel button). Returns the best
+  // solution found (or nullopt if none exists at all, e.g. the grid
+  // proves immediately unsatisfiable at the root).
+  //
+  // Branch-and-bound: at every search node, an upper bound on the best
+  // achievable total from there -- the score already committed, plus the
+  // best available score in every still-unassigned slot's *current*
+  // domain (Dictionary::BestScoreInDomain, which only ever narrows as
+  // propagation runs, so this bound only ever gets tighter) -- is
+  // compared against the best total any worker has found so far (one
+  // shared atomic, so a bound found by any worker prunes for all of
+  // them); a branch that can't beat it is skipped entirely rather than
+  // enumerated. Candidates within a slot are tried in descending-score
+  // order (the same ScoreOrder the plain search already uses), so a
+  // worker tends to find good totals early rather than needing to reach
+  // a lucky high-scoring leaf by chance -- this is what makes it a
+  // reasonable anytime algorithm rather than just "eventually correct."
+  // Workers beyond the first randomize their dom/wdeg tie-breaking (the
+  // same mechanism Solve()'s restarts already use) so they explore
+  // different parts of the space instead of all repeating worker 0's
+  // identical deterministic descent -- there are no restarts in this
+  // mode (a restart would discard the very branch-and-bound progress,
+  // i.e. the accumulated domain narrowing, that makes later parts of one
+  // worker's search cheaper, for no corresponding benefit: the shared
+  // best-score bound, unlike dom/wdeg's crossing weights, doesn't decay
+  // or benefit from being "re-learned").
+  static std::optional<Solution> MaximizeScoreParallel(
+      const Grid& grid, const Dictionary& dict, unsigned num_threads,
+      std::function<void(const Solution&, int64_t)> on_improved,
+      const std::atomic<bool>* cancel = nullptr,
+      std::function<void(uint64_t)> on_progress = nullptr);
+
   const SolverStats& stats() const { return stats_; }
 
  private:
@@ -509,6 +566,47 @@ class Solver {
   // Reads off the final word for every slot once Backtrack has assigned
   // them all (each domain is by then a true singleton).
   Solution ExtractSolution(const std::vector<WordBitset>& domains) const;
+
+  // Builds every slot's initial domain (direction-restricted via
+  // Dictionary::AllowedMask, then narrowed by any pre-filled letters) and
+  // runs root propagation + EnforceUniqueWordsOnce to a fixpoint -- the
+  // same one-time setup Solve() has always done, extracted here so
+  // MaximizeScoreParallel's workers (see below) get an identical starting
+  // point without duplicating it. `crossing_weights` is an out-parameter
+  // the caller already owns (it outlives root setup in both callers), not
+  // constructed here. Returns false if root propagation alone already
+  // proves the grid unsatisfiable.
+  bool BuildInitialDomains(std::vector<WordBitset>& domains,
+                            CrossingWeights& crossing_weights) const;
+
+  // One MaximizeScoreParallel worker's entire search, from its own
+  // BuildInitialDomains() through branch-and-bound exhaustion or
+  // cancellation. `randomize` mirrors Solve()'s worker-0-deterministic /
+  // other-workers-randomized split (see MaximizeScoreParallel's doc
+  // comment for why there's no restart mechanism to seed here the way
+  // attempt_offset seeds Solve()'s restarts -- `seed` alone picks this
+  // worker's RNG stream). `shared_best_score` and `on_improved` are
+  // shared across every worker (see MaximizeBacktrack).
+  void MaximizeSearchOneWorker(std::atomic<int64_t>& shared_best_score,
+                                const std::function<void(const Solution&, int64_t)>& on_improved,
+                                std::mutex& callback_mutex, const std::atomic<bool>* cancel,
+                                bool randomize, uint64_t seed,
+                                std::atomic<uint64_t>* global_node_counter);
+
+  // The branch-and-bound recursion itself -- see MaximizeScoreParallel's
+  // doc comment for the algorithm. `current_score` is the sum of every
+  // already-assigned slot's word score; unlike Backtrack, this has no
+  // meaningful "return value" (it doesn't stop at the first solution), so
+  // it reports improvements via `on_improved` as a side effect and always
+  // returns having explored (or pruned) everything reachable from this
+  // node.
+  void MaximizeBacktrack(std::vector<WordBitset>& domains,
+                          std::vector<WordBitset>& used_by_length,
+                          std::vector<bool>& assigned, Trail& trail,
+                          CrossingWeights& crossing_weights, int64_t current_score,
+                          std::atomic<int64_t>& shared_best_score,
+                          const std::function<void(const Solution&, int64_t)>& on_improved,
+                          std::mutex& callback_mutex, const std::atomic<bool>* cancel);
 
   const Grid& grid_;
   const Dictionary& dict_;

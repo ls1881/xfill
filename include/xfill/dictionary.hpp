@@ -259,6 +259,31 @@ class Dictionary {
     return score_rank_by_length_[static_cast<size_t>(length)][word_index];
   }
 
+  // Raw score of a specific word. Used by the score-maximizing search
+  // (see Solver::MaximizeScore in solver.hpp) to total up an assignment's
+  // score; the plain first-solution search never needs this (it only
+  // ever compares words *relative* to each other via ScoreOrder/ScoreRank),
+  // so this stays out of that hot path entirely.
+  int WordScore(int length, size_t word_index) const {
+    return scores_by_length_[static_cast<size_t>(length)][word_index];
+  }
+
+  // The highest score among `domain`'s set bits, via ScoreOrder (already
+  // sorted descending) rather than scanning the domain itself: stops at
+  // the first ScoreOrder entry the domain actually contains, so this is
+  // fast whenever a high-scoring word is still live (the common case for
+  // a domain that hasn't been narrowed to scrape the bottom of the
+  // length group) and correct regardless. Returns 0 if the domain is
+  // empty (a caller in the middle of a search should never see that: an
+  // empty domain means a contradiction, caught by propagation before a
+  // bound would be computed from it).
+  int BestScoreInDomain(int length, const WordBitset& domain) const {
+    for (size_t idx : ScoreOrder(length)) {
+      if (domain.Test(idx)) return WordScore(length, idx);
+    }
+    return 0;
+  }
+
   // Bitset of every word of `length` usable in the given direction --
   // "usable in across slots" if `is_across`, "usable in down slots"
   // otherwise. A Dictionary loaded via LoadFromFile has no per-direction

@@ -28,16 +28,33 @@ let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; 
 // updateOptionsPanel), cached by (slot, pattern, dictionary) key so
 // switching away from a slot and back reuses what's already known instead
 // of re-solving from scratch -- key -> Map(word -> {feasible, grid}).
-// verifiedKeysComplete tracks which keys have had every one of their top
-// VERIFY_LIMIT candidates actually checked (not just started -- a batch
-// interrupted by switching slots again leaves its key OFF this set, so a
-// later revisit resumes instead of silently staying half-verified
-// forever); see startVerificationBatch and verifyKeyFor.
+// verifiedCompleteCount tracks, per key, how many of that slot's
+// top-scored candidates have actually been checked all the way through
+// (not just started -- a batch interrupted by switching slots again
+// leaves the count at wherever it stopped, so a later revisit resumes
+// instead of silently staying half-verified forever); see
+// startVerificationBatch and verifyKeyFor. It grows past VERIFY_BATCH_SIZE
+// as the user clicks "Show more" (see extendVerificationIfNeeded), up to
+// VERIFY_MAX total per slot -- each check is a real solve, so verifying
+// every candidate a large dictionary could return is not a cost worth
+// paying just because the list *could* be paginated that far.
 let verificationCache = new Map();
-let verifiedKeysComplete = new Set();
+let verifiedCompleteCount = new Map();
 let verifyBatchToken = 0; // incremented per batch; a stale batch stops issuing further checks
-const VERIFY_LIMIT = 10; // how many top-scored candidates get checked per slot
+const VERIFY_BATCH_SIZE = 10; // how many additional candidates one batch step verifies
+const VERIFY_MAX = 40; // hard cap on total verified candidates per slot, regardless of pagination
 const VERIFY_THREADS = 2; // kept modest since these run one at a time, in the background
+
+// Options list pagination: /api/options can return far more candidates
+// than are worth verifying or displaying all at once (a lightly-
+// constrained pattern can match hundreds of dictionary words), so the
+// full fetched batch is cached and only OPTIONS_PAGE_SIZE are shown at a
+// time, with a "Show more" control to reveal further pages -- see
+// visibleLimit, reset per slot the same way verification is.
+const OPTIONS_FETCH_LIMIT = 300; // how many candidates /api/options is asked for, once per slot
+const OPTIONS_PAGE_SIZE = 25; // how many are actually shown per "page"
+let visibleLimit = OPTIONS_PAGE_SIZE;
+let visibleLimitKey = null;
 
 // How the Options list is ordered: "smart" (verified first, then score,
 // then A-Z -- the default) sorts a candidate the moment it's confirmed
@@ -219,7 +236,9 @@ function undo() {
 // session) rather than anything that could still apply.
 function clearVerificationCache() {
   verificationCache = new Map();
-  verifiedKeysComplete = new Set();
+  verifiedCompleteCount = new Map();
+  visibleLimit = OPTIONS_PAGE_SIZE;
+  visibleLimitKey = null;
 }
 
 async function newPuzzle(width, height) {
@@ -807,7 +826,7 @@ async function updateOptionsPanel() {
       pattern: s.pattern,
       dict_path: sel.path,
       min_score: sel.minScore,
-      limit: 50,
+      limit: OPTIONS_FETCH_LIMIT,
     });
     if (seq !== optionsRequestSeq) return; // a newer selection has since superseded this request
     if (!data.candidates.length) {
@@ -815,20 +834,15 @@ async function updateOptionsPanel() {
       return;
     }
 
-    // Solve-feasibility checks are cached per (slot, pattern, dictionary)
-    // key (see getVerifiedMap) -- only kick off a background verification
-    // pass if this exact key hasn't already been fully checked. Switching
-    // back to a slot you already looked at reuses that cache instead of
-    // re-solving from scratch; a batch interrupted by switching away
-    // (verifiedKeysComplete only gains the key once its loop runs to
-    // completion, see startVerificationBatch) resumes here instead of
-    // being silently abandoned forever.
-    if (!verifiedKeysComplete.has(verifyKeyFor(s))) {
-      startVerificationBatch(s, data.candidates);
+    const key = verifyKeyFor(s);
+    if (key !== visibleLimitKey) {
+      visibleLimitKey = key;
+      visibleLimit = OPTIONS_PAGE_SIZE;
     }
 
     lastRenderedSlot = s;
     lastRenderedCandidates = data.candidates;
+    extendVerificationIfNeeded(s, data.candidates);
     renderOptionsList(s, data.candidates);
   } catch (err) {
     if (seq !== optionsRequestSeq) return;
@@ -855,12 +869,19 @@ function sortCandidates(candidates, verifiedMap) {
 // verification results currently know (see getVerifiedMap): a candidate
 // confirmed feasible (a full grid completion actually exists with it in
 // this slot) is bolded; one confirmed infeasible is dropped from the list
-// entirely; anything not yet checked (or checked and inconclusive -- see
+// entirely -- actively, the moment its check lands, not just left
+// unbolded; anything not yet checked (or checked and inconclusive -- see
 // verify_option's "feasible: null" error case) stays plain. Called both
 // right after fetching candidates and again, incrementally, as each
 // background verification result comes in -- so a row re-sorts to the top
-// the moment it's confirmed verified under the default "smart" order, not
-// only when the list is first built.
+// (or disappears) the moment its check lands under the default "smart"
+// order, not only when the list is first built.
+//
+// Only the first `visibleLimit` of the (filtered, sorted) list are
+// actually shown -- a "Show more" control reveals further pages, since
+// /api/options can return up to OPTIONS_FETCH_LIMIT matches for a loosely
+// constrained pattern and rendering (or verifying) all of them at once
+// isn't worth the cost for a list this size.
 function renderOptionsList(slot, candidates) {
   const listEl = document.getElementById("options-list");
   const verifiedMap = getVerifiedMap(slot);
@@ -872,15 +893,45 @@ function renderOptionsList(slot, candidates) {
     listEl.innerHTML = '<div class="hint">No matches.</div>';
     return;
   }
-  listEl.innerHTML = visible
+  const shown = visible.slice(0, visibleLimit);
+  const hiddenCount = visible.length - shown.length;
+
+  let html = shown
     .map((c) => {
       const verified = verifiedMap.get(c.word)?.feasible === true;
       return `<div class="option-row${verified ? " verified" : ""}" data-word="${c.word}"><span class="word">${c.word}</span><span class="score">${c.score}</span></div>`;
     })
     .join("");
+  if (hiddenCount > 0) {
+    html += `<button type="button" id="options-show-more" class="show-more-btn">Show ${Math.min(OPTIONS_PAGE_SIZE, hiddenCount)} more (${hiddenCount} left)</button>`;
+  }
+  listEl.innerHTML = html;
+
   listEl.querySelectorAll(".option-row").forEach((row) => {
     row.addEventListener("click", () => onOptionClick(slot, row.getAttribute("data-word")));
   });
+  const moreBtn = document.getElementById("options-show-more");
+  if (moreBtn) {
+    moreBtn.addEventListener("click", () => {
+      visibleLimit += OPTIONS_PAGE_SIZE;
+      extendVerificationIfNeeded(slot, candidates);
+      renderOptionsList(slot, candidates);
+    });
+  }
+}
+
+// Extends background verification to cover up to `visibleLimit`
+// candidates (capped at VERIFY_MAX total) whenever more of the list
+// becomes visible -- called on every render and again each time "Show
+// more" is clicked, so newly-revealed candidates actually get checked
+// instead of staying permanently unverified just because they weren't
+// among the first page.
+function extendVerificationIfNeeded(slot, candidates) {
+  const key = verifyKeyFor(slot);
+  const target = Math.min(visibleLimit, VERIFY_MAX, candidates.length);
+  if ((verifiedCompleteCount.get(key) || 0) < target) {
+    startVerificationBatch(slot, candidates, target);
+  }
 }
 
 // Terminates whatever verify-check subprocess the backend is currently
@@ -917,18 +968,22 @@ async function stopAllVerification() {
 }
 
 // Checks, one at a time in the background, whether each of the top
-// VERIFY_LIMIT candidates actually leads to a complete grid (not just
-// whether it matches the pattern -- see /api/options/verify). Sequential
-// and capped deliberately: each check is a full solve, so checking every
+// `target` candidates actually leads to a complete grid (not just whether
+// it matches the pattern -- see /api/options/verify). Sequential and
+// capped deliberately: each check is a full solve, so checking every
 // returned candidate eagerly and/or in parallel would make selecting a
 // slot expensive instead of the fast, cheap thing it already is via
-// slot_options' plain pattern match.
-async function startVerificationBatch(slot, allCandidates) {
+// slot_options' plain pattern match. `target` grows over the session as
+// more of the list is paged into view (see extendVerificationIfNeeded);
+// candidates already in this slot's cache -- from its own earlier partial
+// runs, or shared from another slot's solved grid -- are skipped, so
+// re-running with a bigger target only does the work for the new tail.
+async function startVerificationBatch(slot, allCandidates, target) {
   const token = ++verifyBatchToken;
   await cancelAllVerifyChecks();
   if (token !== verifyBatchToken) return; // superseded again while the cancel was in flight
   const verifiedMap = getVerifiedMap(slot);
-  const toCheck = allCandidates.slice(0, VERIFY_LIMIT);
+  const toCheck = allCandidates.slice(0, target);
   for (const c of toCheck) {
     if (token !== verifyBatchToken) return; // superseded by a newer slot/pattern/dictionary -- key stays incomplete, so a revisit resumes
     if (verifiedMap.has(c.word)) continue; // already known -- this slot's own prior check, or shared from another slot's solve (see recordFeasibleGridForAllSlots)
@@ -965,7 +1020,7 @@ async function startVerificationBatch(slot, allCandidates) {
     // above can have just updated it via cross-slot sharing.
     if (lastRenderedSlot) renderOptionsList(lastRenderedSlot, lastRenderedCandidates);
   }
-  if (token === verifyBatchToken) verifiedKeysComplete.add(verifyKeyFor(slot));
+  if (token === verifyBatchToken) verifiedCompleteCount.set(verifyKeyFor(slot), target);
 }
 
 // A confirmed-feasible candidate previews its full solved grid on click
@@ -1209,6 +1264,8 @@ async function runFill() {
     setStatus("Select across/down dictionaries first (Dictionaries tab)", "error");
     return;
   }
+  const maximize = document.getElementById("maximize-toggle").checked;
+
   filling = true;
   clearFillFailedHighlight();
   renderGrid();
@@ -1218,8 +1275,14 @@ async function runFill() {
 
   const startedAt = Date.now();
   let lastNodes = 0;
+  let bestScore = null; // set from each "improved" event; only meaningful when maximize is on
   const elapsed = () => ((Date.now() - startedAt) / 1000).toFixed(1);
-  const showProgress = () => setStatus(`Filling… ${lastNodes.toLocaleString()} nodes explored (${elapsed()}s)`);
+  const showProgress = () =>
+    setStatus(
+      bestScore === null
+        ? `Filling… ${lastNodes.toLocaleString()} nodes explored (${elapsed()}s)`
+        : `Maximizing… best score so far: ${bestScore.toLocaleString()} (${lastNodes.toLocaleString()} nodes, ${elapsed()}s)`
+    );
   showProgress();
   // Keeps the elapsed-time portion visibly live even during a gap between
   // progress events (~150ms apart at the solver end, but network/JS
@@ -1239,6 +1302,7 @@ async function runFill() {
         down_dict_path: dictSelections.down.path,
         down_min_score: dictSelections.down.minScore,
         threads: 0,
+        maximize,
       }),
     });
     if (!resp.ok) {
@@ -1272,6 +1336,25 @@ async function runFill() {
         if (event.type === "progress") {
           lastNodes = event.nodes;
           showProgress();
+        } else if (event.type === "improved") {
+          // Anytime search: every one of these is a complete, better-
+          // scoring fill than the last (see MaximizeScoreParallel's doc
+          // comment) -- apply and show it immediately rather than waiting
+          // for "done", which may be a long time away or may never come
+          // if the user cancels first. The undo entry is pushed on the
+          // *first* one, not deferred to "done"/"cancelled" below, so the
+          // grid is always restorable back to its pre-Fill state no
+          // matter which of those terminates the stream -- including the
+          // "connection closed early" and thrown-error paths, which don't
+          // have their own branch below to duplicate this in.
+          if (bestScore === null) {
+            undoStack.push(beforeFill);
+            if (undoStack.length > MAX_UNDO) undoStack.shift();
+          }
+          bestScore = event.score;
+          puzzle = event.puzzle;
+          renderGrid(); // cheap, local; also autosaves (see renderGrid's scheduleSave call) -- the "and save it" half of this feature
+          showProgress();
         } else {
           finalEvent = event;
         }
@@ -1283,12 +1366,19 @@ async function runFill() {
     } else if (finalEvent.type === "done") {
       const st = finalEvent.stats;
       if (finalEvent.solved) {
-        undoStack.push(beforeFill);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
+        if (!maximize) {
+          undoStack.push(beforeFill);
+          if (undoStack.length > MAX_UNDO) undoStack.shift();
+        } // maximize: already pushed above, on the first "improved" event
         puzzle = finalEvent.puzzle;
         await refreshSlotsAndStats();
         renderGrid();
-        setStatus(`Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`, "ok");
+        setStatus(
+          maximize
+            ? `Proven optimal — score ${st.score.toLocaleString()} (${st.time_seconds.toFixed(2)}s, ${st.nodes.toLocaleString()} nodes)`
+            : `Solved in ${st.time_seconds.toFixed(2)}s (${st.nodes} nodes, ${st.restarts} restarts)`,
+          "ok"
+        );
       } else {
         setStatus(`No solution found (${st.time_seconds.toFixed(2)}s) — diagnosing…`, "error");
         await diagnoseFillFailure();
@@ -1301,7 +1391,16 @@ async function runFill() {
         );
       }
     } else if (finalEvent.type === "cancelled") {
-      setStatus(`Cancelled after ${lastNodes.toLocaleString()} nodes (${elapsed()}s) — grid unchanged`, "error");
+      if (maximize && bestScore !== null) {
+        await refreshSlotsAndStats();
+        renderGrid();
+        setStatus(
+          `Cancelled — kept best fill found: score ${bestScore.toLocaleString()} (${lastNodes.toLocaleString()} nodes, ${elapsed()}s)`,
+          "ok"
+        );
+      } else {
+        setStatus(`Cancelled after ${lastNodes.toLocaleString()} nodes (${elapsed()}s) — grid unchanged`, "error");
+      }
     } else if (finalEvent.type === "error") {
       setStatus(`Fill failed: ${finalEvent.message}`, "error");
     }

@@ -145,6 +145,7 @@ def solve_stream(
     threads: int = 0,
     kind: str = "fill",
     timeout_seconds: float | None = None,
+    maximize: bool = False,
 ) -> Iterator[dict]:
     """Yields {"type": "progress", "nodes": N} dicts as xfill_cli reports
     them (see main.cpp's --progress), then exactly one final dict:
@@ -156,6 +157,20 @@ def solve_stream(
     Raises SolveError immediately (before yielding anything) only for
     problems that mean the solve was never actually attempted -- xfill_cli
     missing, or a spawn failure.
+
+    `maximize`: runs xfill_cli's separate --maximize branch-and-bound
+    search instead of the default first-solution search (see main.cpp's
+    --maximize and Solver::MaximizeScoreParallel's doc comment). This is
+    an anytime search -- every time it finds a complete fill scoring
+    higher than any found so far, it's reported immediately as a
+    {"type": "improved", "score": N, "grid": [...]} event (zero or more
+    of these precede the final "done"), rather than waiting for the
+    single first-found result the default search yields. The final
+    "done" event's "grid"/"score" are the best fill found by the time the
+    search stopped -- either because it proved optimality on its own or
+    because the caller cancelled it (same cancel_current_fill() as the
+    default search; there's deliberately no separate cancel path for
+    this mode) -- not necessarily a proven global optimum.
 
     `kind`: which tracked-process set this call's subprocess belongs to --
     "fill" (the default) is cancel_current_fill()'s (the Cancel button);
@@ -218,6 +233,8 @@ def solve_stream(
             "--json",
             "--progress",
         ]
+        if maximize:
+            cmd.append("--maximize")
         try:
             proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1
@@ -250,6 +267,8 @@ def solve_stream(
                 continue  # tolerate stray non-JSON noise rather than aborting the stream
             if obj.get("progress"):
                 yield {"type": "progress", "nodes": obj.get("nodes", 0)}
+            elif obj.get("type") == "improved":
+                yield {"type": "improved", "score": obj.get("score"), "grid": obj.get("grid")}
             else:
                 final_result = obj  # the terminal line has no "progress" key; keep the last one
 
@@ -298,17 +317,19 @@ def solve_blocking(
     threads: int = 0,
     kind: str = "fill",
     timeout_seconds: float | None = None,
+    maximize: bool = False,
 ) -> dict:
-    """Runs solve_stream to completion and returns just its final (non-
-    "progress") event. For a caller that only wants the end result --
-    e.g. /api/options/verify, which checks one candidate word at a time
-    and has nothing to do with an intermediate node count."""
+    """Runs solve_stream to completion and returns just its final "done"/
+    "cancelled"/"error" event, discarding "progress" and (if `maximize`)
+    "improved" events along the way. For a caller that only wants the end
+    result -- e.g. /api/options/verify, which checks one candidate word at
+    a time and has nothing to do with intermediate updates."""
     final: dict | None = None
     for event in solve_stream(
         puzzle, across_dict_path, across_min_score, down_dict_path, down_min_score,
-        threads=threads, kind=kind, timeout_seconds=timeout_seconds,
+        threads=threads, kind=kind, timeout_seconds=timeout_seconds, maximize=maximize,
     ):
-        if event["type"] != "progress":
+        if event["type"] not in ("progress", "improved"):
             final = event
     return final if final is not None else {"type": "error", "message": "no result produced"}
 
