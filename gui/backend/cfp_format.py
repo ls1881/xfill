@@ -80,7 +80,10 @@ def from_cfp_bytes(data: bytes) -> Puzzle:
             else:
                 letter = cell_el.get("letter")
                 if letter:
-                    puzzle.letters[r][c] = letter.upper()[0]
+                    # Kept whole, not truncated to one character -- the
+                    # writer below already puts a rebus square's full
+                    # answer in this same attribute unabridged.
+                    puzzle.letters[r][c] = letter.upper()
 
     meta_el = root.find("metadata")
     if meta_el is not None:

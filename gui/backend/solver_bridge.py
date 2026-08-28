@@ -36,9 +36,16 @@ def _locked_words_by_direction(puzzle: Puzzle) -> dict[str, set[str]]:
     """Every already-fully-typed slot's word, grouped by direction. A slot
     counts as "fully typed" only if every one of its cells already has a
     letter -- a partially-filled slot is left alone and still has to match
-    a real dictionary word, same as before."""
+    a real dictionary word, same as before. A slot touching a rebus cell
+    (see Puzzle.is_rebus) is skipped entirely, in either direction: its
+    real answer isn't a plain string of `slot.length` letters, so there's
+    no correct single word to inject here -- to_grid_spec's per-cell
+    solving_letter() is what actually pins the crossing constraint for it,
+    same as any other already-fixed cell."""
     words: dict[str, set[str]] = {"across": set(), "down": set()}
     for slot in puzzle.compute_slots():
+        if any(puzzle.is_rebus(r, c) for r, c in slot.cells):
+            continue
         letters = [puzzle.letters[r][c] for r, c in slot.cells]
         if all(ch != "-" for ch in letters):
             words[slot.direction].add("".join(letters))
@@ -379,10 +386,16 @@ def solve_blocking(
 
 def apply_solution(puzzle: Puzzle, result: dict) -> None:
     """Writes a solve()-result-shaped dict's "grid" rows back into
-    `puzzle.letters` in place. No-op if the grid wasn't solved."""
+    `puzzle.letters` in place. No-op if the grid wasn't solved.
+
+    Skips any cell that's currently a rebus square (Puzzle.is_rebus): the
+    solver only ever sees and echoes back that cell's single-character
+    solving_letter() (see to_grid_spec), which is correct as a crossing
+    constraint but is not the real answer -- writing it back here would
+    silently collapse "STAR" down to just "S"."""
     if not result.get("solved") or result.get("grid") is None:
         return
     for r, row in enumerate(result["grid"]):
         for c, ch in enumerate(row):
-            if ch != "#":
+            if ch != "#" and not puzzle.is_rebus(r, c):
                 puzzle.letters[r][c] = ch

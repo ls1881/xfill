@@ -31,10 +31,25 @@ NUL-terminated strings: title, author, copyright, then `numclues` clue
 strings (across/down interleaved by grid number -- see `_clue_order`),
 then notes.
 
-Rebus (GRBS/RTBL/RUSR), timer (LTIM) and markup (GEXT) extension sections
-are not written, and are ignored on read: this is a constructor tool for
-plain letter grids, not a player-facing app, and none of xfill's solving
-or this GUI's editing features use them.
+Rebus squares are supported via the standard GRBS/RTBL extra sections
+(also verified against puzpy): the main solution/fill grid bytes hold only
+a rebus cell's *first* letter (Across Lite's own convention for what a
+plain, rebus-unaware reader should show there), while GRBS/RTBL carry the
+real, full multi-character answer. These two sections are appended after
+the notes only when the puzzle actually has a rebus square -- an ordinary
+puzzle's file layout is completely unchanged.
+
+Timer (LTIM) and markup (GEXT) extension sections are still not written,
+and are ignored on read: nothing in this GUI has a concept of a solve
+timer or per-cell markup (circles/shading) to round-trip.
+
+Extra-section layout (GRBS, RTBL, and any other, following the main
+notes field): 4-byte ASCII title, uint16 LE data length, uint16 LE
+checksum of the data bytes (same running algorithm as _data_cksum), then
+the data itself, then a single NUL terminator byte -- see
+_extra_section/_read_extra_sections below. These sections sit outside the
+header's own global/text checksums entirely; adding them never changes
+those.
 """
 
 from __future__ import annotations
@@ -105,7 +120,10 @@ def _grid_bytes(puzzle: Puzzle) -> bytes:
     both the solution and fill sections: a constructor grid has one state,
     not a separate "player's fill," so both get the same bytes -- open,
     unfilled cells become '-', matching what Across Lite itself writes for
-    a blank player grid."""
+    a blank player grid. A rebus cell writes only its solving_letter()
+    (its first character) here -- the real, full answer goes in the
+    GRBS/RTBL sections instead (see _rebus_sections); this is the standard
+    .puz convention, not a lossy shortcut."""
     w, h = puzzle.width, puzzle.height
     out = bytearray(w * h)
     for r in range(h):
@@ -115,8 +133,40 @@ def _grid_bytes(puzzle: Puzzle) -> bytes:
                 out[idx] = ord(".")
             else:
                 ch = puzzle.letters[r][c]
-                out[idx] = ord(ch) if ch != EMPTY else ord("-")
+                out[idx] = ord(puzzle.solving_letter(r, c)) if ch != EMPTY else ord("-")
     return bytes(out)
+
+
+def _extra_section(title: bytes, data: bytes) -> bytes:
+    """One GRBS/RTBL-shaped extra section -- see this module's docstring
+    for the layout."""
+    return struct.pack("<4sHH", title, len(data), _data_cksum(data)) + data + b"\x00"
+
+
+def _rebus_sections(puzzle: Puzzle) -> bytes:
+    """GRBS (one byte per cell: 0 = not a rebus, else 1-based index into
+    RTBL) + RTBL (" idx:ANSWER;" entries, one per distinct rebus string)
+    -- both omitted entirely if the puzzle has no rebus square at all, so
+    a plain puzzle's file bytes are completely unchanged from before this
+    feature existed. Two cells sharing the identical rebus string share
+    one RTBL entry, matching how real .puz files do it (and keeping the
+    table from growing with duplicate answers)."""
+    w, h = puzzle.width, puzzle.height
+    index_by_string: dict[str, int] = {}
+    grbs = bytearray(w * h)
+    for r in range(h):
+        for c in range(w):
+            if puzzle.blocks[r][c] or not puzzle.is_rebus(r, c):
+                continue
+            letter = puzzle.letters[r][c]
+            if letter not in index_by_string:
+                index_by_string[letter] = len(index_by_string)
+            grbs[r * w + c] = index_by_string[letter] + 1
+    if not index_by_string:
+        return b""
+    rebus_strings = sorted(index_by_string, key=index_by_string.get)
+    rtbl = "".join(f" {i:2d}:{s};" for i, s in enumerate(rebus_strings)).encode("latin-1", errors="replace")
+    return _extra_section(b"GRBS", bytes(grbs)) + _extra_section(b"RTBL", rtbl)
 
 
 def to_puz_bytes(puzzle: Puzzle) -> bytes:
@@ -216,7 +266,42 @@ def to_puz_bytes(puzzle: Puzzle) -> bytes:
     # why this can't be conditioned on `puzzle.notes` the way its
     # checksum contribution is.
     out += _zstring(puzzle.notes)
+    out += _rebus_sections(puzzle)
     return bytes(out)
+
+
+def _read_extra_sections(data: bytes, pos: int) -> dict[bytes, bytes]:
+    """Every GRBS/RTBL/GEXT/LTIM/... section from `pos` (right after
+    notes) to the end of the file, keyed by their 4-byte title. Malformed
+    trailing bytes (shorter than one more full 8-byte section header) just
+    stop the scan rather than raising -- the sections this reader actually
+    uses (GRBS/RTBL) are simply absent from the result then, same as a
+    puzzle that never had them."""
+    sections: dict[bytes, bytes] = {}
+    while pos + 8 <= len(data):
+        title = data[pos:pos + 4]
+        length, _cksum = struct.unpack_from("<HH", data, pos + 4)
+        pos += 8
+        if pos + length > len(data):
+            break
+        sections[title] = data[pos:pos + length]
+        pos += length + 1  # +1 skips the section's own NUL terminator
+    return sections
+
+
+def _parse_rtbl(data: bytes) -> dict[int, str]:
+    """RTBL's " idx:ANSWER;"-per-entry text back into {idx: answer} --
+    the inverse of _rebus_sections' own formatting above."""
+    table: dict[int, str] = {}
+    for entry in data.decode("latin-1", errors="replace").split(";"):
+        idx_s, sep, word = entry.strip().partition(":")
+        if not sep:
+            continue
+        try:
+            table[int(idx_s)] = word
+        except ValueError:
+            continue
+    return table
 
 
 def from_puz_bytes(data: bytes) -> Puzzle:
@@ -259,6 +344,22 @@ def from_puz_bytes(data: bytes) -> Puzzle:
     puzzle.author = author
     puzzle.copyright = copyright_
     puzzle.notes = notes
+
+    # Rebus squares: GRBS/RTBL, if present, override whatever single
+    # placeholder letter the solution grid held for that cell (see
+    # _grid_bytes/_rebus_sections) with the real, full answer.
+    extra_sections = _read_extra_sections(data, pos)
+    grbs, rtbl = extra_sections.get(b"GRBS"), extra_sections.get(b"RTBL")
+    if grbs and rtbl:
+        rebus_table = _parse_rtbl(rtbl)
+        for r in range(h):
+            for c in range(w):
+                idx = r * w + c
+                if idx >= len(grbs) or grbs[idx] == 0 or puzzle.blocks[r][c]:
+                    continue
+                word = rebus_table.get(grbs[idx] - 1)
+                if word:
+                    puzzle.letters[r][c] = word.upper()
 
     clue_pairs = _clue_order(puzzle)
     for (slot_id, _), text in zip(clue_pairs, clue_strings):

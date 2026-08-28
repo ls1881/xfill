@@ -112,7 +112,13 @@ def new_puzzle(width: int, height: int):
 
 def _slot_word(p: Puzzle, s) -> str | None:
     """This slot's word if every one of its cells is filled in, else
-    None -- a partially- or un-filled slot has no score to look up."""
+    None -- a partially- or un-filled slot has no score to look up. Also
+    None if any cell is a rebus square (Puzzle.is_rebus): its answer isn't
+    a plain `s.length`-letter string, so there's no dictionary word to
+    score it against -- same "nothing meaningful to report" treatment as
+    an unfilled slot, not a fabricated N/A-worthy lookup."""
+    if any(p.is_rebus(r, c) for r, c in s.cells):
+        return None
     letters = [p.letters[r][c] for r, c in s.cells]
     if any(ch == EMPTY for ch in letters):
         return None

@@ -143,6 +143,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   background: transparent;
 }
 .dropdown-menu button:hover { background: var(--accent-dim); }
+.dropdown-divider { border-top: 1px solid var(--border); margin: 4px 0; }
 
 .about-menu {
   right: 0;
@@ -340,13 +341,28 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   color: #9a978c;
   font-weight: 400;
 }
-
-#grid-hint {
-  margin-top: 14px;
-  font-size: 0.8rem;
-  color: var(--text-dim);
-  max-width: 520px;
+/* A rebus square (more than one character in this cell -- see isRebusCell)
+   -- a small filled corner triangle marks it at a glance (the standard
+   crossword-editor convention for "this square is special"), and its text
+   shrinks to fit since it's no longer just one glyph; longer content
+   shrinks further still rather than overflowing into neighboring cells. */
+.cell.has-rebus::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-style: solid;
+  border-width: 0 7px 7px 0;
+  border-color: transparent var(--accent) transparent transparent;
+}
+.cell .rebus-text {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  max-width: 32px;
   text-align: center;
+  word-break: break-all;
 }
 
 #side-panel {
@@ -487,7 +503,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .clue-row { font-size: 0.82rem; }
 .clue-row .clue-num { color: var(--accent); font-weight: 600; margin-right: 4px; }
 .clue-row .clue-score { color: var(--text-dim); }
-.clue-row .clue-score-na { color: var(--warn); font-style: italic; }
+.clue-row .clue-score-na { color: var(--text-dim); font-style: italic; }
 .clue-row input {
   width: 100%;
   background: var(--bg-panel-2);
@@ -541,7 +557,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 }
 .show-more-btn:hover { border-color: var(--accent); color: var(--text); }
 
-#tab-dict select, #tab-dict input, #tab-info input, #tab-info textarea {
+#tab-dict select, #tab-dict input, #tab-info input, #tab-info textarea, #tab-rebus input {
   width: 100%;
   background: var(--bg-panel-2);
   border: 1px solid var(--border);
@@ -551,13 +567,30 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   font-size: 0.85rem;
   margin-bottom: 4px;
 }
-#tab-dict label, #tab-info label {
+#tab-dict label, #tab-info label, #tab-rebus label {
   display: block;
   font-size: 0.75rem;
   color: var(--text-dim);
   margin-bottom: 10px;
 }
+#tab-rebus input:disabled { opacity: 0.5; }
 .hint { font-size: 0.75rem; color: var(--text-dim); margin-bottom: 6px; }
+
+#rebus-selection-note { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 8px; }
+#rebus-list { display: flex; flex-direction: column; gap: 4px; }
+.rebus-list-row {
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 5px 8px;
+  background: var(--bg-panel-2);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.rebus-list-row:hover { outline: 1px solid var(--accent); }
+.rebus-list-pos { font-size: 0.7rem; font-weight: 400; color: var(--text-dim); }
 
 .link-btn {
   display: block;

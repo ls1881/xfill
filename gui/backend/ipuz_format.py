@@ -7,7 +7,9 @@ reconstructed from memory:
   - "puzzle" grid: block cells are the literal string "#"; a numbered open
     cell is the plain integer clue number; an unnumbered open cell is 0.
   - "solution" grid: block cells are "#"; filled cells are the plain
-    uppercase letter string, e.g. "A".
+    uppercase letter string, e.g. "A" -- or, for a rebus square, the whole
+    multi-character answer, e.g. "STAR"; the spec allows a solution
+    value of any length, no separate rebus section needed (unlike .puz).
   - "clues.Across" / "clues.Down": arrays of [number, "clue text"] pairs.
 """
 
@@ -86,9 +88,14 @@ def from_ipuz_bytes(data: bytes) -> Puzzle:
                 puzzle.blocks[r][c] = True
                 continue
             if solution is not None:
+                # Kept whole, not truncated to one character: the ipuz spec
+                # allows a solution cell's value to be more than one
+                # character for a rebus square, and this project's own
+                # writer (to_ipuz_dict above) already round-trips one that
+                # way -- truncating here would silently lose it on import.
                 letter = cell if isinstance(cell, str) else ""
                 if letter:
-                    puzzle.letters[r][c] = letter[0].upper()
+                    puzzle.letters[r][c] = letter.upper()
             # else: no solution section -- leave the cell open/unfilled;
             # numbering in `grid` doesn't tell us the answer letter.
 

@@ -541,7 +541,13 @@ function computeStatsHighlightCells() {
       for (let c = 0; c < puzzle.width; c++) {
         if (puzzle.blocks[r][c]) continue;
         const letter = puzzle.letters[r][c];
-        if (letter && letter !== EMPTY && highlightedLetters.has(letter)) cells.add(`${r},${c}`);
+        if (!letter || letter === EMPTY) continue;
+        // A rebus cell (see isRebusCell) matches if ANY of its own
+        // characters is highlighted -- "STAR" lights up for a click on
+        // S, T, A, or R, matching how the Summary tab's own letter counts
+        // already count each of those individually (see grid_model.
+        // Puzzle.stats on the backend).
+        if ([...letter].some((ch) => highlightedLetters.has(ch))) cells.add(`${r},${c}`);
       }
     }
   }
@@ -627,7 +633,15 @@ function renderGrid() {
         }
         const letter = puzzle.letters[r][c];
         if (letter && letter !== EMPTY) {
-          cell.appendChild(document.createTextNode(letter));
+          if (letter.length > 1) {
+            cell.classList.add("has-rebus");
+            const rebusEl = document.createElement("span");
+            rebusEl.className = "rebus-text";
+            rebusEl.textContent = letter;
+            cell.appendChild(rebusEl);
+          } else {
+            cell.appendChild(document.createTextNode(letter));
+          }
         } else if (previewGrid && previewGrid[r][c] !== "#") {
           // A previewed candidate's letter for a cell the user hasn't
           // actually filled yet -- dimmed so it reads as "not committed,"
@@ -644,6 +658,7 @@ function renderGrid() {
       grid.appendChild(cell);
     }
   }
+  renderRebusTab();
 }
 
 // Clicking NEVER places or removes a block, no matter how many times or
@@ -1526,6 +1541,11 @@ function applyWordToSlot(slot, word) {
   snapshotForUndo();
   for (let i = 0; i < slot.cells.length; i++) {
     const [r, c] = slot.cells[i];
+    // Never overwrite a rebus square (see isRebusCell) -- a plain
+    // dictionary candidate's own word is a single letter per cell, which
+    // would silently destroy a multi-character entry a crossing slot
+    // happens to share this cell with.
+    if (isRebusCell(r, c)) continue;
     puzzle.letters[r][c] = word[i];
   }
   renderGrid();
@@ -1781,6 +1801,398 @@ function renderInfo() {
 }
 
 // ---------------------------------------------------------------------------
+// Rebus tab -- lets a constructor put more than one character into a
+// single square (e.g. "STAR"), a standard crossword convention ordinary
+// typing has no way to produce (one keystroke always means one cell, one
+// character). A rebus cell is just a puzzle.letters[r][c] value longer
+// than one character -- no separate flag or parallel data structure --
+// so every other feature that reads a cell's letter (rendering, stats,
+// save/load, export) already sees it; the specific places that need
+// exactly one character (Fill, dictionary matching) instead use its
+// first character as a stand-in -- see grid_model.Puzzle.solving_letter
+// on the backend, which every one of those paths funnels through.
+// ---------------------------------------------------------------------------
+
+function isRebusCell(r, c) {
+  const letter = puzzle.letters[r][c];
+  return !!letter && letter !== EMPTY && letter.length > 1;
+}
+
+function renderRebusTab() {
+  const note = document.getElementById("rebus-selection-note");
+  if (!note || !puzzle) return; // tab markup not mounted yet, or no puzzle loaded
+  const input = document.getElementById("rebus-input");
+  const setBtn = document.getElementById("btn-rebus-set");
+  const clearBtn = document.getElementById("btn-rebus-clear");
+
+  const disableAll = (message) => {
+    note.textContent = message;
+    input.disabled = true;
+    setBtn.disabled = true;
+    clearBtn.disabled = true;
+  };
+
+  if (!selected) {
+    disableAll("Click a cell in the grid first.");
+    input.value = "";
+  } else {
+    const { row, col } = selected;
+    if (puzzle.blocks[row][col]) {
+      disableAll(`Cell (${row + 1}, ${col + 1}) is a block -- select an open cell.`);
+      input.value = "";
+    } else {
+      const current = puzzle.letters[row][col];
+      note.textContent = `Selected cell: row ${row + 1}, column ${col + 1}${isRebusCell(row, col) ? " -- currently a rebus square" : ""}`;
+      input.disabled = false;
+      setBtn.disabled = false;
+      clearBtn.disabled = current === EMPTY;
+      // Only overwrite the input while the user isn't actively typing into
+      // it -- renderGrid() (which calls this) fires on essentially every
+      // grid edit, and stomping on an in-progress edit here on every one
+      // of those would make the field unusable.
+      if (document.activeElement !== input) {
+        input.value = current !== EMPTY ? current : "";
+      }
+    }
+  }
+
+  const list = document.getElementById("rebus-list");
+  const entries = [];
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      if (!puzzle.blocks[r][c] && isRebusCell(r, c)) entries.push({ r, c, letter: puzzle.letters[r][c] });
+    }
+  }
+  list.innerHTML = entries.length
+    ? entries
+        .map(
+          (e) =>
+            `<div class="rebus-list-row" data-row="${e.r}" data-col="${e.c}"><span class="rebus-list-pos">(${e.r + 1},${e.c + 1})</span> ${escapeAttr(e.letter)}</div>`
+        )
+        .join("")
+    : `<div class="hint">No rebus squares yet.</div>`;
+  list.querySelectorAll(".rebus-list-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      selected = { row: Number(row.getAttribute("data-row")), col: Number(row.getAttribute("data-col")) };
+      renderGrid();
+      updateOptionsPanel();
+      highlightActiveClue();
+    });
+  });
+}
+
+// Writes the Rebus tab's input into the selected cell -- any non-empty
+// string, uppercased (matching every other letter already in the grid),
+// one character or several. A single-character value lands as a
+// completely ordinary letter, not specially marked as "set via this tab"
+// -- there's nothing left to distinguish once it's in puzzle.letters,
+// exactly as intended (see isRebusCell: length is the only thing that
+// matters).
+function setRebusAtSelected() {
+  if (!selected || !puzzle) return;
+  const { row, col } = selected;
+  if (puzzle.blocks[row][col]) return;
+  const value = document.getElementById("rebus-input").value.trim().toUpperCase();
+  if (!value) return;
+  snapshotForUndo();
+  puzzle.letters[row][col] = value;
+  renderGrid();
+  refreshSlotsAndStats();
+  setStatus(value.length > 1 ? `Set rebus square: ${value}` : `Set letter: ${value}`, "ok");
+}
+
+function clearRebusAtSelected() {
+  if (!selected || !puzzle) return;
+  const { row, col } = selected;
+  if (puzzle.blocks[row][col]) return;
+  snapshotForUndo();
+  puzzle.letters[row][col] = EMPTY;
+  renderGrid();
+  refreshSlotsAndStats();
+  setStatus("Cleared", "ok");
+}
+
+function wireRebusTab() {
+  document.getElementById("btn-rebus-set").addEventListener("click", setRebusAtSelected);
+  document.getElementById("btn-rebus-clear").addEventListener("click", clearRebusAtSelected);
+  document.getElementById("rebus-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      setRebusAtSelected();
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Print + image export
+//
+// Two different output paths, both built from the same puzzle/slots state
+// already in memory (no backend round trip):
+//   - Print: builds a full, self-contained HTML document string, then hands
+//     it to printHtmlDocument, which is the only piece that actually opens
+//     a window and calls print() -- kept thin and separate from the HTML
+//     builders so the builders themselves (the part with actual layout
+//     logic worth getting right) can be tested without a real print
+//     dialog or popup window.
+//   - Image: builds a plain array of per-cell data (buildImageCellData,
+//     also pure/testable), then drawPuzzleCanvas renders it to a <canvas>
+//     and exportImage downloads it as a PNG.
+// ---------------------------------------------------------------------------
+
+// One <table> for a grid diagram, reused by both print layouts.
+// `classPrefix` scopes the cell/number/letter classes to whichever print
+// stylesheet is using it (nyt-grid vs op-grid), since the two layouts size
+// cells very differently. showLetters=false renders every open cell blank
+// (a solving grid); true fills in whatever's in puzzle.letters (a rebus
+// entry's multi-character string included, see the "rebus" class below).
+function buildPrintGridTable(classPrefix, { showNumbers, showLetters }) {
+  const numbers = showNumbers ? slotStartNumbers() : new Map();
+  let html = `<table class="${classPrefix}">`;
+  for (let r = 0; r < puzzle.height; r++) {
+    html += "<tr>";
+    for (let c = 0; c < puzzle.width; c++) {
+      if (puzzle.blocks[r][c]) {
+        html += `<td class="${classPrefix}-block"></td>`;
+        continue;
+      }
+      const num = numbers.get(`${r},${c}`);
+      const letter = showLetters && puzzle.letters[r][c] !== EMPTY ? puzzle.letters[r][c] : "";
+      html += `<td class="${classPrefix}-cell">`;
+      if (num) html += `<span class="${classPrefix}-num">${num}</span>`;
+      if (letter) {
+        html += `<span class="${classPrefix}-letter${letter.length > 1 ? " rebus" : ""}">${escapeAttr(letter)}</span>`;
+      }
+      html += `</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</table>";
+  return html;
+}
+
+// Across/Down clue lists as plain HTML fragments, numbered and using
+// whatever's currently in puzzle.clues (blank clues print as empty text
+// after the number, same as the Clues tab shows an empty input).
+function buildCluesHtml(classPrefix) {
+  const bySlot = (dir) => slots.filter((s) => s.direction === dir).sort((a, b) => a.number - b.number);
+  const line = (s) =>
+    `<div class="${classPrefix}-clue"><span class="${classPrefix}-num">${s.number}.</span> ${escapeAttr(puzzle.clues[s.id] || "")}</div>`;
+  return {
+    acrossHtml: bySlot("across").map(line).join(""),
+    downHtml: bySlot("down").map(line).join(""),
+  };
+}
+
+// A submission-style packet: title/byline header, a blank (solvable) grid,
+// the solved grid, then the full clue list -- the pieces a constructor
+// submission conventionally bundles together. Multiple print-page divs
+// (one per section) rather than trying to cram everything onto one page,
+// unlike buildOnePagePuzzleHtml -- see that function's own comment for why
+// the two have different space constraints.
+function buildNytSubmissionHtml() {
+  const title = puzzle.title || "Untitled";
+  const author = puzzle.author || "";
+  const { acrossHtml, downHtml } = buildCluesHtml("nyt");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(title)} — submission</title>
+<style>
+  @page { size: letter portrait; margin: 0.6in; }
+  body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; }
+  .nyt-page { page-break-after: always; padding-top: 0.2in; }
+  .nyt-page:last-child { page-break-after: auto; }
+  .nyt-header { text-align: center; margin-bottom: 0.15in; }
+  .nyt-header h1 { font-size: 20pt; margin: 0 0 4pt; }
+  .nyt-byline { font-size: 12pt; color: #444; }
+  .nyt-meta { font-size: 9pt; color: #777; margin-top: 4pt; }
+  .nyt-page h2 { font-size: 13pt; text-align: center; margin: 0 0 0.15in; }
+  table.nyt-grid { border-collapse: collapse; margin: 0 auto; }
+  table.nyt-grid td { width: 26px; height: 26px; border: 1px solid #000; position: relative; padding: 0; }
+  td.nyt-grid-block { background: #000; }
+  .nyt-grid-num { position: absolute; top: 1px; left: 2px; font-size: 6.5pt; }
+  .nyt-grid-letter { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14pt; font-weight: 600; }
+  .nyt-grid-letter.rebus { font-size: 8pt; }
+  .nyt-clue-columns { display: flex; gap: 0.4in; font-size: 10pt; }
+  .nyt-clue-columns > div { flex: 1; }
+  .nyt-clue-columns h3 { font-size: 11pt; border-bottom: 1px solid #000; padding-bottom: 2pt; }
+  .nyt-clue { margin-bottom: 3pt; break-inside: avoid; }
+  .nyt-num { font-weight: 600; }
+</style></head><body>
+  <div class="nyt-page">
+    <div class="nyt-header">
+      <h1>${escapeAttr(title)}</h1>
+      <div class="nyt-byline">${author ? "by " + escapeAttr(author) : ""}</div>
+      <div class="nyt-meta">${puzzle.width}×${puzzle.height} · ${stats.word_count ?? "?"} words · ${stats.block_count ?? "?"} blocks</div>
+    </div>
+    <h2>Grid</h2>
+    ${buildPrintGridTable("nyt-grid", { showNumbers: true, showLetters: false })}
+  </div>
+  <div class="nyt-page">
+    <h2>Solution</h2>
+    ${buildPrintGridTable("nyt-grid", { showNumbers: true, showLetters: true })}
+  </div>
+  <div class="nyt-page">
+    <h2>Clues</h2>
+    <div class="nyt-clue-columns">
+      <div><h3>Across</h3>${acrossHtml}</div>
+      <div><h3>Down</h3>${downHtml}</div>
+    </div>
+  </div>
+</body></html>`;
+}
+
+// A single printed page: header, grid, and clues side by side, clues laid
+// out in CSS columns so they wrap to fit instead of running off the
+// bottom of the page -- guaranteed to fit one page for the 15x15 case this
+// was designed for; a much larger custom grid may still spill onto a
+// second page (a browser print engine's own overflow, not something this
+// markup can force).
+function buildOnePagePuzzleHtml() {
+  const title = puzzle.title || "Untitled";
+  const author = puzzle.author || "";
+  const { acrossHtml, downHtml } = buildCluesHtml("op");
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(title)}</title>
+<style>
+  @page { size: letter portrait; margin: 0.35in; }
+  body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; font-size: 8pt; }
+  .op-header { text-align: center; margin-bottom: 6pt; }
+  .op-header h1 { font-size: 14pt; margin: 0; }
+  .op-byline { font-size: 9pt; color: #444; }
+  .op-layout { display: flex; gap: 10pt; align-items: flex-start; }
+  table.op-grid { border-collapse: collapse; flex: 0 0 auto; }
+  table.op-grid td { width: 17px; height: 17px; border: 0.5px solid #000; position: relative; padding: 0; }
+  td.op-grid-block { background: #000; }
+  .op-grid-num { position: absolute; top: 0; left: 1px; font-size: 5pt; }
+  .op-grid-letter { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 9pt; font-weight: 600; }
+  .op-grid-letter.rebus { font-size: 5pt; }
+  .op-clues { flex: 1 1 auto; display: flex; gap: 8pt; min-width: 0; }
+  .op-clue-block { flex: 1; min-width: 0; }
+  .op-clue-block h3 { font-size: 9pt; margin: 0 0 3pt; border-bottom: 0.5px solid #000; }
+  .op-clue-list { column-count: 2; column-gap: 8pt; font-size: 7pt; line-height: 1.35; }
+  .op-clue { break-inside: avoid; margin-bottom: 1pt; }
+  .op-num { font-weight: 600; }
+</style></head><body>
+  <div class="op-header">
+    <h1>${escapeAttr(title)}</h1>
+    <div class="op-byline">${author ? "by " + escapeAttr(author) : ""}</div>
+  </div>
+  <div class="op-layout">
+    ${buildPrintGridTable("op-grid", { showNumbers: true, showLetters: false })}
+    <div class="op-clues">
+      <div class="op-clue-block"><h3>Across</h3><div class="op-clue-list">${acrossHtml}</div></div>
+      <div class="op-clue-block"><h3>Down</h3><div class="op-clue-list">${downHtml}</div></div>
+    </div>
+  </div>
+</body></html>`;
+}
+
+// The only side-effecting piece of the print path: opens a new window,
+// writes the fully-built document into it, and triggers the browser's own
+// print dialog (from which the user can "Save as PDF" -- there's no
+// separate PDF export path, since every modern browser's print dialog
+// already is one). Kept to just this so the HTML-building functions above
+// stay pure and testable.
+function printHtmlDocument(html) {
+  const win = window.open("", "_blank");
+  if (!win) {
+    setStatus("Couldn't open the print window -- check your browser's popup blocker", "error");
+    return;
+  }
+  win.document.open();
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
+}
+
+// Plain per-cell data for the image export -- see this section's own
+// comment for why this is kept separate from actual canvas drawing.
+// "grid": bare structure only (no numbers, no letters) -- just the
+// black/white cell pattern. "puzzle": numbered, blank -- a solvable grid.
+// "solution": numbered and filled in.
+function buildImageCellData(kind) {
+  const numbers = kind === "grid" ? new Map() : slotStartNumbers();
+  const cells = [];
+  for (let r = 0; r < puzzle.height; r++) {
+    for (let c = 0; c < puzzle.width; c++) {
+      const blocked = puzzle.blocks[r][c];
+      const number = !blocked ? numbers.get(`${r},${c}`) || null : null;
+      const letter = !blocked && kind === "solution" && puzzle.letters[r][c] !== EMPTY ? puzzle.letters[r][c] : null;
+      cells.push({ row: r, col: c, blocked, number, letter });
+    }
+  }
+  return cells;
+}
+
+// Renders buildImageCellData's output to a fresh <canvas>. Returns null
+// (rather than throwing) if 2D canvas rendering isn't available at all --
+// true of jsdom by default (no real canvas backend), and, in principle,
+// possible in a real browser with canvas access blocked; either way,
+// exportImage below turns that into a status message instead of a crash.
+function drawPuzzleCanvas(cells, width, height, cellSize = 40) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width * cellSize + 2;
+  canvas.height = height * cellSize + 2;
+  const ctx = canvas.getContext && canvas.getContext("2d");
+  if (!ctx) return null;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  for (const cell of cells) {
+    const x = cell.col * cellSize + 1;
+    const y = cell.row * cellSize + 1;
+    if (cell.blocked) {
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(x, y, cellSize, cellSize);
+      continue;
+    }
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(x, y, cellSize, cellSize);
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, y, cellSize, cellSize);
+    if (cell.number) {
+      ctx.fillStyle = "#000000";
+      ctx.font = "9px sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(String(cell.number), x + 2, y + 1);
+    }
+    if (cell.letter) {
+      // A rebus entry (see buildImageCellData) has more than one
+      // character -- shrink the font so it still fits in one square
+      // instead of overflowing into its neighbors.
+      const fontSize = cell.letter.length > 1 ? Math.max(8, 18 - (cell.letter.length - 1) * 3) : 18;
+      ctx.fillStyle = "#000000";
+      ctx.font = `bold ${fontSize}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(cell.letter, x + cellSize / 2, y + cellSize / 2 + 2);
+    }
+  }
+  return canvas;
+}
+
+function exportImage(kind) {
+  if (!puzzle) return;
+  const canvas = drawPuzzleCanvas(buildImageCellData(kind), puzzle.width, puzzle.height);
+  if (!canvas) {
+    setStatus("Image export isn't supported in this browser", "error");
+    return;
+  }
+  const filename = `${kind}.png`;
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, "image/png");
+  setStatus(`Exported ${filename}`, "ok");
+}
+
+// ---------------------------------------------------------------------------
 // Toolbar: new / import / export / fill
 // ---------------------------------------------------------------------------
 
@@ -1834,7 +2246,22 @@ function wireToolbar() {
     }
   });
 
-  exportMenu.querySelectorAll("button").forEach((btn) => {
+  exportMenu.querySelectorAll("button[data-print]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      exportMenu.classList.remove("open");
+      const mode = btn.getAttribute("data-print");
+      printHtmlDocument(mode === "nyt" ? buildNytSubmissionHtml() : buildOnePagePuzzleHtml());
+    });
+  });
+
+  exportMenu.querySelectorAll("button[data-image]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      exportMenu.classList.remove("open");
+      exportImage(btn.getAttribute("data-image"));
+    });
+  });
+
+  exportMenu.querySelectorAll("button[data-format]").forEach((btn) => {
     btn.addEventListener("click", async () => {
       exportMenu.classList.remove("open");
       const format = btn.getAttribute("data-format");
@@ -2010,12 +2437,18 @@ function connectedFillScope() {
 // placeholders standing in for a block, not real solver output --
 // merging instead of wholesale-replacing puzzle (the old, unscoped
 // behavior) is what keeps those from silently overwriting cells Fill
-// was never asked to touch.
+// was never asked to touch. Also never overwrites a cell that's currently
+// a rebus square (isRebusCell): the solver only ever sees and echoes back
+// that cell's single first-character stand-in (see grid_model.Puzzle.
+// solving_letter on the backend), which is right as a crossing constraint
+// but would silently collapse e.g. "STAR" down to just "S" if written
+// back here.
 function applyScopedResultLetters(resultLetters, scopeCells) {
   for (let r = 0; r < puzzle.height; r++) {
     for (let c = 0; c < puzzle.width; c++) {
       if (puzzle.blocks[r][c]) continue;
       if (scopeCells && !scopeCells.has(`${r},${c}`)) continue;
+      if (isRebusCell(r, c)) continue;
       const ch = resultLetters[r][c];
       if (ch && ch !== "#") puzzle.letters[r][c] = ch;
     }
@@ -2351,6 +2784,7 @@ function renderAll() {
   renderGrid();
   renderClues();
   renderInfo();
+  renderRebusTab();
   updateOptionsPanel();
   refreshSlotsAndStats();
 }
@@ -2378,6 +2812,7 @@ async function main() {
   wireTabs();
   wireDictTab();
   wireInfoTab();
+  wireRebusTab();
   wireStyleControls();
   wireThemeToggle();
   wireOptionsSort();

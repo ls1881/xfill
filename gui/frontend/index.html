@@ -29,6 +29,13 @@
           <button data-format="puz">.puz</button>
           <button data-format="ipuz">.ipuz</button>
           <button data-format="cfp">.cfp (best-effort)</button>
+          <div class="dropdown-divider"></div>
+          <button data-print="nyt">Print: NYT submission format</button>
+          <button data-print="onepage">Print: puzzle (1 page)</button>
+          <div class="dropdown-divider"></div>
+          <button data-image="grid">Image: grid</button>
+          <button data-image="puzzle">Image: puzzle (blank)</button>
+          <button data-image="solution">Image: solution</button>
         </div>
       </div>
       <button id="btn-undo" title="⌘Z / Ctrl+Z">Undo</button>
@@ -89,7 +96,6 @@
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
-      <div id="grid-hint">Click a cell to select it. Press “.” to toggle a block on/off (clicking never does). Type letters to fill; Backspace clears the current letter and steps back one press at a time, then removes the block behind it on the next press from an already-empty cell. Double-click a cell, press Space, or use arrow keys to change across/down direction. ⌘F / Ctrl+F fills just the region connected to the selected cell (the whole grid if nothing's selected) — letters shown in gray-red had no real alternative once solved. ⌘Z / Ctrl+Z undoes.</div>
     </section>
 
     <aside id="side-panel">
@@ -98,6 +104,7 @@
         <button class="tab-btn" data-tab="clues">Clues</button>
         <button class="tab-btn" data-tab="fill">Options</button>
         <button class="tab-btn" data-tab="dict">Dictionaries</button>
+        <button class="tab-btn" data-tab="rebus">Rebus</button>
         <button class="tab-btn" data-tab="info">Info</button>
       </div>
 
@@ -136,7 +143,6 @@
           </label>
         </div>
         <div id="options-pattern" class="pattern-display"></div>
-        <div class="hint">Click an option to preview it (dimmed, not yet placed) — a verified (green) one previews a full sample fill, others just their own word. Click it again, or use the button below, to accept the preview. Double-click any option to just place that word directly.</div>
         <button type="button" id="btn-accept-fill" class="accept-fill-btn" hidden>Accept full sample fill</button>
         <div id="options-list"></div>
       </div>
@@ -176,6 +182,18 @@
         <h3>Upload a dictionary</h3>
         <div class="hint">WORD;SCORE format, one entry per line.</div>
         <input type="file" id="input-dict-upload" accept=".txt,.dict" />
+      </div>
+
+      <div class="tab-panel" id="tab-rebus">
+        <h3>Rebus square</h3>
+        <div id="rebus-selection-note"></div>
+        <label>Content <input type="text" id="rebus-input" placeholder="e.g. STAR" maxlength="12" disabled /></label>
+        <div class="toolbar-group">
+          <button type="button" id="btn-rebus-set" disabled>Set</button>
+          <button type="button" id="btn-rebus-clear" disabled>Clear</button>
+        </div>
+        <h3>All rebus squares</h3>
+        <div id="rebus-list"></div>
       </div>
 
       <div class="tab-panel" id="tab-info">
