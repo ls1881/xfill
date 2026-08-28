@@ -72,6 +72,15 @@
       Light mode
     </label>
 
+    <div class="dropdown" id="about-dropdown">
+      <button id="btn-about">About ▾</button>
+      <div class="dropdown-menu about-menu" id="about-menu">
+        <p>A crossword construction tool: grid editing, dictionary-driven fill, and a branch-and-bound score maximizer, backed by a C++ constraint solver.</p>
+        <p class="about-credit">Developed by Luke K. Schreiber.</p>
+        <p><a href="https://github.com/ls1881/xfill" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a></p>
+      </div>
+    </div>
+
     <div id="status-line"><span id="fill-spinner" class="spinner" hidden></span><span id="status-text"></span></div>
   </header>
 
@@ -90,7 +99,6 @@
         <button class="tab-btn" data-tab="fill">Options</button>
         <button class="tab-btn" data-tab="dict">Dictionaries</button>
         <button class="tab-btn" data-tab="info">Info</button>
-        <button class="tab-btn" data-tab="about">About</button>
       </div>
 
       <div class="tab-panel active" id="tab-summary">
@@ -176,12 +184,6 @@
         <label>Author <input type="text" id="meta-author" /></label>
         <label>Copyright <input type="text" id="meta-copyright" /></label>
         <label>Note <textarea id="meta-notes" rows="4"></textarea></label>
-      </div>
-
-      <div class="tab-panel" id="tab-about">
-        <h3>About xfill</h3>
-        <p>A crossword construction tool: grid editing, dictionary-driven fill, and a branch-and-bound score maximizer, backed by a C++ constraint solver.</p>
-        <p><a href="https://github.com/ls1881/xfill" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a></p>
       </div>
     </aside>
   </main>

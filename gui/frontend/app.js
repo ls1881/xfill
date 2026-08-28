@@ -52,6 +52,18 @@ let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; 
 // Cleared on the next edit, same lifecycle as fillFailedCells.
 let forcedCells = new Set();
 
+// Word lengths / letters currently toggled on in the Summary tab -- every
+// grid cell belonging to a slot of a highlighted length, or currently
+// showing a highlighted letter, gets the .stats-highlight treatment (see
+// renderGrid). Clicking an already-highlighted row/letter again removes
+// just that one (a real toggle, not "replace the whole selection"), so
+// several lengths/letters can be highlighted together. Independent of
+// each other (both apply at once) and never cleared by an edit or Fill --
+// unlike fillFailedCells/forcedCells, this is a display filter the user
+// set deliberately, not a stale solve result.
+let highlightedLengths = new Set();
+let highlightedLetters = new Set();
+
 // Per-candidate solve-feasibility checks for the Options panel (see
 // updateOptionsPanel), cached by (slot, pattern, dictionary) key so
 // switching away from a slot and back reuses what's already known instead
@@ -512,6 +524,30 @@ function computeStyleIssues() {
   return issues;
 }
 
+// Every cell belonging to a slot whose length is toggled on in the Summary
+// tab's "Word lengths" table, plus every cell whose current letter is
+// toggled on in "Letter counts" -- see highlightedLengths/highlightedLetters
+// and their click handlers in renderSummary/renderLetterGrid.
+function computeStatsHighlightCells() {
+  const cells = new Set();
+  if (highlightedLengths.size) {
+    for (const s of slots) {
+      if (!highlightedLengths.has(s.length)) continue;
+      for (const [r, c] of s.cells) cells.add(`${r},${c}`);
+    }
+  }
+  if (highlightedLetters.size) {
+    for (let r = 0; r < puzzle.height; r++) {
+      for (let c = 0; c < puzzle.width; c++) {
+        if (puzzle.blocks[r][c]) continue;
+        const letter = puzzle.letters[r][c];
+        if (letter && letter !== EMPTY && highlightedLetters.has(letter)) cells.add(`${r},${c}`);
+      }
+    }
+  }
+  return cells;
+}
+
 function computeSymmetryDiscrepancies() {
   const bad = new Set();
   if (symmetryMode === "none") return bad;
@@ -565,6 +601,7 @@ function renderGrid() {
   const activeCells = new Set((active ? active.cells : []).map(([r, c]) => `${r},${c}`));
   const styleIssues = computeStyleIssues();
   const symmetryIssues = computeSymmetryDiscrepancies();
+  const statsHighlights = computeStatsHighlightCells();
 
   for (let r = 0; r < puzzle.height; r++) {
     for (let c = 0; c < puzzle.width; c++) {
@@ -578,6 +615,7 @@ function renderGrid() {
       if (styleIssues.has(key) || symmetryIssues.has(key)) cell.classList.add("style-issue");
       if (fillFailedCells.has(key)) cell.classList.add("fill-failed");
       if (forcedCells.has(key)) cell.classList.add("forced-letter");
+      if (statsHighlights.has(key)) cell.classList.add("stats-highlight");
 
       if (!blocked) {
         const num = numbers.get(`${r},${c}`);
@@ -864,8 +902,20 @@ function renderSummary() {
   const lengths = document.getElementById("stats-lengths");
   const entries = Object.entries(stats.length_breakdown || {});
   lengths.innerHTML = entries
-    .map(([len, count]) => `<tr><td>${len} letters</td><td>${count}</td></tr>`)
+    .map(
+      ([len, count]) =>
+        `<tr class="stats-row${highlightedLengths.has(Number(len)) ? " stats-row-active" : ""}" data-length="${len}"><td>${len} letters</td><td>${count}</td></tr>`
+    )
     .join("");
+  lengths.querySelectorAll("tr[data-length]").forEach((row) => {
+    row.addEventListener("click", () => {
+      const len = Number(row.getAttribute("data-length"));
+      if (highlightedLengths.has(len)) highlightedLengths.delete(len);
+      else highlightedLengths.add(len);
+      renderSummary();
+      renderGrid();
+    });
+  });
 
   renderLetterGrid();
 }
@@ -877,8 +927,14 @@ function renderLetterGrid() {
   for (let i = 0; i < 26; i++) {
     const letter = String.fromCharCode(65 + i);
     const div = document.createElement("div");
-    div.className = "letter-cell";
+    div.className = "letter-cell" + (highlightedLetters.has(letter) ? " letter-cell-active" : "");
     div.innerHTML = `<span class="lc">${letter}</span><span class="lv">${counts[letter] || 0}</span>`;
+    div.addEventListener("click", () => {
+      if (highlightedLetters.has(letter)) highlightedLetters.delete(letter);
+      else highlightedLetters.add(letter);
+      renderLetterGrid();
+      renderGrid();
+    });
     el.appendChild(div);
   }
 }
@@ -1769,6 +1825,15 @@ function wireToolbar() {
       exportMenu.classList.remove("open");
     }
   });
+  const aboutBtn = document.getElementById("btn-about");
+  const aboutMenu = document.getElementById("about-menu");
+  aboutBtn.addEventListener("click", () => aboutMenu.classList.toggle("open"));
+  document.addEventListener("click", (e) => {
+    if (!aboutBtn.contains(e.target) && !aboutMenu.contains(e.target)) {
+      aboutMenu.classList.remove("open");
+    }
+  });
+
   exportMenu.querySelectorAll("button").forEach((btn) => {
     btn.addEventListener("click", async () => {
       exportMenu.classList.remove("open");

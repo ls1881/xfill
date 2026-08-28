@@ -17,6 +17,7 @@
   --issue-red: #e0393e;
   --danger-text: #ffb3b3;
   --status-error: #ff8080;
+  --stats-highlight: #a374e0;
   font-size: 15px;
 }
 
@@ -36,6 +37,7 @@
   --issue-red: #c22b2b;
   --danger-text: #b3261e;
   --status-error: #c22b2b;
+  --stats-highlight: #7a3fb0;
 }
 
 * { box-sizing: border-box; }
@@ -141,6 +143,21 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   background: transparent;
 }
 .dropdown-menu button:hover { background: var(--accent-dim); }
+
+.about-menu {
+  right: 0;
+  left: auto;
+  min-width: 260px;
+  max-width: 320px;
+  padding: 12px 14px;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--text);
+}
+.about-menu p { margin: 0 0 8px; }
+.about-menu p:last-child { margin-bottom: 0; }
+.about-menu .about-credit { color: var(--text-dim); font-size: 0.78rem; }
+.about-menu a { color: var(--accent); }
 
 .checkbox-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-dim); }
 .select-label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--text-dim); }
@@ -297,6 +314,17 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   background: #d9c3c3;
   color: #6b3a3a;
 }
+/* A user-toggled display filter (Summary tab: click a word length or a
+   letter count to ring every matching cell) -- not a solve result, so it
+   uses `outline` rather than `box-shadow` like .style-issue: an outline is
+   its own box-model layer, so it composes with any other cell state
+   (selected, in-word, fill-failed, ...) without needing a hand-combined
+   variant for every pairing the way .cell.selected.style-issue does. */
+.cell.stats-highlight {
+  outline: 3px solid var(--stats-highlight);
+  outline-offset: -3px;
+  z-index: 1;
+}
 .cell .num {
   position: absolute;
   top: 1px;
@@ -414,6 +442,16 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .stats-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .stats-table td { padding: 3px 4px; border-bottom: 1px solid var(--border); }
 .stats-table td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+/* Word-lengths rows double as a toggleable filter (see highlightedLengths
+   in app.js): clicking one rings every cell in a slot of that length,
+   using the same --stats-highlight color as the grid ring itself so the
+   connection between "this row" and "those cells" reads at a glance. */
+.stats-table tr.stats-row { cursor: pointer; }
+.stats-table tr.stats-row:hover td { background: var(--bg-panel-2); }
+.stats-table tr.stats-row-active td {
+  background: color-mix(in srgb, var(--stats-highlight) 22%, transparent);
+  font-weight: 600;
+}
 
 #letter-grid {
   display: grid;
@@ -428,6 +466,17 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   padding: 3px 0;
   background: var(--bg-panel-2);
   border-radius: 4px;
+  cursor: pointer;
+}
+#letter-grid .letter-cell:hover { filter: brightness(1.15); }
+/* Same toggleable-filter treatment as .stats-row-active, for letter counts. */
+#letter-grid .letter-cell-active {
+  background: var(--stats-highlight);
+  outline: 2px solid var(--stats-highlight);
+}
+#letter-grid .letter-cell-active .lc,
+#letter-grid .letter-cell-active .lv {
+  color: #fff;
 }
 #letter-grid .letter-cell .lc { color: var(--text-dim); }
 #letter-grid .letter-cell .lv { font-variant-numeric: tabular-nums; }
