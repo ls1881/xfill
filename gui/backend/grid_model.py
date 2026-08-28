@@ -148,14 +148,55 @@ class Puzzle:
         return slots
 
     def slot_pattern(self, slot: Slot) -> str:
-        """This slot's current letters, EMPTY where unfilled -- a pattern
-        like "C-T" ready for dictionary pattern matching. A rebus cell
-        contributes its solving_letter() (see that method's doc comment),
-        not its full content -- a pattern is exactly `slot.length`
-        characters, one per cell, by construction."""
-        return "".join(
-            self.solving_letter(r, c) if self.letters[r][c] != EMPTY else "?" for r, c in slot.cells
-        )
+        """This slot's current letters, EMPTY cells as "?" -- a pattern
+        like "C?T" ready for dictionary pattern matching. A rebus cell
+        contributes its FULL content here (e.g. "AD"), not just
+        solving_letter()'s single-character stand-in: a rebus square is a
+        real, multi-letter part of the word this slot actually spells out
+        (a constructor typing "AD" into 1-Across's first square means the
+        word there starts with literally "AD", e.g. ADAPTS -- not just any
+        word starting with "A"), so the pattern -- and the word length
+        dict_lookup.py matches against -- both need to reflect that. This
+        makes the pattern's length track the slot's actual spelled-out
+        answer length, which a rebus lets exceed `slot.length` (the
+        physical cell count); solving_letter() stays the one-character
+        stand-in used only where exactly one character per cell is
+        required (the C++ solver's crossing constraints -- see
+        to_grid_spec)."""
+        return "".join(self.letters[r][c] if self.letters[r][c] != EMPTY else "?" for r, c in slot.cells)
+
+    def slot_cell_lengths(self, slot: Slot) -> list[int]:
+        """How many characters each of `slot`'s cells currently
+        contributes to its spelled-out word -- 1 for a normal letter or a
+        still-blank cell, or a rebus cell's own length (e.g. 2 for "AD").
+        The inverse of slot_pattern's own concatenation: used to slice a
+        matched word (whose total length may exceed slot.length, thanks to
+        a rebus) back onto individual cells -- see slice_word_for_slot."""
+        lengths = []
+        for r, c in slot.cells:
+            letter = self.letters[r][c]
+            lengths.append(len(letter) if letter != EMPTY else 1)
+        return lengths
+
+    def slice_word_for_slot(self, slot: Slot, word: str) -> list[str]:
+        """Splits `word` into one chunk per cell, each chunk's length
+        matching slot_cell_lengths -- the inverse of slot_pattern's
+        concatenation, so a word that matched slot_pattern's output slices
+        back onto exactly the cells (and, for any existing rebus cell, the
+        exact multi-character span) it was matched against. Raises
+        ValueError if `word`'s length doesn't add up to the cells' total
+        (a real mismatch, not something a caller should paper over)."""
+        lengths = self.slot_cell_lengths(slot)
+        if sum(lengths) != len(word):
+            raise ValueError(
+                f"word {word!r} has {len(word)} characters, expected {sum(lengths)} for this slot"
+            )
+        chunks = []
+        pos = 0
+        for length in lengths:
+            chunks.append(word[pos:pos + length])
+            pos += length
+        return chunks
 
     def to_grid_spec(self) -> str:
         """xfill's plain-text grid format: '.'=open, '#'=block, A-Z=prefilled.

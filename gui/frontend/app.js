@@ -1242,7 +1242,7 @@ async function updateOptionsPanel() {
     const data = await apiJson("/api/options", {
       pattern: s.pattern,
       dict_path: sel.path,
-      min_score: effectiveMinScore(sel, s.length),
+      min_score: effectiveMinScore(sel, s.pattern.length), // s.pattern.length, not s.length (cell count) -- a rebus cell can make the real word longer than the slot's physical cells, and min-score overrides are keyed by word length
       limit: OPTIONS_FETCH_LIMIT,
     });
     if (seq !== optionsRequestSeq) return; // a newer selection has since superseded this request
@@ -1594,10 +1594,17 @@ async function startVerificationBatch(slot, allCandidates, target) {
 function singleSlotPreviewGrid(slot, word) {
   const rows = [];
   for (let r = 0; r < puzzle.height; r++) rows.push(new Array(puzzle.width).fill("#"));
+  // sliceWordForSlot, not word[i] per cell -- a rebus cell's own chunk can
+  // be more than one character (e.g. "AD"), which word[i] would silently
+  // truncate to just its first character. Returned as row ARRAYS, not
+  // row.join("")-ed strings: renderGrid's previewGrid[r][c] indexing works
+  // identically either way, but joining into a string would corrupt every
+  // cell's column alignment after a multi-character chunk in the same row.
+  const chunks = sliceWordForSlot(slot, word);
   slot.cells.forEach(([r, c], i) => {
-    rows[r][c] = word[i];
+    rows[r][c] = chunks[i];
   });
-  return rows.map((row) => row.join(""));
+  return rows;
 }
 
 // A confirmed-feasible (green) candidate previews its full solved grid;
@@ -1649,14 +1656,21 @@ function commitPreview() {
 
 function applyWordToSlot(slot, word) {
   snapshotForUndo();
+  // sliceWordForSlot, not word[i] per cell -- `word` was matched against
+  // this slot's rebus-aware pattern (see updateOptionsPanel), so a rebus
+  // cell's own chunk here can be more than one character (e.g. "AD" for a
+  // 6-letter "ADAPTS" landing on a 5-cell slot); word[i] would silently
+  // truncate it to one character and misalign every cell after it.
+  const chunks = sliceWordForSlot(slot, word);
   for (let i = 0; i < slot.cells.length; i++) {
     const [r, c] = slot.cells[i];
-    // Never overwrite a rebus square (see isRebusCell) -- a plain
-    // dictionary candidate's own word is a single letter per cell, which
-    // would silently destroy a multi-character entry a crossing slot
-    // happens to share this cell with.
+    // Never overwrite a rebus square (see isRebusCell) -- its own chunk
+    // above is provably identical to what's already there (sliced using
+    // that same cell's current length), so skipping the write is a no-op
+    // either way; kept explicit as the same defensive invariant every
+    // other write path in this file follows.
     if (isRebusCell(r, c)) continue;
-    puzzle.letters[r][c] = word[i];
+    puzzle.letters[r][c] = chunks[i];
   }
   renderGrid();
   refreshSlotsAndStats();
@@ -1983,6 +1997,35 @@ function renderInfo() {
 function isRebusCell(r, c) {
   const letter = puzzle.letters[r][c];
   return !!letter && letter !== EMPTY && letter.length > 1;
+}
+
+// How many characters this cell currently contributes to its slot's
+// spelled-out word -- 1 for a normal letter or a still-blank cell, or a
+// rebus cell's own length (e.g. 2 for "AD"). Mirrors grid_model.py's
+// Puzzle.slot_cell_lengths on the backend exactly.
+function cellContentLength(r, c) {
+  const letter = puzzle.letters[r][c];
+  return letter && letter !== EMPTY ? letter.length : 1;
+}
+
+// Splits `word` into one chunk per cell of `slot`, each chunk's length
+// matching cellContentLength -- the inverse of how a rebus-aware pattern
+// (see updateOptionsPanel's use of s.pattern, built server-side by
+// slot_pattern) concatenates cell content into one string. A candidate
+// word matched against that pattern is guaranteed to have exactly the
+// right total length; this is what lets e.g. "ADAPTS" (6 letters) land
+// correctly on a 5-cell slot whose first cell already holds the rebus
+// "AD" -- "AD" back into that one cell, "A","P","T","S" one each into the
+// rest -- rather than naively assuming one character per cell.
+function sliceWordForSlot(slot, word) {
+  const chunks = [];
+  let pos = 0;
+  for (const [r, c] of slot.cells) {
+    const length = cellContentLength(r, c);
+    chunks.push(word.slice(pos, pos + length));
+    pos += length;
+  }
+  return chunks;
 }
 
 function renderRebusTab() {
@@ -2937,7 +2980,7 @@ async function diagnoseFillFailure() {
       const data = await apiJson("/api/options", {
         pattern: s.pattern,
         dict_path: sel.path,
-        min_score: effectiveMinScore(sel, s.length),
+        min_score: effectiveMinScore(sel, s.pattern.length), // s.pattern.length, not s.length (cell count) -- a rebus cell can make the real word longer than the slot's physical cells, and min-score overrides are keyed by word length
         limit: 1,
       });
       if (data.candidates.length === 0) {

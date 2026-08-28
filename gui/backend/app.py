@@ -134,13 +134,12 @@ def new_puzzle(width: int, height: int):
 
 def _slot_word(p: Puzzle, s) -> str | None:
     """This slot's word if every one of its cells is filled in, else
-    None -- a partially- or un-filled slot has no score to look up. Also
-    None if any cell is a rebus square (Puzzle.is_rebus): its answer isn't
-    a plain `s.length`-letter string, so there's no dictionary word to
-    score it against -- same "nothing meaningful to report" treatment as
-    an unfilled slot, not a fabricated N/A-worthy lookup."""
-    if any(p.is_rebus(r, c) for r, c in s.cells):
-        return None
+    None -- a partially- or un-filled slot has no score to look up. A
+    rebus cell contributes its full content (e.g. "AD"), same as
+    slot_pattern() -- the word this returns is exactly what a rebus-aware
+    dictionary lookup (or a human) would read the slot as spelling out,
+    e.g. "ADAPTS" for a 5-cell slot whose first cell holds "AD", not a
+    5-character string that's missing a letter."""
     letters = [p.letters[r][c] for r, c in s.cells]
     if any(ch == EMPTY for ch in letters):
         return None
@@ -394,11 +393,18 @@ def verify_option(req: VerifyOptionRequest):
     if slot is None:
         raise HTTPException(400, f"no such slot: {req.slot_id}")
     word = req.word.strip().upper()
-    if len(word) != slot.length:
-        raise HTTPException(400, f"word length {len(word)} != slot length {slot.length}")
+    # Not `len(word) != slot.length` (a naive 1-char-per-cell assumption,
+    # broken by any rebus cell -- a slot's spelled-out word can be LONGER
+    # than its physical cell count) -- slice_word_for_slot already raises
+    # a clear error if `word` doesn't add up to what the cells (rebus or
+    # not) actually expect.
+    try:
+        chunks = p.slice_word_for_slot(slot, word)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
 
-    for (r, c), ch in zip(slot.cells, word):
-        p.letters[r][c] = ch
+    for (r, c), chunk in zip(slot.cells, chunks):
+        p.letters[r][c] = chunk
 
     result = solver_bridge.solve_blocking(
         p,

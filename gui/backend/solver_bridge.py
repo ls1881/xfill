@@ -36,17 +36,17 @@ def _locked_words_by_direction(puzzle: Puzzle) -> dict[str, set[str]]:
     """Every already-fully-typed slot's word, grouped by direction. A slot
     counts as "fully typed" only if every one of its cells already has a
     letter -- a partially-filled slot is left alone and still has to match
-    a real dictionary word, same as before. A slot touching a rebus cell
-    (see Puzzle.is_rebus) is skipped entirely, in either direction: its
-    real answer isn't a plain string of `slot.length` letters, so there's
-    no correct single word to inject here -- to_grid_spec's per-cell
-    solving_letter() is what actually pins the crossing constraint for it,
-    same as any other already-fixed cell."""
+    a real dictionary word, same as before. Built from solving_letter()
+    (each cell's single-character stand-in), not the raw cell content: the
+    solver only ever sees the grid through to_grid_spec(), which is
+    solving_letter()-based, so a rebus slot has to be locked using the
+    exact same stand-in string ("AD"+"APTS" prefilled reads as "AAPTS" to
+    the solver) for the lock to actually match what it's solving against --
+    locking the real expanded answer ("ADAPTS") instead would target a
+    word length the solver's view of this slot can never produce."""
     words: dict[str, set[str]] = {"across": set(), "down": set()}
     for slot in puzzle.compute_slots():
-        if any(puzzle.is_rebus(r, c) for r, c in slot.cells):
-            continue
-        letters = [puzzle.letters[r][c] for r, c in slot.cells]
+        letters = [puzzle.solving_letter(r, c) for r, c in slot.cells]
         if all(ch != "-" for ch in letters):
             words[slot.direction].add("".join(letters))
     return words
