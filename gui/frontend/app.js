@@ -326,6 +326,7 @@ function undo() {
   // pointing outside the restored grid.
   selected = null;
   clearFillFailedHighlight();
+  clearForcedCells();
   // This is a real grid-state change (reverting to an earlier one) that
   // doesn't go through snapshotForUndo() -- doing so would push a new
   // undo entry for the undo itself -- so it needs its own call to the
@@ -472,6 +473,13 @@ function setLetterAt(r, c, ch) {
 function computeStyleIssues() {
   const issues = new Set();
   if (!americanStyle) return issues;
+  // `slots` hasn't loaded yet (e.g. the very first render on page load,
+  // before refreshSlotsAndStats()'s response lands -- renderAll() renders
+  // once immediately with whatever `slots` currently is, then again once
+  // the fetch resolves). With no slot data at all, every open cell would
+  // otherwise look "uncovered" and flash the whole grid red for a moment;
+  // there's nothing real to judge coverage against yet, so skip instead.
+  if (!slots.length && puzzle.blocks.some((row) => row.some((b) => !b))) return issues;
   const coverage = new Map(); // "r,c" -> Set(direction)
   for (const s of slots) {
     for (const [r, c] of s.cells) {
@@ -2090,8 +2098,17 @@ async function runFill() {
         } // maximize: already pushed above, on the first "improved" event
         applyScopedResultLetters(finalEvent.puzzle.letters, scopeCells);
         // Absent (defaults to []) in maximize mode -- see app.py's /api/fill
-        // docstring -- where "forced" isn't a meaningful concept.
-        forcedCells = new Set((finalEvent.forced_cells || []).map(([r, c]) => `${r},${c}`));
+        // docstring -- where "forced" isn't a meaningful concept. Also
+        // excludes any cell that already had a letter before this Fill ran
+        // (beforeFill, captured pre-request): "forced" is only meaningful
+        // for a letter Fill itself just determined -- a cell the user typed
+        // in beforehand isn't newly forced by this solve just because its
+        // slot's pattern happens to admit only that one dictionary word.
+        forcedCells = new Set(
+          (finalEvent.forced_cells || [])
+            .filter(([r, c]) => beforeFill.letters[r][c] === EMPTY)
+            .map(([r, c]) => `${r},${c}`)
+        );
         await refreshSlotsAndStats();
         renderGrid();
         const scopeNote = scopeCells ? " (connected region only)" : "";
