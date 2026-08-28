@@ -83,8 +83,18 @@ def _zstring(s: str) -> bytes:
     from what contributes to text_cksum() below, which (matching puzpy's
     own text_cksum) skips an empty field's bytes entirely -- the file
     layout's "always present, possibly empty" rule and the checksum's
-    "only non-empty fields count" rule are two separate things."""
-    return s.encode("latin-1", errors="replace") + b"\x00"
+    "only non-empty fields count" rule are two separate things.
+
+    CP1252, not plain Latin-1/ISO-8859-1: real Across Lite .puz text
+    sections use CP1252, which only diverges from Latin-1 in the 0x80-0x9F
+    byte range -- exactly where CP1252 puts the smart quotes, em/en
+    dashes, and ellipsis common in real crossword clue text. Encoding
+    those as Latin-1 with errors="replace" was silently turning e.g. a
+    curly apostrophe into a literal '?' on export, and decoding a real
+    Across Lite file's CP1252 bytes as Latin-1 on import would turn them
+    into the wrong Unicode code points (C1 control characters) instead of
+    the intended punctuation."""
+    return s.encode("cp1252", errors="replace") + b"\x00"
 
 
 def _clue_order(puzzle: Puzzle) -> list[tuple[str, str]]:
@@ -190,7 +200,7 @@ def to_puz_bytes(puzzle: Puzzle) -> bytes:
             cksum = _data_cksum(_zstring(puzzle.copyright), cksum)
         for clue in clue_strings:
             if clue:
-                cksum = _data_cksum(clue.encode("latin-1", errors="replace"), cksum)
+                cksum = _data_cksum(clue.encode("cp1252", errors="replace"), cksum)
         if puzzle.notes:
             cksum = _data_cksum(_zstring(puzzle.notes), cksum)
         return cksum
@@ -212,7 +222,7 @@ def to_puz_bytes(puzzle: Puzzle) -> bytes:
         seed = _data_cksum(_zstring(puzzle.copyright), seed)
     for clue in clue_strings:
         if clue:
-            seed = _data_cksum(clue.encode("latin-1", errors="replace"), seed)
+            seed = _data_cksum(clue.encode("cp1252", errors="replace"), seed)
     if puzzle.notes:
         seed = _data_cksum(_zstring(puzzle.notes), seed)
     global_cksum = seed
@@ -319,7 +329,11 @@ def from_puz_bytes(data: bytes) -> Puzzle:
     def read_zstring() -> str:
         nonlocal pos
         end = data.index(b"\x00", pos)
-        s = data[pos:end].decode("latin-1")
+        # CP1252, matching _zstring's own encoding above -- decoding a
+        # real Across Lite file's CP1252 bytes (smart quotes, em/en
+        # dashes, ...) as plain Latin-1 would turn them into the wrong
+        # Unicode code points instead of the intended punctuation.
+        s = data[pos:end].decode("cp1252", errors="replace")
         pos = end + 1
         return s
 

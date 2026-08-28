@@ -302,6 +302,29 @@ def solve_stream(
             watchdog.daemon = True
             watchdog.start()
 
+        # Drained concurrently on its own thread, not read after proc.wait()
+        # the way this used to work: stdout and stderr are two independent
+        # OS pipes, each with a bounded buffer (~64KB). The loop below only
+        # ever reads stdout; if xfill_cli wrote enough to stderr while still
+        # running (e.g. many "nogood depth=..." lines under
+        # XFILL_DEBUG_NOGOODS) to fill that pipe's buffer, the child would
+        # block on its own stderr write, which stalls its stdout too -- and
+        # the parent, still stuck in the stdout loop below, would never
+        # reach the old post-wait() stderr read that could unblock it: a
+        # genuine two-pipe deadlock, not just a theoretical one. Draining
+        # stderr on a separate thread from the moment the process starts
+        # means that pipe can never back up regardless of what else this
+        # generator is doing.
+        stderr_lines: list[str] = []
+
+        def _drain_stderr() -> None:
+            assert proc is not None and proc.stderr is not None
+            for line in proc.stderr:
+                stderr_lines.append(line)
+
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stderr_thread.start()
+
         final_result: dict | None = None
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -320,6 +343,7 @@ def solve_stream(
                 final_result = obj  # the terminal line has no "progress" key; keep the last one
 
         returncode = proc.wait()
+        stderr_thread.join()
         if watchdog is not None:
             watchdog.cancel()
 
@@ -333,7 +357,7 @@ def solve_stream(
             # error.
             yield {"type": "cancelled"}
         else:
-            stderr_text = proc.stderr.read().strip() if proc.stderr else ""
+            stderr_text = "".join(stderr_lines).strip()
             yield {
                 "type": "error",
                 "message": stderr_text or f"xfill_cli exited with code {returncode} and no output",

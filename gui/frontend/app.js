@@ -430,6 +430,8 @@ async function newPuzzle(width, height) {
   puzzle = data.puzzle;
   slots = data.slots;
   selected = null;
+  clearFillFailedHighlight();
+  clearForcedCells();
   clearVerificationCache();
   renderAll();
 }
@@ -1894,9 +1896,14 @@ function wireDictTab() {
     if (!file) return;
     const formData = new FormData();
     formData.append("file", file);
-    await api("/api/dictionaries/upload", { method: "POST", body: formData });
-    await loadDictionaries();
-    setStatus(`Uploaded dictionary "${file.name}"`, "ok");
+    try {
+      await api("/api/dictionaries/upload", { method: "POST", body: formData });
+      await loadDictionaries();
+      setStatus(`Uploaded dictionary "${file.name}"`, "ok");
+    } catch (err) {
+      setStatus(`Dictionary upload failed: ${err.message}`, "error");
+    }
+    e.target.value = "";
   });
 }
 
@@ -2339,7 +2346,15 @@ function exportImage(kind) {
   }
   const filename = `${kind}.png`;
   canvas.toBlob((blob) => {
-    if (!blob) return;
+    // toBlob's callback, not the synchronous call below it, is when the
+    // PNG actually exists (or doesn't) -- reporting "Exported" right
+    // after just calling toBlob() claimed success unconditionally,
+    // before the async encode even ran, let alone before knowing whether
+    // it produced a real blob at all.
+    if (!blob) {
+      setStatus("Image export failed -- no image data was produced", "error");
+      return;
+    }
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -2348,13 +2363,33 @@ function exportImage(kind) {
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    setStatus(`Exported ${filename}`, "ok");
   }, "image/png");
-  setStatus(`Exported ${filename}`, "ok");
 }
 
 // ---------------------------------------------------------------------------
 // Toolbar: new / import / export / fill
 // ---------------------------------------------------------------------------
+
+// New/Import/Load all replace `puzzle` wholesale -- none of them checked
+// whether a Fill was still streaming in the background first. That Fill's
+// next "improved"/"done" event would then call applyScopedResultLetters
+// against whatever puzzle is current BY THEN (the new one), while reading
+// letters computed for the OLD one: if the new grid is smaller, indexing
+// throws (aborting the stream, confusingly, mid this unrelated action);
+// if it's the same size or larger, it silently writes the old fill's
+// letters into cells of the brand-new grid. A synchronous "cancel and
+// proceed" isn't enough on its own to close this -- cancelFill() only
+// sends the cancel signal, it doesn't wait for runFill()'s own stream
+// loop to actually finish handling whatever event is already in flight --
+// so this refuses outright instead, same as clicking New/Import/Load
+// mid-Fill would feel like a confusing no-op or a silent corruption
+// either way; an explicit Cancel first is one extra click, not a real cost.
+function blockedByActiveFill() {
+  if (!filling) return false;
+  setStatus("A Fill is still running -- cancel it first", "error");
+  return true;
+}
 
 function wireToolbar() {
   const newGridOverlay = document.getElementById("new-grid-overlay");
@@ -2379,8 +2414,13 @@ function wireToolbar() {
     const height = parseInt(newGridHeight.value, 10);
     closeNewGridDialog();
     if (!width || !height) return;
-    await newPuzzle(width, height);
-    setStatus(`New ${width}×${height} grid`, "ok");
+    if (blockedByActiveFill()) return;
+    try {
+      await newPuzzle(width, height);
+      setStatus(`New ${width}×${height} grid`, "ok");
+    } catch (err) {
+      setStatus(`New grid failed: ${err.message}`, "error");
+    }
   };
 
   document.getElementById("btn-new").addEventListener("click", openNewGridDialog);
@@ -2407,6 +2447,10 @@ function wireToolbar() {
   document.getElementById("input-import").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+    if (blockedByActiveFill()) {
+      e.target.value = "";
+      return;
+    }
     const formData = new FormData();
     formData.append("file", file);
     try {
@@ -2419,6 +2463,7 @@ function wireToolbar() {
       slots = data.slots;
       selected = null;
       clearFillFailedHighlight();
+      clearForcedCells();
       clearVerificationCache();
       renderAll();
       setStatus(data.warning ? `Imported "${file.name}" — ${data.warning}` : `Imported "${file.name}"`, data.warning ? "error" : "ok");
@@ -2550,6 +2595,10 @@ function wireSaveLoad() {
   document.getElementById("load-select").addEventListener("change", async (e) => {
     const name = e.target.value;
     if (!name) return;
+    if (blockedByActiveFill()) {
+      e.target.value = currentSaveName || "";
+      return;
+    }
     try {
       const data = await apiJson("/api/puzzle/load", { name });
       if (puzzle) {
@@ -2561,6 +2610,7 @@ function wireSaveLoad() {
       slots = data.slots;
       selected = null;
       clearFillFailedHighlight();
+      clearForcedCells();
       clearVerificationCache();
       renderAll();
       setStatus(`Loaded "${data.name}"`, "ok");

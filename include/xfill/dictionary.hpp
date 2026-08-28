@@ -275,8 +275,17 @@ class Dictionary {
   // by score in O(k log k) instead of walking the *whole* ScoreOrder list
   // checking membership, which costs O(NumWordsOfLength) regardless of how
   // few candidates actually remain.
+  // Bounds-checked like LetterMask above, not trusted-caller-only like
+  // most of this hot path: unlike a domain-derived word_index (always
+  // provably in range for that length), `length` itself isn't always
+  // something the solver has already proven has a nonempty domain at the
+  // call site -- a defensive check here is a single, reliably-predicted
+  // branch, cheap insurance against a slot length the dictionary has zero
+  // (or too-short) entries for.
   size_t ScoreRank(int length, size_t word_index) const {
-    return score_rank_by_length_[static_cast<size_t>(length)][word_index];
+    if (length < 0 || static_cast<size_t>(length) >= score_rank_by_length_.size()) return 0;
+    const std::vector<size_t>& ranks = score_rank_by_length_[static_cast<size_t>(length)];
+    return word_index < ranks.size() ? ranks[word_index] : 0;
   }
 
   // Raw score of a specific word. Used by the score-maximizing search
@@ -284,8 +293,11 @@ class Dictionary {
   // score; the plain first-solution search never needs this (it only
   // ever compares words *relative* to each other via ScoreOrder/ScoreRank),
   // so this stays out of that hot path entirely.
+  // Bounds-checked for the same reason as ScoreRank just above.
   int WordScore(int length, size_t word_index) const {
-    return scores_by_length_[static_cast<size_t>(length)][word_index];
+    if (length < 0 || static_cast<size_t>(length) >= scores_by_length_.size()) return 0;
+    const std::vector<int>& scores = scores_by_length_[static_cast<size_t>(length)];
+    return word_index < scores.size() ? scores[word_index] : 0;
   }
 
   // The highest score among `domain`'s set bits, via ScoreOrder (already

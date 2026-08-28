@@ -498,6 +498,19 @@ void Solver::MaximizeBacktrack(std::vector<WordBitset>& domains,
       if (shared_best_score.compare_exchange_weak(expected, current_score)) {
         Solution sol = ExtractSolution(domains);
         std::lock_guard<std::mutex> lock(callback_mutex);
+        // Re-check under the lock: this CAS and callback_mutex are two
+        // independent synchronization points, so a *different* worker can
+        // win a later, higher CAS and call on_improved before this worker
+        // even reaches the lock_guard above -- without this check, this
+        // worker would then call on_improved with its own, now-stale,
+        // lower score, and on_improved's caller (MaximizeScoreParallel's
+        // wrapped_on_improved) unconditionally overwrites `best_solution`
+        // on every call, so that stale call would silently replace an
+        // already-reported better solution with a worse one. Since
+        // shared_best_score only ever increases, "is my score still the
+        // current global best" is exactly "hasn't some other call already
+        // reported something at least as good."
+        if (current_score < shared_best_score.load(std::memory_order_relaxed)) return;
         on_improved(sol, current_score);
         break;
       }

@@ -33,7 +33,17 @@ std::vector<std::string> FilledGridRows(const xfill::Grid& grid, const xfill::So
   for (int r = 0; r < height; ++r) {
     for (int c = 0; c < width; ++c) {
       if (!grid.IsBlocked(r, c)) {
-        chars[static_cast<size_t>(r) * static_cast<size_t>(width) + static_cast<size_t>(c)] = '.';
+        // An isolated open cell -- part of no across/down run of length
+        // >= 2, so ComputeSlots never creates a slot covering it -- is
+        // never touched by the per-slot loop below. Falling back to
+        // whatever was seeded there directly (the same PrefilledLetter
+        // BuildInitialDomains/to_grid_spec already consult) means a
+        // pre-typed letter in such a cell survives into the output,
+        // instead of silently reverting to '.' even on a genuine,
+        // complete solution.
+        char prefilled = grid.PrefilledLetter(r, c);
+        chars[static_cast<size_t>(r) * static_cast<size_t>(width) + static_cast<size_t>(c)] =
+            prefilled != '\0' ? prefilled : '.';
       }
     }
   }
@@ -213,6 +223,19 @@ std::unordered_map<int, int> ParseLengthScoreMap(const std::string& s) {
   return out;
 }
 
+// std::stoul silently accepts a leading '-' and wraps a negative value into
+// a huge unsigned one instead of throwing (it parses the digits after the
+// sign, then two's-complement-wraps the negation) -- "--threads -1" would
+// otherwise become num_threads=4294967295 on a typical build, which
+// SolveParallel/MaximizeScoreParallel then try to actually size a thread
+// pool and spawn loop from, rather than a clean "invalid --threads" error.
+unsigned ParseThreadCount(const std::string& s) {
+  if (s.empty() || s.find('-') != std::string::npos) {
+    throw std::runtime_error("invalid thread count: " + s + " (must be a non-negative integer)");
+  }
+  return static_cast<unsigned>(std::stoul(s));
+}
+
 // New flag-based invocation, used by the GUI backend so across/down can
 // have independent dictionaries and min scores:
 //   xfill_cli <grid_file> --dict <path> [--min-score <n>]
@@ -251,7 +274,7 @@ Args ParseFlagArgs(int argc, char** argv) {
     } else if (flag == "--down-min-overrides") {
       args.down_min_overrides = ParseLengthScoreMap(next());
     } else if (flag == "--threads") {
-      args.num_threads = static_cast<unsigned>(std::stoul(next()));
+      args.num_threads = ParseThreadCount(next());
     } else if (flag == "--json") {
       args.json = true;
     } else if (flag == "--progress") {
@@ -305,7 +328,8 @@ int main(int argc, char** argv) {
            "{\"progress\":true,\"nodes\":N} line to stdout roughly every "
            "150ms\n"
            "  (N = total nodes visited across every worker so far), "
-           "ahead of the final result line. Flag-mode only.\n"
+           "ahead of the final result line. Implies --json (so the whole "
+           "stream stays line-delimited JSON). Flag-mode only.\n"
            "  --maximize: run the separate branch-and-bound score-"
            "maximizing search instead of the default first-solution "
            "search.\n"
@@ -342,8 +366,16 @@ int main(int argc, char** argv) {
       args.grid_path = argv[1];
       args.across_dict_path = args.down_dict_path = argv[2];
       args.across_min_score = args.down_min_score = argc >= 4 ? std::stoi(argv[3]) : 0;
-      args.num_threads = argc >= 5 ? static_cast<unsigned>(std::stoul(argv[4])) : 0;
+      args.num_threads = argc >= 5 ? ParseThreadCount(argv[4]) : 0;
     }
+    // --progress's own output is always a JSON line ({"progress":true,...})
+    // -- without --json, the plain-text final-result path below would still
+    // follow it with non-JSON lines (a WriteFilledGrid grid dump, then a
+    // "nodes=... time=..." summary), leaving a line-by-line JSON reader
+    // unable to parse the stream past the progress lines. --maximize
+    // already has this same "always JSON regardless of the flag" rule (see
+    // its own help text above); --progress gets it for the same reason.
+    if (args.progress) args.json = true;
 
     xfill::Grid grid = xfill::Grid::FromFile(args.grid_path);
     xfill::MinScoreByLength across_min(args.across_min_score);

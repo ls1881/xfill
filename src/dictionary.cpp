@@ -140,13 +140,35 @@ Dictionary Dictionary::LoadFromFile(const std::string& path, MinScoreByLength mi
   dict.allowed_down_by_length_.resize(num_lengths);
 
   for (auto& [length, entries] : parsed) {
+    // Dedup by word text, keeping the higher score for a duplicate -- same
+    // rule LoadDual already applies when merging two files. The same word
+    // can legitimately appear twice in one file (common in merged/scraped
+    // wordlists); without this, each occurrence became its own separate
+    // index within this length group, and the solver's global "words
+    // already used elsewhere" exclusion operates on indices, not word
+    // text -- so the same word could be placed into two different slots
+    // of one solved grid. First-occurrence order is kept (not sorted) so
+    // this stays as close as possible to the previous, no-duplicates
+    // behavior's word ordering.
+    std::unordered_map<std::string, int> best_score_by_word;
+    std::vector<std::string> order;
+    order.reserve(entries.size());
+    for (const ParsedEntry& e : entries) {
+      auto [it, inserted] = best_score_by_word.try_emplace(e.word, e.score);
+      if (inserted) {
+        order.push_back(e.word);
+      } else if (e.score > it->second) {
+        it->second = e.score;
+      }
+    }
+
     std::vector<std::string>& words = dict.words_by_length_[static_cast<size_t>(length)];
     std::vector<int>& scores = dict.scores_by_length_[static_cast<size_t>(length)];
-    words.reserve(entries.size());
-    scores.reserve(entries.size());
-    for (auto& e : entries) {
-      words.push_back(std::move(e.word));
-      scores.push_back(e.score);
+    words.reserve(order.size());
+    scores.reserve(order.size());
+    for (std::string& w : order) {
+      scores.push_back(best_score_by_word.at(w));
+      words.push_back(std::move(w));
     }
     // No per-direction restriction -- every word this Dictionary knows is
     // usable in either direction (see AllowedMask's doc comment).

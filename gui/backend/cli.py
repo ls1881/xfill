@@ -111,8 +111,13 @@ def _parse_overrides(spec: str | None) -> dict[int, int]:
         pair = pair.strip()
         if not pair:
             continue
-        length_s, _, score_s = pair.partition(":")
-        overrides[int(length_s)] = int(score_s)
+        length_s, sep, score_s = pair.partition(":")
+        if not sep:
+            raise ValueError(f'malformed length:score pair {pair!r} (expected e.g. "3:25")')
+        try:
+            overrides[int(length_s)] = int(score_s)
+        except ValueError as e:
+            raise ValueError(f"malformed length:score pair {pair!r}: {e}") from e
     return overrides
 
 
@@ -141,11 +146,18 @@ def _resolve_settings(args: argparse.Namespace, config: dict) -> dict:
             return config[config_key]
         return shared_value if shared_value is not None else default
 
-    across_overrides = _parse_overrides(args.across_min_overrides)
-    down_overrides = _parse_overrides(args.down_min_overrides)
-    if not across_overrides:
+    # None (the flag was never passed) is what falls back to the config
+    # file's own overrides -- an explicitly-passed-but-empty flag
+    # (--across-min-overrides "", parsing to {}) must be honored as "no
+    # overrides for this run," not silently replaced by the config's,
+    # which comparing the *parsed result*'s truthiness (the previous
+    # version of this code) couldn't tell apart from "flag not given" at
+    # all, since both produce the same falsy {}.
+    across_overrides = _parse_overrides(args.across_min_overrides) if args.across_min_overrides is not None else None
+    down_overrides = _parse_overrides(args.down_min_overrides) if args.down_min_overrides is not None else None
+    if across_overrides is None:
         across_overrides = {int(k): v for k, v in config.get("across_min_overrides", {}).items()}
-    if not down_overrides:
+    if down_overrides is None:
         down_overrides = {int(k): v for k, v in config.get("down_min_overrides", {}).items()}
 
     return {
@@ -156,7 +168,13 @@ def _resolve_settings(args: argparse.Namespace, config: dict) -> dict:
         "across_min_overrides": across_overrides,
         "down_min_overrides": down_overrides,
         "threads": resolve(args.threads, "threads", None, 0),
-        "maximize": args.maximize if args.maximize else config.get("maximize", False),
+        # args.maximize is None when neither --maximize nor --no-maximize
+        # was passed (see _build_arg_parser's BooleanOptionalAction), so
+        # resolve()'s existing "flag_value is not None means given" rule
+        # already does the right thing here too -- including an explicit
+        # --no-maximize (args.maximize is False, which is not None)
+        # correctly overriding a config file's "maximize": true.
+        "maximize": resolve(args.maximize, "maximize", None, False),
     }
 
 
@@ -180,7 +198,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--across-min-overrides", help='Per-length min-score overrides for across, e.g. "3:10,15:60"')
     p.add_argument("--down-min-overrides", help='Per-length min-score overrides for down, e.g. "3:10,15:60"')
     p.add_argument("--threads", type=int, help="Worker thread count (0 = use every available core)")
-    p.add_argument("--maximize", action="store_true", help="Keep searching for a higher-scoring fill instead of stopping at the first valid one (branch-and-bound; slower, interruptible with Ctrl+C)")
+    # BooleanOptionalAction (not plain action="store_true") so this has a
+    # real three-state default of None, meaning "not specified on the
+    # command line" -- a bare store_true flag can only ever be True or
+    # False, with no way to tell "the user didn't mention this" apart
+    # from "the user explicitly turned it off," so a --config file's
+    # "maximize": true could never be overridden back to false from the
+    # command line (see --no-maximize below), contradicting this script's
+    # own documented "a flag always overrides the same config setting"
+    # rule.
+    # BooleanOptionalAction generates --no-maximize automatically from this
+    # one entry -- passing both explicitly conflicts with that generation.
+    p.add_argument(
+        "--maximize", dest="maximize", default=None, action=argparse.BooleanOptionalAction,
+        help="Keep searching for a higher-scoring fill instead of stopping at the first valid one (branch-and-bound; slower, interruptible with Ctrl+C). --no-maximize forces it off, overriding a --config file that sets it on.",
+    )
     p.add_argument("--quiet", action="store_true", help="Suppress progress output on stderr; only the final summary is printed")
     p.add_argument("--show-config-example", action="store_true", help="Print an example --config JSON file and exit")
     return p
@@ -215,7 +247,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: could not read config {args.config}: {e}", file=sys.stderr)
             return 1
 
-    settings = _resolve_settings(args, config)
+    try:
+        settings = _resolve_settings(args, config)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     if not settings["across_dict"] or not settings["down_dict"]:
         print(
             "error: no dictionary specified for one or both directions -- pass --dict, "
@@ -269,6 +305,16 @@ def main(argv: list[str] | None = None) -> int:
                 solver_bridge.apply_solution(puzzle, {"solved": True, "grid": event.get("grid")})
             else:
                 final_event = event
+    except solver_bridge.SolveError as e:
+        # Raised before solve_stream ever yields anything -- xfill_cli
+        # missing (not built yet) or a spawn failure -- unlike app.py's
+        # /api/fill, which already catches this same exception and turns
+        # it into a clean {"type":"error",...} event, this loop had no
+        # equivalent, so it fell straight through to a raw Python
+        # traceback instead of the same controlled "error: ..." message
+        # every other failure path in this function already uses.
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     finally:
         signal.signal(signal.SIGINT, old_handler)
 

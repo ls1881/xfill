@@ -17,10 +17,11 @@ import json
 import pathlib
 import re
 
+import anyio.to_thread
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 import cfp_format
 import dict_lookup
@@ -56,6 +57,27 @@ class PuzzleModel(BaseModel):
     copyright: str = ""
     notes: str = ""
     clues: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def _check_dimensions(self) -> "PuzzleModel":
+        # Nothing else validated this before to_puzzle() handed a malformed
+        # payload straight to Puzzle -- a client sending fewer rows/columns
+        # than width/height claims (a truncated payload, a frontend bug)
+        # would pass right through, and the first out-of-range access deep
+        # inside grid_model.py (e.g. compute_slots()'s blocked[r][c]) would
+        # raise a raw, unhandled IndexError -- a 500 with a confusing
+        # traceback instead of a clear 400 pointing at the actual problem.
+        if len(self.blocks) != self.height:
+            raise ValueError(f"blocks has {len(self.blocks)} rows, expected height={self.height}")
+        if len(self.letters) != self.height:
+            raise ValueError(f"letters has {len(self.letters)} rows, expected height={self.height}")
+        for r, row in enumerate(self.blocks):
+            if len(row) != self.width:
+                raise ValueError(f"blocks[{r}] has {len(row)} columns, expected width={self.width}")
+        for r, row in enumerate(self.letters):
+            if len(row) != self.width:
+                raise ValueError(f"letters[{r}] has {len(row)} columns, expected width={self.width}")
+        return self
 
     def to_puzzle(self) -> Puzzle:
         return Puzzle(
@@ -308,7 +330,13 @@ def list_dictionaries():
 async def upload_dictionary(file: UploadFile):
     dest = DICT_DIR / pathlib.Path(file.filename).name
     data = await file.read()
-    dest.write_bytes(data)
+    # dest.write_bytes is a blocking, synchronous disk write -- calling it
+    # directly in this async handler would stall the single event loop
+    # thread for its whole duration, freezing every OTHER concurrent
+    # request (in-flight /api/fill progress streaming included) until it
+    # finishes. A large dictionary upload makes this a real, reproducible
+    # stall, not just a theoretical one.
+    await anyio.to_thread.run_sync(dest.write_bytes, data)
     # Re-uploading an existing filename overwrites it on disk -- without
     # this, /api/options would keep serving dict_lookup's cached,
     # pre-overwrite word list for this path indefinitely (see

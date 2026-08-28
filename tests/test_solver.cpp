@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <mutex>
+#include <vector>
+
 #include "test_helpers.hpp"
 #include "xfill/grid.hpp"
 #include "xfill/solver.hpp"
@@ -225,4 +228,77 @@ TEST_CASE("Backtrack's large-domain word-shuffle branch still finds a valid solu
   // No crossings to satisfy here (row 1 is blocked) -- correctness just
   // means the no-duplicate-words rule still held under the shuffled path.
   REQUIRE(solution->assignment.at(0) != solution->assignment.at(1));
+}
+
+TEST_CASE("MaximizeScoreParallel's on_improved callbacks are monotonically increasing and match the returned solution") {
+  // Regression test for a cross-thread reporting race: MaximizeBacktrack's
+  // shared_best_score CAS ratchet correctly enforces a strictly-increasing
+  // *score* sequence, but (before the fix this guards) the on_improved
+  // callback invocations themselves were serialized only by callback_mutex,
+  // whose acquisition order isn't tied to CAS order -- a worker that won an
+  // earlier, lower CAS could still be scheduled to acquire the mutex AFTER
+  // a worker that won a later, higher CAS, and call on_improved with its
+  // own stale, lower score, overwriting a caller's "best solution so far"
+  // with a worse one. Exercised with several threads and many repetitions
+  // (a race is inherently timing-dependent, not something one run reliably
+  // triggers) against this exact 2x2 fixture, already hand-verified
+  // elsewhere this session to have exactly two complete solutions scoring
+  // 102 and 140 -- enough distinct scores for a real ratchet sequence to
+  // occur, not just a single trivial "first and only improvement".
+  auto grid = xfill::Grid::FromSpec({"..", ".."});
+  auto dict = WriteAndLoadDict(
+      "test_maximize_race.dict",
+      {"AB;90", "CD;10", "AC;1", "BD;1", "CA;20", "DB;20"});
+
+  // Sums a solution's true total score by looking up each assigned word's
+  // index (by text -- Dictionary has no word-index reverse lookup, and this
+  // fixture is tiny enough that a linear scan per slot is fine for a test)
+  // and reading WordScore for it -- independent of whatever score value the
+  // solve's own bookkeeping reported, so this actually checks the returned
+  // Solution is self-consistent with the dictionary, not just internally
+  // consistent with itself.
+  auto true_score = [&](const xfill::Solution& sol) {
+    int64_t total = 0;
+    for (const xfill::Slot& s : grid.slots()) {
+      const std::string& word = sol.assignment.at(s.id);
+      const std::vector<std::string>& words_of_length = dict.WordsOfLength(s.length);
+      for (size_t i = 0; i < words_of_length.size(); ++i) {
+        if (words_of_length[i] == word) {
+          total += dict.WordScore(s.length, i);
+          break;
+        }
+      }
+    }
+    return total;
+  };
+
+  for (int iteration = 0; iteration < 200; ++iteration) {
+    std::mutex log_mutex;
+    std::vector<int64_t> reported_scores;
+    auto on_improved = [&](const xfill::Solution&, int64_t score) {
+      std::lock_guard<std::mutex> lock(log_mutex);
+      reported_scores.push_back(score);
+    };
+
+    auto best = xfill::Solver::MaximizeScoreParallel(grid, dict, /*num_threads=*/8, on_improved);
+    REQUIRE(best.has_value());
+
+    // The core property the race could break: every reported score is
+    // strictly greater than the one before it. A worker reporting its own
+    // stale, superseded score after a better one was already reported
+    // would show up here as a non-increasing (or decreasing) step.
+    for (size_t i = 1; i < reported_scores.size(); ++i) {
+      REQUIRE(reported_scores[i] > reported_scores[i - 1]);
+    }
+    // The final returned Solution's real, independently-recomputed score
+    // must match the last (highest) value ever reported -- this is exactly
+    // what a stale overwrite would violate: the *returned* solution being
+    // worse than what was actually already reported as achieved.
+    REQUIRE_FALSE(reported_scores.empty());
+    REQUIRE(true_score(*best) == reported_scores.back());
+    // For this fixture specifically: the true optimum is 140 (CD/AB
+    // across, giving CA/DB down), so an exhaustive maximize search should
+    // always land there, every iteration.
+    REQUIRE(reported_scores.back() == 140);
+  }
 }
