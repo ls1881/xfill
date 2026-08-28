@@ -131,6 +131,12 @@ let lastRenderedCandidates = [];
 let previewSlotId = null;
 let previewWord = null;
 let previewGrid = null;
+// Whether previewGrid is a verified candidate's real, whole-puzzle solved
+// grid, vs. an unverified candidate's own-word-only stand-in
+// (singleSlotPreviewGrid) -- see updateAcceptFillButton, which only shows
+// its button for the former: committing the latter wouldn't be a "full
+// sample fill" at all, just one slot's word.
+let previewIsVerified = false;
 
 const EMPTY = "-";
 
@@ -277,13 +283,15 @@ function clearPreview() {
   previewSlotId = null;
   previewWord = null;
   previewGrid = null;
+  previewIsVerified = false;
   updateAcceptFillButton();
 }
 
-function setPreview(slotId, word, grid) {
+function setPreview(slotId, word, grid, isVerified) {
   previewSlotId = slotId;
   previewWord = word;
   previewGrid = grid;
+  previewIsVerified = isVerified;
   updateAcceptFillButton();
 }
 
@@ -307,12 +315,15 @@ function cancelPendingOptionClick() {
 }
 
 // Shows/hides the "Accept full sample fill" button in lockstep with
-// whether a preview is currently active -- the button is just an explicit,
-// discoverable way to trigger the same commitPreview() a second click on
-// the previewed option already does.
+// whether a *verified* preview is currently active -- the button is just
+// an explicit, discoverable way to trigger the same commitPreview() a
+// second click on the previewed option already does, but only makes sense
+// for a verified candidate's real, whole-puzzle preview: an unverified
+// one's preview is just that single word (singleSlotPreviewGrid), not a
+// "full sample fill" the button's own label promises.
 function updateAcceptFillButton() {
   const btn = document.getElementById("btn-accept-fill");
-  if (btn) btn.hidden = previewGrid === null;
+  if (btn) btn.hidden = previewGrid === null || !previewIsVerified;
 }
 
 function undo() {
@@ -1424,15 +1435,15 @@ function onOptionClick(slot, word) {
   const verified = getVerifiedMap(slot).get(word);
   if (previewSlotId === slot.id && previewWord === word) {
     if (verified?.feasible && verified.grid) {
-      setPreview(slot.id, word, verified.grid);
+      setPreview(slot.id, word, verified.grid, true);
     }
     commitPreview();
     return;
   }
   if (verified?.feasible && verified.grid) {
-    setPreview(slot.id, word, verified.grid);
+    setPreview(slot.id, word, verified.grid, true);
   } else {
-    setPreview(slot.id, word, singleSlotPreviewGrid(slot, word));
+    setPreview(slot.id, word, singleSlotPreviewGrid(slot, word), false);
   }
   renderGrid();
 }
