@@ -38,6 +38,8 @@ below is backed by a measurement, not an assumption: see
 - [Grid format](#grid-format)
 - [Building](#building)
 - [Running](#running)
+- [Python CLI](#python-cli)
+- [GUI](#gui)
 - [Benchmarking](#benchmarking)
 - [License](#license)
 
@@ -276,6 +278,95 @@ ctest --test-dir build --output-on-failure
 (see "Parallel restarts" above). Pass `1` for the old single-threaded
 behavior — useful for reproducible timing, or comparing against a build
 predating `SolveParallel`.
+
+## Python CLI
+
+`xfill_cli` above only understands the plain-text grid-spec format, and
+takes a dictionary/min-score pair as raw positional arguments or flags —
+fine for benchmarking and scripting against the engine directly, but not
+what you want if your puzzle is a real `.puz`/`.ipuz` file and you'd
+rather not hand-convert it first. `gui/backend/cli.py` is a thin
+higher-level wrapper around the exact same C++ solver (it shells out to
+`xfill_cli` under the hood, via `solver_bridge.py`) that reads and writes
+real crossword files directly, and lets dictionary/score settings live in
+a JSON config file instead of being retyped on every invocation.
+
+It has no dependencies beyond the standard library and the built
+`xfill_cli` binary — no `pip install`, no virtualenv, unlike the GUI's own
+backend (below) which needs FastAPI/uvicorn. Requires Python 3.10+.
+
+```bash
+# Same dictionary/min-score for both directions, written to
+# mypuzzle_filled.puz next to the input (the default output path when -o
+# is omitted).
+python3 gui/backend/cli.py mypuzzle.puz --dict data/spreadthewordlist_caps.txt --min-score 40
+
+# Different dictionary/threshold per direction, explicit output path.
+python3 gui/backend/cli.py grid.txt \
+  --across-dict across.txt --across-min 30 \
+  --down-dict down.txt --down-min 50 \
+  -o filled.txt
+
+# Keep your usual settings in a config file; override just one flag
+# for this run.
+python3 gui/backend/cli.py mypuzzle.ipuz --config myconfig.json --maximize
+```
+
+Accepted input formats (auto-detected by extension): `.puz`, `.ipuz`,
+`.cfp` (best-effort — see `gui/backend/cfp_format.py`'s own docstring for
+why), or xfill's own plain-text grid-spec format under any other
+extension (`.txt` is the natural choice) — the same `.`/`#`/letter format
+`xfill_cli` takes directly. Output format is inferred from `-o`'s
+extension, or forced explicitly with `--format {puz,ipuz,cfp,txt}`.
+
+A rebus square already placed in the input (a cell holding more than one
+character, e.g. `"STAR"`) is preserved exactly — the solver only ever
+sees its first letter as a crossing constraint, never overwrites the
+real, full answer. `--maximize` runs the same branch-and-bound
+score-maximizing search as `xfill_cli`'s own `--maximize` flag, and is
+interruptible with Ctrl+C (keeps the best fill found so far rather than
+losing all progress).
+
+Run `python3 gui/backend/cli.py --help` for the full flag reference, or
+`--show-config-example` to print a config file with every recognized key:
+
+```json
+{
+  "across_dict": "/path/to/across_words.txt",
+  "across_min_score": 40,
+  "down_dict": "/path/to/down_words.txt",
+  "down_min_score": 40,
+  "across_min_overrides": { "3": 10, "15": 60 },
+  "down_min_overrides": {},
+  "threads": 0,
+  "maximize": false
+}
+```
+
+A flag on the command line always overrides the same setting from
+`--config` — the config file is meant to hold your everyday defaults
+(dictionary paths, a usual minimum score), with flags for one-off
+tweaks. `--dict`/`--min-score` are a shorthand for "both directions the
+same"; `--across-*`/`--down-*` (as flags or config keys) still win over
+that shorthand for their own direction specifically.
+
+## GUI
+
+A browser-based constructor tool — grid editing, dictionary-driven Fill
+(this same solver, with live progress), a rebus editor, .puz/.ipuz/.cfp
+import/export, NYT-submission and one-page print layouts, and more — sits
+in `gui/`. Unlike the CLI above, it does need its own dependencies
+(FastAPI/uvicorn); `gui/run.sh` handles all of it — first run creates a
+venv and installs `gui/backend/requirements.txt`, builds `xfill_cli` if
+it isn't already, then starts the server:
+
+```bash
+./gui/run.sh
+```
+
+Then open `http://127.0.0.1:8791/` in a browser (`PORT=...` env var to
+use a different port). It serves both the API and the static frontend
+from that one process — nothing else to run.
 
 ## Benchmarking
 

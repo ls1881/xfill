@@ -93,11 +93,13 @@
 
   <main id="app">
     <section id="grid-panel">
+      <input type="text" id="grid-title" class="grid-title-input" placeholder="Untitled" />
       <div id="grid-wrap">
         <div id="grid"></div>
       </div>
     </section>
 
+    <div id="side-panel-resizer" title="Drag to resize"></div>
     <aside id="side-panel">
       <div class="tabs">
         <button class="tab-btn active" data-tab="summary">Summary</button>
@@ -115,9 +117,15 @@
         <table class="stats-table" id="stats-lengths"></table>
         <h3>Letter counts</h3>
         <div id="letter-grid"></div>
+        <h3>Shared substrings</h3>
+        <div class="toolbar-group substring-controls">
+          <label class="select-label">Min length <input type="number" id="substring-min-length" value="3" min="2" max="15" /></label>
+          <button type="button" id="btn-highlight-substrings">Highlight</button>
+        </div>
       </div>
 
       <div class="tab-panel" id="tab-clues">
+        <div id="clues-progress" class="hint"></div>
         <div class="clue-columns">
           <div>
             <h3>Across</h3>
@@ -205,6 +213,18 @@
       </div>
     </aside>
   </main>
+
+  <div class="modal-overlay" id="new-grid-overlay" hidden>
+    <div class="modal">
+      <h3>New grid</h3>
+      <label>Width <input type="number" id="new-grid-width" min="1" max="50" value="15" /></label>
+      <label>Height <input type="number" id="new-grid-height" min="1" max="50" value="15" /></label>
+      <div class="toolbar-group modal-actions">
+        <button type="button" id="new-grid-cancel">Cancel</button>
+        <button type="button" id="new-grid-ok" class="primary">Create</button>
+      </div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

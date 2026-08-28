@@ -63,6 +63,15 @@ let forcedCells = new Set();
 // set deliberately, not a stale solve result.
 let highlightedLengths = new Set();
 let highlightedLetters = new Set();
+// Same idea, one more filter: every cell that's part of a substring (at
+// least substringMinLength characters) shared between two or more
+// DIFFERENT filled entries -- a constructor's editorial check for
+// accidental fragment reuse across the grid. Off by default (a single
+// on/off toggle, not a set -- there's only one length threshold active at
+// once, unlike lengths/letters which can multi-select). See
+// computeSharedSubstringCells.
+let highlightSharedSubstrings = false;
+let substringMinLength = 3;
 
 // Per-candidate solve-feasibility checks for the Options panel (see
 // updateOptionsPanel), cached by (slot, pattern, dictionary) key so
@@ -551,6 +560,60 @@ function computeStatsHighlightCells() {
       }
     }
   }
+  if (highlightSharedSubstrings) {
+    for (const key of computeSharedSubstringCells(substringMinLength)) cells.add(key);
+  }
+  return cells;
+}
+
+// This slot's word, one character per CELL -- a rebus cell (see
+// isRebusCell) contributes only its own first character, the same
+// convention used everywhere else exactly one character per cell is
+// needed (e.g. the solver's crossing constraints). Keeps every substring
+// position mapped to exactly one grid cell, with no ambiguity from a
+// multi-character rebus square spanning more than its one cell's worth of
+// "substring space." Returns null if any cell is still blank -- a
+// substring straddling an unfilled cell isn't a real match yet.
+function slotSolvingWord(slot) {
+  const chars = slot.cells.map(([r, c]) => {
+    const letter = puzzle.letters[r][c];
+    return letter && letter !== EMPTY ? letter[0] : null;
+  });
+  return chars.includes(null) ? null : chars.join("");
+}
+
+// Every cell that's part of a substring at least `minLength` characters
+// long shared between two or more DIFFERENT slots (across and down mixed
+// together -- a repeated fragment is worth flagging regardless of which
+// directions it appears in) -- an editorial check for accidental fragment
+// reuse across the grid. Implemented via minLength-character n-grams:
+// hand-verified that this still fully covers any LONGER shared run too,
+// since a shared run of length minLength+k contains k+1 overlapping
+// minLength-length windows, each independently shared at correspondingly
+// shifted positions -- so their union covers the run's every cell.
+function computeSharedSubstringCells(minLength) {
+  const cells = new Set();
+  if (!minLength || minLength < 1) return cells;
+  const ngramOccurrences = new Map(); // n-gram string -> [{slot, start}, ...]
+  for (const s of slots) {
+    const word = slotSolvingWord(s);
+    if (!word || word.length < minLength) continue;
+    for (let i = 0; i + minLength <= word.length; i++) {
+      const gram = word.slice(i, i + minLength);
+      if (!ngramOccurrences.has(gram)) ngramOccurrences.set(gram, []);
+      ngramOccurrences.get(gram).push({ slot: s, start: i });
+    }
+  }
+  for (const occurrences of ngramOccurrences.values()) {
+    const distinctSlotIds = new Set(occurrences.map((o) => o.slot.id));
+    if (distinctSlotIds.size < 2) continue; // shared within just one word's own repeat doesn't count
+    for (const { slot, start } of occurrences) {
+      for (let k = 0; k < minLength; k++) {
+        const [r, c] = slot.cells[start + k];
+        cells.add(`${r},${c}`);
+      }
+    }
+  }
   return cells;
 }
 
@@ -909,8 +972,10 @@ function renderSummary() {
     ["Words", stats.word_count],
     ["Avg. word length", stats.avg_word_length],
     ["Avg. word score", stats.avg_word_score ?? "—"],
+    ["Scrabble avg.", stats.scrabble_avg ?? "—"],
     ["Blocks", `${stats.block_count} (${stats.block_percent}%)`],
     ["Letters filled", stats.letter_count],
+    ["Open squares", stats.open_square_count],
   ];
   general.innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v ?? ""}</td></tr>`).join("");
 
@@ -933,6 +998,15 @@ function renderSummary() {
   });
 
   renderLetterGrid();
+
+  const substringBtn = document.getElementById("btn-highlight-substrings");
+  if (substringBtn) {
+    // Reuses the existing button.primary look (already how e.g. the Fill
+    // button reads as "the active/primary action") rather than inventing
+    // a separate visual language just for this toggle.
+    substringBtn.classList.toggle("primary", highlightSharedSubstrings);
+    substringBtn.textContent = highlightSharedSubstrings ? "Hide" : "Highlight";
+  }
 }
 
 function renderLetterGrid() {
@@ -954,6 +1028,25 @@ function renderLetterGrid() {
   }
 }
 
+// Wired once (unlike the length rows/letter cells above, which are
+// rebuilt from scratch -- and re-wired -- on every renderSummary() call):
+// the button and number input here are static markup, so listening more
+// than once would just fire the handler redundantly per click.
+function wireSubstringHighlight() {
+  const minLengthInput = document.getElementById("substring-min-length");
+  document.getElementById("btn-highlight-substrings").addEventListener("click", () => {
+    highlightSharedSubstrings = !highlightSharedSubstrings;
+    renderSummary();
+    renderGrid();
+  });
+  minLengthInput.addEventListener("input", () => {
+    const value = parseInt(minLengthInput.value, 10);
+    if (!value || value < 1) return;
+    substringMinLength = value;
+    if (highlightSharedSubstrings) renderGrid();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Clues tab
 // ---------------------------------------------------------------------------
@@ -967,6 +1060,15 @@ function clueScoreSuffix(s) {
   if (s.score === undefined) return "";
   if (s.score === null) return ` <span class="clue-score clue-score-na">(N/A)</span>`;
   return ` <span class="clue-score">(${s.score})</span>`;
+}
+
+// A clue counts as written if it has any non-whitespace text -- matches
+// what a solver would actually see as "there's a clue here," not just
+// whether the field happens to be non-empty.
+function updateCluesProgress() {
+  const total = slots.length;
+  const cluedCount = slots.filter((s) => (puzzle.clues[s.id] || "").trim() !== "").length;
+  document.getElementById("clues-progress").textContent = `(${cluedCount} of ${total} words clued)`;
 }
 
 function renderClues() {
@@ -1006,11 +1108,17 @@ function renderClues() {
 
   document.getElementById("clues-across").innerHTML = build(across);
   document.getElementById("clues-down").innerHTML = build(down);
+  updateCluesProgress();
 
   document.querySelectorAll("[data-slot-input]").forEach((input) => {
     input.addEventListener("input", (e) => {
       const id = e.target.getAttribute("data-slot-input");
       puzzle.clues[id] = e.target.value;
+      // A cheap text update, not a full renderClues() -- rebuilding every
+      // clue <input> on each keystroke would steal focus out from under
+      // whichever one the user is actively typing into (see this
+      // function's own top-of-function comment on restoreFocus).
+      updateCluesProgress();
       scheduleSave();
     });
   });
@@ -1556,6 +1664,14 @@ function applyWordToSlot(slot, word) {
 // Dictionaries tab
 // ---------------------------------------------------------------------------
 
+// Called on initial boot AND after uploading a new dictionary (to pick up
+// the new entry in the <select> lists) -- those two cases need different
+// defaulting behavior, which is the whole reason this doesn't just always
+// reset to dictionaries[0]: on a fresh boot dictSelections starts empty,
+// so defaulting to the first dictionary is exactly right, but re-running
+// this after an upload was clobbering whatever the user had already
+// selected back to dictionaries[0] every time, even though their actual
+// selection was still perfectly valid in the refreshed list.
 async function loadDictionaries() {
   const data = await api("/api/dictionaries");
   dictionaries = data.dictionaries;
@@ -1564,10 +1680,20 @@ async function loadDictionaries() {
   const options = dictionaries.map((d) => `<option value="${d.path}">${escapeAttr(d.name)}</option>`).join("");
   acrossSel.innerHTML = options;
   downSel.innerHTML = options;
-  if (dictionaries.length) {
-    dictSelections.across.path = acrossSel.value = dictionaries[0].path;
-    dictSelections.down.path = downSel.value = dictionaries[0].path;
+  if (!dictionaries.length) return;
+
+  const knownPaths = new Set(dictionaries.map((d) => d.path));
+  // Only fall back to the first dictionary when there's genuinely nothing
+  // valid selected -- a fresh boot's empty path, or a previously-selected
+  // one that no longer exists in the refreshed list.
+  if (!dictSelections.across.path || !knownPaths.has(dictSelections.across.path)) {
+    dictSelections.across.path = dictionaries[0].path;
   }
+  if (!dictSelections.down.path || !knownPaths.has(dictSelections.down.path)) {
+    dictSelections.down.path = dictionaries[0].path;
+  }
+  acrossSel.value = dictSelections.across.path;
+  downSel.value = dictSelections.down.path;
 }
 
 // Rebuilds one length-override section's rows and wires each one's
@@ -1775,6 +1901,32 @@ function wireDictTab() {
 }
 
 // ---------------------------------------------------------------------------
+// Grid title -- an editable field directly above the grid, kept in sync
+// with the Info tab's own title field (see wireInfoTab's "title" case).
+// Two places to edit the same puzzle.title exist deliberately: the Info
+// tab is where every other piece of metadata (author, copyright, notes)
+// already lives, but a title is looked at and changed far more often than
+// those -- worth surfacing right where the grid itself is, not just
+// buried in a tab most sessions never open.
+// ---------------------------------------------------------------------------
+
+function renderGridTitle() {
+  const el = document.getElementById("grid-title");
+  if (!el || !puzzle) return;
+  if (document.activeElement !== el) el.value = puzzle.title || "";
+}
+
+function wireGridTitle() {
+  document.getElementById("grid-title").addEventListener("input", (e) => {
+    if (!puzzle) return;
+    puzzle.title = e.target.value;
+    const metaTitle = document.getElementById("meta-title");
+    if (metaTitle && document.activeElement !== metaTitle) metaTitle.value = puzzle.title;
+    scheduleSave();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Info tab
 // ---------------------------------------------------------------------------
 
@@ -1788,6 +1940,14 @@ function wireInfoTab() {
   for (const [elId, key] of fields) {
     document.getElementById(elId).addEventListener("input", (e) => {
       puzzle[key] = e.target.value;
+      // The title also has its own editable field above the grid (see
+      // wireGridTitle) -- keep the two in sync, but never while the other
+      // one currently has focus (that would stomp on an in-progress edit
+      // there mid-keystroke).
+      if (key === "title") {
+        const gridTitle = document.getElementById("grid-title");
+        if (gridTitle && document.activeElement !== gridTitle) gridTitle.value = puzzle.title;
+      }
       scheduleSave();
     });
   }
@@ -2197,12 +2357,51 @@ function exportImage(kind) {
 // ---------------------------------------------------------------------------
 
 function wireToolbar() {
-  document.getElementById("btn-new").addEventListener("click", async () => {
-    const width = parseInt(prompt("Grid width", "15") || "", 10);
-    const height = parseInt(prompt("Grid height", "15") || "", 10);
+  const newGridOverlay = document.getElementById("new-grid-overlay");
+  const newGridWidth = document.getElementById("new-grid-width");
+  const newGridHeight = document.getElementById("new-grid-height");
+
+  const openNewGridDialog = () => {
+    // Pre-filled with the current grid's own size rather than always
+    // resetting to 15x15 -- "New" from an existing 21x21 grid most likely
+    // means "start over at this same size," not "go back to the default."
+    newGridWidth.value = puzzle ? puzzle.width : 15;
+    newGridHeight.value = puzzle ? puzzle.height : 15;
+    newGridOverlay.hidden = false;
+    newGridWidth.focus();
+    newGridWidth.select();
+  };
+  const closeNewGridDialog = () => {
+    newGridOverlay.hidden = true;
+  };
+  const confirmNewGrid = async () => {
+    const width = parseInt(newGridWidth.value, 10);
+    const height = parseInt(newGridHeight.value, 10);
+    closeNewGridDialog();
     if (!width || !height) return;
     await newPuzzle(width, height);
     setStatus(`New ${width}×${height} grid`, "ok");
+  };
+
+  document.getElementById("btn-new").addEventListener("click", openNewGridDialog);
+  document.getElementById("new-grid-cancel").addEventListener("click", closeNewGridDialog);
+  document.getElementById("new-grid-ok").addEventListener("click", confirmNewGrid);
+  // Clicking the dimmed backdrop itself (not the modal box) cancels, same
+  // as Cancel -- e.target is the overlay only when the click didn't land
+  // on anything inside it.
+  newGridOverlay.addEventListener("click", (e) => {
+    if (e.target === newGridOverlay) closeNewGridDialog();
+  });
+  [newGridWidth, newGridHeight].forEach((input) => {
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmNewGrid();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        closeNewGridDialog();
+      }
+    });
   });
 
   document.getElementById("input-import").addEventListener("change", async (e) => {
@@ -2737,6 +2936,68 @@ function wireThemeToggle() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Side panel resize -- drag the thin strip between the grid and the side
+// panel to widen/narrow it. Tracked purely through the panel's own inline
+// style.width (set here, read back here), never getBoundingClientRect():
+// that needs a real layout pass to return anything meaningful, which a
+// headless test environment doesn't do, where reading back exactly what
+// this code itself just wrote works identically everywhere.
+// ---------------------------------------------------------------------------
+
+const SIDE_PANEL_DEFAULT_WIDTH = 380; // matches #side-panel's CSS default
+const SIDE_PANEL_MIN_WIDTH = 260;
+const SIDE_PANEL_MAX_WIDTH = 700;
+
+function wireSidePanelResizer() {
+  const resizer = document.getElementById("side-panel-resizer");
+  const sidePanel = document.getElementById("side-panel");
+
+  let savedWidth = null;
+  try {
+    savedWidth = parseInt(localStorage.getItem("xfill-sidepanel-width"), 10);
+  } catch (_) {
+    // No persisted width -- falls through to the CSS default below.
+  }
+  if (savedWidth && !Number.isNaN(savedWidth)) {
+    sidePanel.style.width = `${Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, savedWidth))}px`;
+  }
+
+  let dragging = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  resizer.addEventListener("mousedown", (e) => {
+    dragging = true;
+    startX = e.clientX;
+    startWidth = parseInt(sidePanel.style.width, 10) || SIDE_PANEL_DEFAULT_WIDTH;
+    resizer.classList.add("resizing");
+    document.body.style.userSelect = "none"; // keeps a fast drag from selecting page text
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!dragging) return;
+    // The panel sits on the right edge of the screen -- dragging the
+    // handle LEFT (negative delta) widens it, so this is subtraction.
+    const delta = e.clientX - startX;
+    const newWidth = Math.max(SIDE_PANEL_MIN_WIDTH, Math.min(SIDE_PANEL_MAX_WIDTH, startWidth - delta));
+    sidePanel.style.width = `${newWidth}px`;
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove("resizing");
+    document.body.style.userSelect = "";
+    try {
+      localStorage.setItem("xfill-sidepanel-width", String(parseInt(sidePanel.style.width, 10)));
+    } catch (_) {
+      // Losing the preference across reloads beats crashing over it.
+    }
+  });
+}
+
 function wireOptionsSort() {
   document.getElementById("options-sort-select").addEventListener("change", (e) => {
     optionsSortMode = e.target.value;
@@ -2785,6 +3046,7 @@ function renderAll() {
   renderClues();
   renderInfo();
   renderRebusTab();
+  renderGridTitle();
   updateOptionsPanel();
   refreshSlotsAndStats();
 }
@@ -2813,9 +3075,12 @@ async function main() {
   wireDictTab();
   wireInfoTab();
   wireRebusTab();
+  wireGridTitle();
   wireStyleControls();
   wireThemeToggle();
   wireOptionsSort();
+  wireSidePanelResizer();
+  wireSubstringHighlight();
   await loadDictionaries();
   refreshSavesList();
 

@@ -13,6 +13,19 @@ from dataclasses import dataclass, field
 BLOCK = "#"
 EMPTY = "-"  # open cell with no letter yet
 
+# Standard English Scrabble tile point values -- used by Puzzle.stats()'s
+# "scrabble_avg" (see there for how a rebus cell's several letters are
+# each counted individually, same as letter_counts already does).
+_SCRABBLE_VALUES = {
+    "A": 1, "E": 1, "I": 1, "O": 1, "U": 1, "L": 1, "N": 1, "S": 1, "T": 1, "R": 1,
+    "D": 2, "G": 2,
+    "B": 3, "C": 3, "M": 3, "P": 3,
+    "F": 4, "H": 4, "V": 4, "W": 4, "Y": 4,
+    "K": 5,
+    "J": 8, "X": 8,
+    "Q": 10, "Z": 10,
+}
+
 
 @dataclass
 class Slot:
@@ -163,6 +176,32 @@ class Puzzle:
             lines.append("".join(row_chars))
         return "\n".join(lines) + "\n"
 
+    @staticmethod
+    def from_grid_spec(text: str) -> "Puzzle":
+        """Inverse of to_grid_spec() -- reads xfill's own plain-text grid
+        format ('.'=open, '#'=block, any other character=a prefilled
+        letter, one row per line, blank lines ignored). Meant for a
+        constructor who wants to hand-author a bare grid layout (the CLI's
+        --input accepts this directly, via a .txt extension) without
+        needing a full .puz/.ipuz file just to describe the block pattern.
+        Every row must be the same width; raises ValueError otherwise,
+        since a ragged grid has no single `width` to report."""
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            raise ValueError("grid spec is empty")
+        width = len(lines[0])
+        for i, line in enumerate(lines):
+            if len(line) != width:
+                raise ValueError(f"line {i + 1} has length {len(line)}, expected {width} (every row must match the first row's width)")
+        puzzle = Puzzle.blank(width, len(lines))
+        for r, line in enumerate(lines):
+            for c, ch in enumerate(line):
+                if ch == "#":
+                    puzzle.blocks[r][c] = True
+                elif ch != ".":
+                    puzzle.letters[r][c] = ch.upper()
+        return puzzle
+
     def stats(self) -> dict:
         slots = self.compute_slots()
         word_count = len(slots)
@@ -191,6 +230,46 @@ class Puzzle:
                     # feature, which looks for a letter anywhere in a cell.
                     for single in ch:
                         letter_freq[single] = letter_freq.get(single, 0) + 1
+
+        # Average Scrabble tile value across every filled letter (a rebus
+        # cell's several letters each count individually, same as
+        # letter_freq above) -- a rough, standard proxy for how "easy" the
+        # current fill's letters were to place. A character with no
+        # Scrabble value (a symbol or digit in an unusual rebus) is simply
+        # skipped rather than raising, same spirit as letter_counts
+        # tolerating anything is_rebus produces.
+        scrabble_total = 0
+        scrabble_letter_count = 0
+        for r in range(self.height):
+            for c in range(self.width):
+                if self.blocks[r][c]:
+                    continue
+                ch = self.letters[r][c]
+                if ch == EMPTY:
+                    continue
+                for single in ch:
+                    value = _SCRABBLE_VALUES.get(single)
+                    if value is not None:
+                        scrabble_total += value
+                        scrabble_letter_count += 1
+        scrabble_avg = round(scrabble_total / scrabble_letter_count, 2) if scrabble_letter_count else None
+
+        # "Open" squares: open cells that don't touch the grid's outer
+        # border and have no blocked orthogonal neighbor either -- a rough
+        # measure of how much of the interior is unconstrained by any
+        # nearby block, since those are exactly the squares whose crossing
+        # entries can't lean on a block for a shorter, easier word.
+        open_square_count = 0
+        for r in range(self.height):
+            for c in range(self.width):
+                if self.blocks[r][c]:
+                    continue
+                if r == 0 or r == self.height - 1 or c == 0 or c == self.width - 1:
+                    continue
+                if self.blocks[r - 1][c] or self.blocks[r + 1][c] or self.blocks[r][c - 1] or self.blocks[r][c + 1]:
+                    continue
+                open_square_count += 1
+
         return {
             "word_count": word_count,
             "avg_word_length": round(avg_length, 2),
@@ -199,4 +278,6 @@ class Puzzle:
             "letter_count": letter_count,
             "length_breakdown": dict(sorted(length_breakdown.items())),
             "letter_counts": letter_freq,
+            "scrabble_avg": scrabble_avg,
+            "open_square_count": open_square_count,
         }

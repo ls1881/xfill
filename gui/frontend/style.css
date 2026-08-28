@@ -145,6 +145,50 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 .dropdown-menu button:hover { background: var(--accent-dim); }
 .dropdown-divider { border-top: 1px solid var(--border); margin: 4px 0; }
 
+/* A plain div-based modal rather than native <dialog>: the two behave
+   identically to a user (backdrop, centered box, Escape/backdrop-click to
+   cancel -- all wired in app.js), but this way stays exercisable by a
+   headless DOM test the same as any other element (jsdom doesn't
+   implement <dialog>.showModal()). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-overlay[hidden] { display: none; }
+.modal {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  min-width: 260px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+}
+.modal h3 { margin: 0 0 14px; }
+.modal label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.modal label input {
+  width: 80px;
+  background: var(--bg-panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 8px;
+  font-size: 0.9rem;
+}
+.modal-actions { justify-content: flex-end; margin-top: 16px; }
+
 .about-menu {
   right: 0;
   left: auto;
@@ -241,6 +285,26 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   padding: 24px;
   overflow: auto;
 }
+
+/* Looks like a plain heading at rest -- no border/background until
+   hovered or focused -- so it doesn't read as "just another form field"
+   sitting above the grid; the moment you interact with it, it's obviously
+   editable. */
+.grid-title-input {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 1.3rem;
+  font-weight: 700;
+  text-align: center;
+  padding: 4px 10px;
+  margin-bottom: 10px;
+  width: min(90%, 500px);
+}
+.grid-title-input::placeholder { color: var(--text-dim); font-weight: 400; }
+.grid-title-input:hover { border-color: var(--border); }
+.grid-title-input:focus { border-color: var(--accent); outline: none; background: var(--bg-panel-2); }
 
 #grid-wrap { display: flex; justify-content: center; }
 
@@ -365,6 +429,24 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   word-break: break-all;
 }
 
+/* Draggable to resize (see wireSidePanelResizer) -- a thin strip just wide
+   enough to grab reliably, widening slightly on hover/while dragging so
+   it's easy to find without adding visible bulk at rest. */
+#side-panel-resizer {
+  width: 5px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  background: transparent;
+  position: relative;
+}
+#side-panel-resizer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: 0 -3px;
+}
+#side-panel-resizer:hover, #side-panel-resizer.resizing { background: var(--accent); }
+
 #side-panel {
   width: 380px;
   flex-shrink: 0;
@@ -420,9 +502,21 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  margin: 16px 0 8px; /* the h3/label spacing this used to get from their own margins, moved to the row itself */
 }
-.min-score-header h3 { margin-bottom: 0; }
-.separate-min-toggle { margin: 0 0 8px; white-space: nowrap; }
+/* .tab-panel h3's own 16px top margin was still active here even with
+   margin-bottom zeroed out -- flexbox doesn't collapse margins the way
+   normal block flow does, so that asymmetric margin (16px top, 0 bottom)
+   on the h3 vs. the checkbox label's own (0 top, 8px bottom) shifted their
+   visible text out of alignment even though align-items: center was
+   centering each one's own margin box correctly. Zeroing both sides here
+   makes what's actually centered be the visible content itself. */
+.min-score-header h3 { margin: 0; }
+/* #tab-dict label's own margin-bottom: 10px (a shared rule for every
+   plain label in this tab) otherwise outranks a bare .separate-min-toggle
+   selector on specificity -- scoped under #tab-dict here too so this
+   actually wins. */
+#tab-dict .separate-min-toggle { margin: 0; white-space: nowrap; }
 
 .accept-fill-btn {
   display: block;
@@ -496,6 +590,8 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
 }
 #letter-grid .letter-cell .lc { color: var(--text-dim); }
 #letter-grid .letter-cell .lv { font-variant-numeric: tabular-nums; }
+
+.substring-controls input { width: 50px; }
 
 .clue-columns { display: flex; gap: 12px; }
 .clue-columns > div { flex: 1; min-width: 0; }
