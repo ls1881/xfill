@@ -320,9 +320,11 @@ extension (`.txt` is the natural choice) — the same `.`/`#`/letter format
 extension, or forced explicitly with `--format {puz,ipuz,cfp,txt}`.
 
 A rebus square already placed in the input (a cell holding more than one
-character, e.g. `"STAR"`) is preserved exactly — the solver only ever
-sees its first letter as a crossing constraint, never overwrites the
-real, full answer. `--maximize` runs the same branch-and-bound
+character, e.g. `"STAR"`) is preserved exactly and its slot is solved at
+its real, full length — a 5-cell slot with a 2-character rebus square
+searches 6-letter words, not 5-letter ones. The solver never invents a
+new rebus square on its own; it only ever completes the rest of a slot
+that already has one. `--maximize` runs the same branch-and-bound
 score-maximizing search as `xfill_cli`'s own `--maximize` flag, and is
 interruptible with Ctrl+C (keeps the best fill found so far rather than
 losing all progress).

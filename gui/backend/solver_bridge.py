@@ -36,17 +36,20 @@ def _locked_words_by_direction(puzzle: Puzzle) -> dict[str, set[str]]:
     """Every already-fully-typed slot's word, grouped by direction. A slot
     counts as "fully typed" only if every one of its cells already has a
     letter -- a partially-filled slot is left alone and still has to match
-    a real dictionary word, same as before. Built from solving_letter()
-    (each cell's single-character stand-in), not the raw cell content: the
-    solver only ever sees the grid through to_grid_spec(), which is
-    solving_letter()-based, so a rebus slot has to be locked using the
-    exact same stand-in string ("AD"+"APTS" prefilled reads as "AAPTS" to
-    the solver) for the lock to actually match what it's solving against --
-    locking the real expanded answer ("ADAPTS") instead would target a
-    word length the solver's view of this slot can never produce."""
+    a real dictionary word, same as before. Built from the raw cell
+    content (`"".join(letters)`), which already naturally produces a
+    rebus slot's real, full spelled-out word ("AD"+"A"+"P"+"T"+"S" =
+    "ADAPTS") via plain string concatenation -- no is_rebus special-casing
+    needed. This relies on the C++ solver itself understanding a rebus
+    cell's real content (see to_grid_spec's trailing rebus section and
+    xfill's Grid::RebusContent/Slot::cell_lengths): it now searches a
+    rebus-containing slot at its true expanded length, so the correct
+    word to lock is the real one, not solving_letter()'s single-character
+    stand-in -- locking the stand-in (e.g. "AAPTS") would target a word
+    length the solver isn't searching for anymore."""
     words: dict[str, set[str]] = {"across": set(), "down": set()}
     for slot in puzzle.compute_slots():
-        letters = [puzzle.solving_letter(r, c) for r, c in slot.cells]
+        letters = [puzzle.letters[r][c] for r, c in slot.cells]
         if all(ch != "-" for ch in letters):
             words[slot.direction].add("".join(letters))
     return words

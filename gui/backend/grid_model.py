@@ -200,10 +200,18 @@ class Puzzle:
 
     def to_grid_spec(self) -> str:
         """xfill's plain-text grid format: '.'=open, '#'=block, A-Z=prefilled.
-        One row per line, no header. A rebus cell (see is_rebus) is written
-        as its solving_letter() -- the C++ solver has no concept of a
-        multi-character cell; this pins the crossing constraint using the
-        rebus's first letter without corrupting the row width."""
+        One row per line, no header. A rebus cell (see is_rebus) still
+        gets its solving_letter() (first-letter stand-in) in the primary
+        row -- the row stays fixed-width either way -- but its real, full
+        content is ALSO appended as a trailing "row,col:CONTENT" line
+        after a blank-line separator, one per rebus cell, so the C++
+        solver can search/match the slot's true (possibly longer than
+        `slot.length`-in-cells) spelled-out word instead of just the
+        stand-in. Mirrors how .puz's GRBS/RTBL sections layer a rebus's
+        real content on top of its always-fixed-width main solution grid
+        (see puz_format.py). Absent entirely (no trailing section at all)
+        when there's no rebus cell, so a rebus-free grid's spec is exactly
+        what it always was."""
         lines = []
         for r in range(self.height):
             row_chars = []
@@ -215,32 +223,63 @@ class Puzzle:
                 else:
                     row_chars.append(".")
             lines.append("".join(row_chars))
+        rebus_lines = [
+            f"{r},{c}:{self.letters[r][c]}"
+            for r in range(self.height)
+            for c in range(self.width)
+            if self.is_rebus(r, c)
+        ]
+        if rebus_lines:
+            lines.append("")
+            lines.extend(rebus_lines)
         return "\n".join(lines) + "\n"
 
     @staticmethod
     def from_grid_spec(text: str) -> "Puzzle":
         """Inverse of to_grid_spec() -- reads xfill's own plain-text grid
         format ('.'=open, '#'=block, any other character=a prefilled
-        letter, one row per line, blank lines ignored). Meant for a
-        constructor who wants to hand-author a bare grid layout (the CLI's
-        --input accepts this directly, via a .txt extension) without
-        needing a full .puz/.ipuz file just to describe the block pattern.
-        Every row must be the same width; raises ValueError otherwise,
-        since a ragged grid has no single `width` to report."""
-        lines = [line for line in text.splitlines() if line.strip()]
-        if not lines:
+        letter, one row per line). Meant for a constructor who wants to
+        hand-author a bare grid layout (the CLI's --input accepts this
+        directly, via a .txt extension) without needing a full .puz/.ipuz
+        file just to describe the block pattern. Every row must be the
+        same width; raises ValueError otherwise, since a ragged grid has
+        no single `width` to report.
+
+        The first blank line found after at least one row narrows the
+        rest of the file to an optional trailing rebus section (see
+        to_grid_spec): each remaining non-blank line "row,col:CONTENT"
+        overwrites that cell with its real, full content -- same
+        blank-line-as-separator convention the C++ Grid::FromFile uses,
+        so a file either side of this round-trip writes/reads identically."""
+        rows: list[str] = []
+        rebus_lines: list[str] = []
+        in_rebus_section = False
+        for line in text.splitlines():
+            if not in_rebus_section:
+                if not line.strip():
+                    if rows:
+                        in_rebus_section = True
+                    continue
+                rows.append(line)
+            elif line.strip():
+                rebus_lines.append(line)
+        if not rows:
             raise ValueError("grid spec is empty")
-        width = len(lines[0])
-        for i, line in enumerate(lines):
+        width = len(rows[0])
+        for i, line in enumerate(rows):
             if len(line) != width:
                 raise ValueError(f"line {i + 1} has length {len(line)}, expected {width} (every row must match the first row's width)")
-        puzzle = Puzzle.blank(width, len(lines))
-        for r, line in enumerate(lines):
+        puzzle = Puzzle.blank(width, len(rows))
+        for r, line in enumerate(rows):
             for c, ch in enumerate(line):
                 if ch == "#":
                     puzzle.blocks[r][c] = True
                 elif ch != ".":
                     puzzle.letters[r][c] = ch.upper()
+        for line in rebus_lines:
+            coords, _, content = line.partition(":")
+            r_s, _, c_s = coords.partition(",")
+            puzzle.letters[int(r_s)][int(c_s)] = content.strip().upper()
         return puzzle
 
     def stats(self) -> dict:

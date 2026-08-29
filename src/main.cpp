@@ -53,7 +53,15 @@ std::vector<std::string> FilledGridRows(const xfill::Grid& grid, const xfill::So
     if (it == solution.assignment.end()) continue;
     const std::string& word = it->second;
     for (size_t k = 0; k < slot.cells.size(); ++k) {
-      chars[static_cast<size_t>(slot.cells[k])] = word[k];
+      // word[slot.cell_char_start[k]], not word[k]: they're the same
+      // index for an ordinary slot, but a rebus cell earlier in this
+      // slot shifts every later cell's real word position. For a rebus
+      // cell itself, this picks out just its first character -- the
+      // same single-character "solving letter" stand-in used everywhere
+      // else exactly one character is needed (see Grid::PrefilledLetter);
+      // the real, full content lives only in the caller's own Puzzle
+      // object, which already has it and never needs it echoed back.
+      chars[static_cast<size_t>(slot.cells[k])] = word[static_cast<size_t>(slot.cell_char_start[k])];
     }
   }
 

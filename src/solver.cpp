@@ -124,11 +124,28 @@ bool Solver::BuildInitialDomains(std::vector<WordBitset>& domains,
     // Seeded/pre-filled cells (see Grid::FromSpec) narrow this slot's
     // domain before propagation or search ever runs, the same way a
     // crossing constraint would once a neighbor is assigned -- just
-    // known up front instead of discovered mid-search.
+    // known up front instead of discovered mid-search. Uses
+    // cell_char_start[k], not k itself, as the word position: they're
+    // the same number for an ordinary slot (cell_lengths all 1), but
+    // diverge once any earlier cell in this slot holds a rebus (see
+    // Slot::cell_char_start).
     for (size_t k = 0; k < slot.cells.size(); ++k) {
-      char letter = grid_.PrefilledLetter(slot.cells[k]);
-      if (letter != '\0') {
-        domain &= dict_.LetterMask(slot.length, static_cast<int>(k), letter);
+      const std::string& rebus = grid_.RebusContent(slot.cells[k]);
+      int char_start = slot.cell_char_start[k];
+      if (!rebus.empty()) {
+        // A rebus cell's full content narrows the domain to exactly the
+        // words with that literal substring at this position -- ANDing
+        // one LetterMask per character is exact here (not the
+        // Propagate-style relaxation), since the substring itself is
+        // fully known, not just a set of still-possible letters.
+        for (size_t i = 0; i < rebus.size(); ++i) {
+          domain &= dict_.LetterMask(slot.length, char_start + static_cast<int>(i), rebus[i]);
+        }
+      } else {
+        char letter = grid_.PrefilledLetter(slot.cells[k]);
+        if (letter != '\0') {
+          domain &= dict_.LetterMask(slot.length, char_start, letter);
+        }
       }
     }
   }

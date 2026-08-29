@@ -302,3 +302,63 @@ TEST_CASE("MaximizeScoreParallel's on_improved callbacks are monotonically incre
     REQUIRE(reported_scores.back() == 140);
   }
 }
+
+TEST_CASE("A rebus cell lets an isolated slot solve to a word longer than its physical cell count") {
+  // The exact user-reported scenario: a 5-cell slot with "AD" pre-placed
+  // in its first cell should solve to ADAPTS (a real 6-character word),
+  // never a decoy that's merely 5 letters starting with 'A' (the old,
+  // wrong, first-letter-only behavior) nor one that's 6 letters but
+  // doesn't actually start with "AD".
+  auto grid = xfill::Grid::FromSpec({"A...."}, {{0, 0, "AD"}});
+  auto dict = WriteAndLoadDict("test_rebus_isolated.dict",
+                                {"ADAPTS;10", "ALEPH;99", "ABACUS;99", "BANANA;99"});
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve();
+  REQUIRE(solution.has_value());
+  REQUIRE(solution->assignment.at(0) == "ADAPTS");
+}
+
+TEST_CASE("A rebus crossing constrains both directions to the same shared content") {
+  // 2x2 grid, "AD" rebus at (0,0). Row 0 across (physical 2 cells) and
+  // column 0 down (physical 2 cells) both cover it, each gaining 1 extra
+  // real character -- length 3 apiece. (1,1) is blocked, so (0,1) and
+  // (1,0) each belong to only one slot: no other constraint to satisfy,
+  // isolating exactly the rebus crossing this test is about.
+  auto grid = xfill::Grid::FromSpec({"A.", ".#"}, {{0, 0, "AD"}});
+  auto dict = WriteAndLoadDict(
+      "test_rebus_crossing.dict",
+      {"ADD;10", "ADZ;10", "XYZ;99", "QRS;99"});  // XYZ/QRS: high-score decoys that don't start with AD
+
+  xfill::Solver solver(grid, dict);
+  auto solution = solver.Solve();
+  REQUIRE(solution.has_value());
+
+  const xfill::Slot& across = grid.SlotById(0);
+  const xfill::Slot& down = grid.SlotById(1);
+  REQUIRE(across.dir == xfill::Direction::Across);
+  REQUIRE(down.dir == xfill::Direction::Down);
+
+  const std::string& across_word = solution->assignment.at(across.id);
+  const std::string& down_word = solution->assignment.at(down.id);
+  REQUIRE(across_word.substr(0, 2) == "AD");
+  REQUIRE(down_word.substr(0, 2) == "AD");
+  REQUIRE(across_word != down_word);  // no-duplicate-words still applies
+}
+
+TEST_CASE("An ordinary (non-rebus) grid solves identically whether or not any rebus API is touched") {
+  // Guards the decomposed Propagate/BuildInitialDomains paths (see
+  // grid.cpp's ComputeCrossings) against any regression for the common,
+  // non-rebus case: passing an empty rebus list must be indistinguishable
+  // from the original one-argument FromSpec.
+  auto grid_a = xfill::Grid::FromSpec({"..", ".."});
+  auto grid_b = xfill::Grid::FromSpec({"..", ".."}, {});
+  auto dict_a = WriteAndLoadDict("test_rebus_noop_a.dict", {"AT;10", "NO;10", "AN;10", "TO;10"});
+  auto dict_b = WriteAndLoadDict("test_rebus_noop_b.dict", {"AT;10", "NO;10", "AN;10", "TO;10"});
+
+  auto solution_a = xfill::Solver(grid_a, dict_a).Solve();
+  auto solution_b = xfill::Solver(grid_b, dict_b).Solve();
+  REQUIRE(solution_a.has_value());
+  REQUIRE(solution_b.has_value());
+  REQUIRE(solution_a->assignment == solution_b->assignment);
+}
