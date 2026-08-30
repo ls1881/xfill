@@ -2606,9 +2606,7 @@ function wireToolbar() {
 // itself part of the autosaved state) reuses it silently.
 // ---------------------------------------------------------------------------
 
-async function saveToServer() {
-  if (!puzzle) return;
-  const name = prompt("Save as:", currentSaveName || puzzle.title || "My puzzle");
+async function saveAsNamed(name) {
   if (!name) return;
   try {
     const result = await apiJson("/api/puzzle/save", { puzzle, name });
@@ -2634,7 +2632,43 @@ async function refreshSavesList() {
 }
 
 function wireSaveLoad() {
-  document.getElementById("btn-save").addEventListener("click", saveToServer);
+  const saveAsOverlay = document.getElementById("save-as-overlay");
+  const saveAsName = document.getElementById("save-as-name");
+
+  const openSaveAsDialog = () => {
+    if (!puzzle) return;
+    saveAsName.value = currentSaveName || puzzle.title || "My puzzle";
+    saveAsOverlay.hidden = false;
+    saveAsName.focus();
+    saveAsName.select();
+  };
+  const closeSaveAsDialog = () => {
+    saveAsOverlay.hidden = true;
+  };
+  const confirmSaveAs = async () => {
+    const name = saveAsName.value.trim();
+    closeSaveAsDialog();
+    await saveAsNamed(name);
+  };
+
+  document.getElementById("btn-save").addEventListener("click", openSaveAsDialog);
+  document.getElementById("save-as-cancel").addEventListener("click", closeSaveAsDialog);
+  document.getElementById("save-as-ok").addEventListener("click", confirmSaveAs);
+  // Clicking the dimmed backdrop itself (not the modal box) cancels, same
+  // as Cancel -- matches the New grid dialog's own backdrop behavior.
+  saveAsOverlay.addEventListener("click", (e) => {
+    if (e.target === saveAsOverlay) closeSaveAsDialog();
+  });
+  saveAsName.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      confirmSaveAs();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeSaveAsDialog();
+    }
+  });
+
   document.getElementById("load-select").addEventListener("change", async (e) => {
     const name = e.target.value;
     if (!name) return;

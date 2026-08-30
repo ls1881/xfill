@@ -188,6 +188,12 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   font-size: 0.9rem;
 }
 .modal-actions { justify-content: flex-end; margin-top: 16px; }
+/* A single wide field (e.g. Save as's name) reads better stacked --
+   label above, full-width input below -- than the default .modal
+   label's inline "Label [narrow input]" pairing, which suits a short
+   numeric field (New grid's width/height) but would cram a filename. */
+.modal label.modal-label-stacked { display: block; }
+.modal label.modal-label-stacked input { display: block; width: 100%; margin-top: 6px; }
 
 .about-menu {
   right: 0;
