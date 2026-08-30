@@ -256,6 +256,12 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   vertical-align: -2px;
   animation: spin 0.7s linear infinite;
 }
+/* Same specificity as the browser's own [hidden] { display: none }, and
+   declared later, so .spinner's display: inline-block above would
+   otherwise win and keep the spinner visible even once JS sets its
+   `hidden` attribute (e.g. after a Fill completes, fails, or is
+   cancelled) -- see .modal-overlay[hidden] above for the same gotcha. */
+.spinner[hidden] { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   .spinner { animation: none; }
