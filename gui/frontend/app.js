@@ -1158,6 +1158,19 @@ function escapeAttr(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
 }
 
+// A puzzle title (arbitrary user text) isn't safe to use as-is in a
+// downloaded filename -- "/" or invalid characters could confuse the
+// browser's save dialog, quotes could look broken, etc. Mirrors the
+// backend's own _safe_filename_stem (app.py) exactly, so a client-side
+// filename (image export, a print document's suggested PDF name) and a
+// server-side one (.puz/.ipuz/.cfp export) land on the same name for the
+// same title.
+function safeFilenameStem(name, fallback) {
+  let base = String(name || "").trim().replace(/[^A-Za-z0-9 _-]/g, "");
+  base = base.replace(/\s+/g, "_").replace(/^_+|_+$/g, "");
+  return base || fallback;
+}
+
 // ---------------------------------------------------------------------------
 // Options ("Fill") tab
 // ---------------------------------------------------------------------------
@@ -2203,9 +2216,15 @@ function buildNytSubmissionHtml() {
   const title = puzzle.title || "Untitled";
   const author = puzzle.author || "";
   const { acrossHtml, downHtml } = buildCluesHtml("nyt");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(title)} — submission</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(safeFilenameStem(title, "puzzle"))}_nytsubmission</title>
 <style>
   @page { size: letter portrait; margin: 0.6in; }
+  /* Without this, most browsers strip every background color (the block
+     squares included) unless the user has separately opted into "print
+     background graphics" -- a setting that defaults OFF in Chrome. The
+     black squares are the content here, not decoration, so this forces
+     them to print regardless of that setting. */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; }
   .nyt-page { page-break-after: always; padding-top: 0.2in; }
   .nyt-page:last-child { page-break-after: auto; }
@@ -2259,9 +2278,14 @@ function buildOnePagePuzzleHtml() {
   const title = puzzle.title || "Untitled";
   const author = puzzle.author || "";
   const { acrossHtml, downHtml } = buildCluesHtml("op");
-  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(title)}</title>
+  return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeAttr(safeFilenameStem(title, "puzzle"))}_puzzle</title>
 <style>
   @page { size: letter portrait; margin: 0.35in; }
+  /* See buildNytSubmissionHtml's identical rule -- without it the block
+     squares (a background color, not a border) disappear whenever the
+     browser's "print background graphics" setting is off, which is the
+     default in Chrome. */
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   body { font-family: Georgia, "Times New Roman", serif; color: #111; margin: 0; font-size: 8pt; }
   .op-header { text-align: center; margin-bottom: 6pt; }
   .op-header h1 { font-size: 14pt; margin: 0; }
@@ -2387,7 +2411,7 @@ function exportImage(kind) {
     setStatus("Image export isn't supported in this browser", "error");
     return;
   }
-  const filename = `${kind}.png`;
+  const filename = `${safeFilenameStem(puzzle.title, "puzzle")}_${kind}.png`;
   canvas.toBlob((blob) => {
     // toBlob's callback, not the synchronous call below it, is when the
     // PNG actually exists (or doesn't) -- reporting "Exported" right
@@ -2533,47 +2557,103 @@ function wireToolbar() {
     }
   });
 
+  // Every export path is named after the puzzle's title (see
+  // safeFilenameStem's call sites), so none of them make sense without
+  // one -- gate all three (print/image/format) behind this. A title
+  // already set just runs `action` immediately; an empty one opens a
+  // themed modal (matching Save as/New grid) to collect one first, then
+  // runs `action` once it's set.
+  const requireTitleOverlay = document.getElementById("require-title-overlay");
+  const requireTitleInput = document.getElementById("require-title-input");
+  let pendingExportAction = null;
+
+  const closeRequireTitleDialog = () => {
+    requireTitleOverlay.hidden = true;
+    pendingExportAction = null;
+  };
+  const confirmRequireTitle = () => {
+    const title = requireTitleInput.value.trim();
+    if (!title) return; // still required -- leave the dialog open rather than silently dropping the export
+    puzzle.title = title;
+    renderGridTitle();
+    const metaTitle = document.getElementById("meta-title");
+    if (metaTitle) metaTitle.value = title;
+    scheduleSave();
+    const action = pendingExportAction;
+    closeRequireTitleDialog();
+    if (action) action();
+  };
+  document.getElementById("require-title-cancel").addEventListener("click", closeRequireTitleDialog);
+  document.getElementById("require-title-ok").addEventListener("click", confirmRequireTitle);
+  requireTitleOverlay.addEventListener("click", (e) => {
+    if (e.target === requireTitleOverlay) closeRequireTitleDialog();
+  });
+  requireTitleInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      confirmRequireTitle();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeRequireTitleDialog();
+    }
+  });
+  const ensureTitleThenRun = (action) => {
+    if (!puzzle) return;
+    if (puzzle.title && puzzle.title.trim()) {
+      action();
+      return;
+    }
+    pendingExportAction = action;
+    requireTitleInput.value = "";
+    requireTitleOverlay.hidden = false;
+    requireTitleInput.focus();
+  };
+
   exportMenu.querySelectorAll("button[data-print]").forEach((btn) => {
     btn.addEventListener("click", () => {
       exportMenu.classList.remove("open");
       const mode = btn.getAttribute("data-print");
-      printHtmlDocument(mode === "nyt" ? buildNytSubmissionHtml() : buildOnePagePuzzleHtml());
+      ensureTitleThenRun(() => {
+        printHtmlDocument(mode === "nyt" ? buildNytSubmissionHtml() : buildOnePagePuzzleHtml());
+      });
     });
   });
 
   exportMenu.querySelectorAll("button[data-image]").forEach((btn) => {
     btn.addEventListener("click", () => {
       exportMenu.classList.remove("open");
-      exportImage(btn.getAttribute("data-image"));
+      ensureTitleThenRun(() => exportImage(btn.getAttribute("data-image")));
     });
   });
 
   exportMenu.querySelectorAll("button[data-format]").forEach((btn) => {
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", () => {
       exportMenu.classList.remove("open");
       const format = btn.getAttribute("data-format");
-      try {
-        const resp = await api(`/api/puzzle/export?format=${format}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(puzzle),
-        });
-        const blob = await resp.blob();
-        const disposition = resp.headers.get("Content-Disposition") || "";
-        const match = /filename="([^"]+)"/.exec(disposition);
-        const filename = match ? match[1] : `puzzle.${format}`;
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-        setStatus(`Exported ${filename}`, "ok");
-      } catch (err) {
-        setStatus(`Export failed: ${err.message}`, "error");
-      }
+      ensureTitleThenRun(async () => {
+        try {
+          const resp = await api(`/api/puzzle/export?format=${format}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(puzzle),
+          });
+          const blob = await resp.blob();
+          const disposition = resp.headers.get("Content-Disposition") || "";
+          const match = /filename="([^"]+)"/.exec(disposition);
+          const filename = match ? match[1] : `puzzle.${format}`;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = filename;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+          setStatus(`Exported ${filename}`, "ok");
+        } catch (err) {
+          setStatus(`Export failed: ${err.message}`, "error");
+        }
+      });
     });
   });
 

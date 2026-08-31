@@ -169,6 +169,7 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
 }
 .modal h3 { margin: 0 0 14px; }
+.modal-hint { font-size: 0.8rem; color: var(--text-dim); margin: -6px 0 14px; }
 .modal label {
   display: flex;
   align-items: center;
