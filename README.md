@@ -16,6 +16,88 @@ below is backed by a measurement, not an assumption: see
 [`docs/design.md`](docs/design.md) for the full development log and
 [`docs/bibliography.md`](docs/bibliography.md) for sources.
 
+## Quickstart
+
+Just want to build or fill in a crossword, no interest in the solver
+internals? This is the whole thing, no prior experience assumed.
+
+**1. Get the code onto your computer.** Either download it as a ZIP from
+GitHub (green "Code" button → "Download ZIP") and unzip it, or, if you
+have `git`:
+```bash
+git clone https://github.com/ls1881/xfill.git
+cd xfill
+```
+
+**2. Make sure Python 3 and a C++ compiler are installed.** Open a
+terminal (on a Mac: Terminal, in Applications → Utilities) and run
+`python3 --version`. If that says "command not found," install
+[Python 3](https://www.python.org/downloads/) first. On a Mac you'll
+also need Xcode's command line tools for the compiler — run
+`xcode-select --install` if `clang --version` doesn't work. On Windows,
+install [WSL](https://learn.microsoft.com/windows/wsl/install), then do
+everything below inside it.
+
+**3. Start the app.** From a terminal, inside the `xfill` folder:
+```bash
+./gui/run.sh
+```
+The first run takes a minute or two — it's setting everything up
+(installing a few Python packages, compiling the solver) so you don't
+have to do either by hand. Every run after that starts in a couple of
+seconds. Leave this terminal window open; closing it stops the app.
+
+**4. Open it in your browser.** Go to `http://127.0.0.1:8791/`.
+
+**5. Load a word list.** The app needs a dictionary to fill puzzles
+with. Click the **Dictionaries** tab, then **Upload a dictionary**, and
+pick `data/spreadthewordlist_caps.txt` from the folder you downloaded in
+step 1 (a ready-to-use ~184,000-word list, already included) — or upload
+your own word list instead, one `WORD;score` pair per line (see
+[Dictionary format](#dictionary-format)).
+
+**6. Build or open a puzzle.**
+- **New** starts a blank grid at whatever size you choose.
+- **Import** opens a `.puz`, `.ipuz`, or `.cfp` file from another program.
+- Click a cell to select its across/down slot; type letters directly, or
+  pick a word from the **Options** tab's suggestions.
+- **Fill** auto-completes the whole grid using the word list you loaded.
+
+**7. Save or export your work.**
+- **Save** keeps a named copy inside the app, to reopen later from the
+  **Load** dropdown (see "Where your puzzles are stored" below for what
+  this does and doesn't mean).
+- **Export** writes a real file to your computer instead: `.puz`/`.ipuz`
+  for other crossword software, or a printable PDF (via the **Print**
+  options) for a paper copy or a submission packet.
+
+### Where your puzzles are stored
+
+Everything runs entirely on your own computer — there's no server out on
+the internet, no account, and nothing shared between different people's
+copies of the app by default:
+
+- **Save**/**Load** (in the app's toolbar) writes to a `gui/saves/`
+  folder next to wherever you put the code, on whichever computer is
+  currently running `./gui/run.sh`. It's local disk storage, not a cloud
+  account — two people each running the app on their own computers have
+  two completely separate `gui/saves/` folders that never see each
+  other's puzzles, even with the exact same puzzle name.
+- The same is true of any dictionary you upload (into `gui/dictionaries/`)
+  and the browser-only autosave that resumes your in-progress grid on
+  reload — all local to one computer (the autosave is local to one
+  *browser*, specifically).
+- If you want to hand a puzzle to someone else — a different computer,
+  a different person — use **Export**, not Save. The exported file
+  (`.puz`/`.ipuz`/`.cfp`/PDF) is a normal file you can email, message, or
+  drop in a shared folder; they can open it with their own copy of the
+  app (via **Import**) or any other crossword software that reads that
+  format.
+- Since two installs never share state, a second person setting this up
+  fresh on their own machine gets the identical starting experience you
+  did — an empty grid, no saved puzzles, and the one prompt to load a
+  dictionary in step 5 above.
+
 ## Results
 
 - **65×** faster on a hard grid purely from oversubscribing thread count (1 → 42 threads)
@@ -31,6 +113,8 @@ below is backed by a measurement, not an assumption: see
 
 ## Contents
 
+- [Quickstart](#quickstart)
+  - [Where your puzzles are stored](#where-your-puzzles-are-stored)
 - [Status](#status)
 - [How the algorithm works](#how-the-algorithm-works)
   - [Known limits](#known-limits)
