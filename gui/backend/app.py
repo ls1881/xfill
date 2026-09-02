@@ -216,10 +216,7 @@ async def import_puzzle(file: UploadFile):
         p = reader(data)
     except Exception as e:
         raise HTTPException(400, f"could not parse {file.filename}: {e}") from e
-    resp = {"puzzle": PuzzleModel.from_puzzle(p), "slots": _slots_payload(p)}
-    if ext == "cfp":
-        resp["warning"] = cfp_format.CFP_UNVERIFIED_WARNING
-    return resp
+    return {"puzzle": PuzzleModel.from_puzzle(p), "slots": _slots_payload(p)}
 
 
 def _safe_filename_stem(name: str, fallback: str) -> str:

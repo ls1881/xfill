@@ -420,6 +420,20 @@ function invalidateVerificationCache() {
   activeVerificationTarget = 0;
 }
 
+// Puzzle no longer corresponds to any named save slot -- New and Import
+// both replace it wholesale with something that was never Saved under a
+// name (unlike Load, which sets currentSaveName to the one it just
+// loaded). Without this, the Load dropdown keeps showing whatever save
+// was active before, and re-selecting that SAME option afterward is a
+// native <select> no-op (a "change" event only fires when the value
+// actually changes) -- so importing over an in-progress named save left
+// no way to click straight back to it, only via some other save first.
+function clearCurrentSave() {
+  currentSaveName = null;
+  const sel = document.getElementById("load-select");
+  if (sel) sel.value = "";
+}
+
 async function newPuzzle(width, height) {
   const previous = puzzle;
   const data = await apiJson(`/api/puzzle/new?width=${width}&height=${height}`, {});
@@ -430,6 +444,7 @@ async function newPuzzle(width, height) {
   puzzle = data.puzzle;
   slots = data.slots;
   selected = null;
+  clearCurrentSave();
   clearFillFailedHighlight();
   clearForcedCells();
   clearVerificationCache();
@@ -2529,11 +2544,12 @@ function wireToolbar() {
       puzzle = data.puzzle;
       slots = data.slots;
       selected = null;
+      clearCurrentSave();
       clearFillFailedHighlight();
       clearForcedCells();
       clearVerificationCache();
       renderAll();
-      setStatus(data.warning ? `Imported "${file.name}" — ${data.warning}` : `Imported "${file.name}"`, data.warning ? "error" : "ok");
+      setStatus(`Imported "${file.name}"`, "ok");
     } catch (err) {
       setStatus(`Import failed: ${err.message}`, "error");
     }

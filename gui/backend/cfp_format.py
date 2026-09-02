@@ -38,14 +38,6 @@ import xml.etree.ElementTree as ET
 
 from grid_model import EMPTY, Puzzle
 
-CFP_UNVERIFIED_WARNING = (
-    "This .cfp reader/writer is verified against a real CrossFire file's "
-    "structure, but two details (the open-cell character in an unsolved "
-    "grid, and the WORD id scheme) are reasonable guesses rather than "
-    "confirmed -- see cfp_format.py's module docstring."
-)
-
-
 def _xml_escape_text(s: str) -> str:
     return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
