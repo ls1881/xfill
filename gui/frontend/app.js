@@ -43,7 +43,7 @@ let slotsRequestSeq = 0;   // guards against an in-flight /api/puzzle/slots resp
 let optionsRequestSeq = 0; // same, for /api/options
 let lastClick = { row: null, col: null, time: 0 }; // same-cell click timing, used to detect a double-click ourselves
 const DOUBLE_CLICK_MS = 350;
-let undoStack = []; // deep-cloned puzzle snapshots, most recent last
+let undoStack = []; // {puzzle, saveName} entries (see pushUndo), most recent last
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
 // "r,c" keys of a successful Fill's letters that had no real alternative
@@ -272,14 +272,26 @@ function setFillSpinner(visible) {
 // Undo
 // ---------------------------------------------------------------------------
 
+// Every undoStack entry pairs a puzzle snapshot with whatever
+// currentSaveName was true of it AT THAT MOMENT -- not just the puzzle
+// content. Load/New/Import all change currentSaveName as part of the very
+// same action that also pushes the pre-change puzzle here, so without
+// this pairing, undoing back across one of those leaves currentSaveName
+// (and the Load dropdown showing it) permanently out of sync with the
+// puzzle content that was just restored -- Save would then prefill the
+// wrong name, and the dropdown wouldn't reflect the reloaded puzzle.
+function pushUndo(snapshot) {
+  undoStack.push({ puzzle: snapshot, saveName: currentSaveName });
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+}
+
 // Call before any in-place mutation of `puzzle` -- captures the
 // pre-mutation state so undo() can restore it. A plain deep clone is fine
 // here: puzzle objects are small (a grid's worth of strings/booleans plus
 // a clues map), and undo doesn't need to be fast, just correct.
 function snapshotForUndo() {
   if (!puzzle) return;
-  undoStack.push(JSON.parse(JSON.stringify(puzzle)));
-  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  pushUndo(JSON.parse(JSON.stringify(puzzle)));
   clearFillFailedHighlight();
   clearForcedCells();
   clearPreview();
@@ -352,7 +364,16 @@ function undo() {
     setStatus("Nothing to undo", "error");
     return;
   }
-  puzzle = undoStack.pop();
+  const entry = undoStack.pop();
+  puzzle = entry.puzzle;
+  // Restores whichever save (if any) this snapshot actually belonged to
+  // (see pushUndo) -- otherwise undoing back across a Load/New/Import
+  // would leave currentSaveName and the Load dropdown showing whatever
+  // they were AFTER that action, not matching the puzzle content this
+  // just reverted to.
+  currentSaveName = entry.saveName;
+  const loadSelect = document.getElementById("load-select");
+  if (loadSelect) loadSelect.value = currentSaveName || "";
   // Bounds/direction could be stale if the undone step crossed a New or
   // Import (different grid size) -- drop selection rather than risk it
   // pointing outside the restored grid.
@@ -437,10 +458,7 @@ function clearCurrentSave() {
 async function newPuzzle(width, height) {
   const previous = puzzle;
   const data = await apiJson(`/api/puzzle/new?width=${width}&height=${height}`, {});
-  if (previous) {
-    undoStack.push(previous);
-    if (undoStack.length > MAX_UNDO) undoStack.shift();
-  }
+  if (previous) pushUndo(previous);
   puzzle = data.puzzle;
   slots = data.slots;
   selected = null;
@@ -1192,7 +1210,11 @@ function safeFilenameStem(name, fallback) {
 
 function verifyKeyFor(slot) {
   const sel = slot.direction === "across" ? dictSelections.across : dictSelections.down;
-  return `${slot.id}|${slot.pattern}|${sel.path}|${effectiveMinScore(sel, slot.length)}`;
+  // s.pattern.length, not s.length (physical cell count) -- a rebus cell
+  // can make the real word longer than the slot's cell count, and
+  // min-score-by-length overrides are keyed by that real length (see
+  // updateOptionsPanel/diagnoseFillFailure's identical fix).
+  return `${slot.id}|${slot.pattern}|${sel.path}|${effectiveMinScore(sel, slot.pattern.length)}`;
 }
 
 function getVerifiedMap(slot) {
@@ -2473,6 +2495,36 @@ function blockedByActiveFill() {
   return true;
 }
 
+// Wires the interaction pattern every themed modal (.modal-overlay) in
+// this app shares -- Cancel, OK, clicking the dimmed backdrop, and
+// Enter/Escape in any of its input fields -- so a future fix to that
+// shared behavior (e.g. focus trapping) only has to be made once, not
+// separately in New grid/Save as/the require-a-title prompt. Each dialog
+// still owns its own open/confirm/close logic (what to prefill, what
+// "confirm" actually does, any extra state to reset on close); this only
+// wires the mechanical parts that are identical across all of them.
+function wireModal(overlayId, { cancelId, okId, inputIds, onConfirm, onClose }) {
+  const overlay = document.getElementById(overlayId);
+  document.getElementById(cancelId).addEventListener("click", onClose);
+  document.getElementById(okId).addEventListener("click", onConfirm);
+  // e.target is the overlay only when the click didn't land on anything
+  // inside it -- i.e. the dimmed backdrop itself, not the modal box.
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) onClose();
+  });
+  inputIds.forEach((id) => {
+    document.getElementById(id).addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        onConfirm();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    });
+  });
+}
+
 function wireToolbar() {
   const newGridOverlay = document.getElementById("new-grid-overlay");
   const newGridWidth = document.getElementById("new-grid-width");
@@ -2506,24 +2558,12 @@ function wireToolbar() {
   };
 
   document.getElementById("btn-new").addEventListener("click", openNewGridDialog);
-  document.getElementById("new-grid-cancel").addEventListener("click", closeNewGridDialog);
-  document.getElementById("new-grid-ok").addEventListener("click", confirmNewGrid);
-  // Clicking the dimmed backdrop itself (not the modal box) cancels, same
-  // as Cancel -- e.target is the overlay only when the click didn't land
-  // on anything inside it.
-  newGridOverlay.addEventListener("click", (e) => {
-    if (e.target === newGridOverlay) closeNewGridDialog();
-  });
-  [newGridWidth, newGridHeight].forEach((input) => {
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        confirmNewGrid();
-      } else if (e.key === "Escape") {
-        e.preventDefault();
-        closeNewGridDialog();
-      }
-    });
+  wireModal("new-grid-overlay", {
+    cancelId: "new-grid-cancel",
+    okId: "new-grid-ok",
+    inputIds: ["new-grid-width", "new-grid-height"],
+    onConfirm: confirmNewGrid,
+    onClose: closeNewGridDialog,
   });
 
   document.getElementById("input-import").addEventListener("change", async (e) => {
@@ -2537,10 +2577,7 @@ function wireToolbar() {
     formData.append("file", file);
     try {
       const data = await api("/api/puzzle/import", { method: "POST", body: formData });
-      if (puzzle) {
-        undoStack.push(puzzle);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
-      }
+      if (puzzle) pushUndo(puzzle);
       puzzle = data.puzzle;
       slots = data.slots;
       selected = null;
@@ -2599,19 +2636,12 @@ function wireToolbar() {
     closeRequireTitleDialog();
     if (action) action();
   };
-  document.getElementById("require-title-cancel").addEventListener("click", closeRequireTitleDialog);
-  document.getElementById("require-title-ok").addEventListener("click", confirmRequireTitle);
-  requireTitleOverlay.addEventListener("click", (e) => {
-    if (e.target === requireTitleOverlay) closeRequireTitleDialog();
-  });
-  requireTitleInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      confirmRequireTitle();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      closeRequireTitleDialog();
-    }
+  wireModal("require-title-overlay", {
+    cancelId: "require-title-cancel",
+    okId: "require-title-ok",
+    inputIds: ["require-title-input"],
+    onConfirm: confirmRequireTitle,
+    onClose: closeRequireTitleDialog,
   });
   const ensureTitleThenRun = (action) => {
     if (!puzzle) return;
@@ -2665,7 +2695,17 @@ function wireToolbar() {
           a.click();
           a.remove();
           URL.revokeObjectURL(url);
-          setStatus(`Exported ${filename}`, "ok");
+          // CrossFire's real .cfp format (see cfp_format.py's module
+          // docstring) has no rebus mechanism -- a rebus cell's content
+          // degrades to just its first letter there, unlike .puz/.ipuz,
+          // which both preserve it fully. Worth a heads-up specifically
+          // when it's actually true, not a blanket caveat on every cfp
+          // export regardless of content.
+          const hasRebus = format === "cfp" && puzzle.letters.some((row) => row.some((ch) => ch && ch !== EMPTY && ch.length > 1));
+          setStatus(
+            hasRebus ? `Exported ${filename} — rebus squares are reduced to their first letter (.cfp has no rebus support)` : `Exported ${filename}`,
+            hasRebus ? "error" : "ok"
+          );
         } catch (err) {
           setStatus(`Export failed: ${err.message}`, "error");
         }
@@ -2748,21 +2788,12 @@ function wireSaveLoad() {
   };
 
   document.getElementById("btn-save").addEventListener("click", openSaveAsDialog);
-  document.getElementById("save-as-cancel").addEventListener("click", closeSaveAsDialog);
-  document.getElementById("save-as-ok").addEventListener("click", confirmSaveAs);
-  // Clicking the dimmed backdrop itself (not the modal box) cancels, same
-  // as Cancel -- matches the New grid dialog's own backdrop behavior.
-  saveAsOverlay.addEventListener("click", (e) => {
-    if (e.target === saveAsOverlay) closeSaveAsDialog();
-  });
-  saveAsName.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      confirmSaveAs();
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      closeSaveAsDialog();
-    }
+  wireModal("save-as-overlay", {
+    cancelId: "save-as-cancel",
+    okId: "save-as-ok",
+    inputIds: ["save-as-name"],
+    onConfirm: confirmSaveAs,
+    onClose: closeSaveAsDialog,
   });
 
   document.getElementById("load-select").addEventListener("change", async (e) => {
@@ -2774,10 +2805,7 @@ function wireSaveLoad() {
     }
     try {
       const data = await apiJson("/api/puzzle/load", { name });
-      if (puzzle) {
-        undoStack.push(puzzle);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
-      }
+      if (puzzle) pushUndo(puzzle);
       currentSaveName = data.name;
       puzzle = data.puzzle;
       slots = data.slots;
@@ -3004,10 +3032,7 @@ async function runFill() {
           // matter which of those terminates the stream -- including the
           // "connection closed early" and thrown-error paths, which don't
           // have their own branch below to duplicate this in.
-          if (bestScore === null) {
-            undoStack.push(beforeFill);
-            if (undoStack.length > MAX_UNDO) undoStack.shift();
-          }
+          if (bestScore === null) pushUndo(beforeFill);
           bestScore = event.score;
           applyScopedResultLetters(event.puzzle.letters, scopeCells);
           renderGrid(); // cheap, local; also autosaves (see renderGrid's scheduleSave call) -- the "and save it" half of this feature
@@ -3023,10 +3048,7 @@ async function runFill() {
     } else if (finalEvent.type === "done") {
       const st = finalEvent.stats;
       if (finalEvent.solved) {
-        if (!maximize) {
-          undoStack.push(beforeFill);
-          if (undoStack.length > MAX_UNDO) undoStack.shift();
-        } // maximize: already pushed above, on the first "improved" event
+        if (!maximize) pushUndo(beforeFill); // maximize: already pushed above, on the first "improved" event
         applyScopedResultLetters(finalEvent.puzzle.letters, scopeCells);
         // Absent (defaults to []) in maximize mode -- see app.py's /api/fill
         // docstring -- where "forced" isn't a meaningful concept. Also

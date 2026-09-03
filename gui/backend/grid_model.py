@@ -276,16 +276,51 @@ class Puzzle:
                     puzzle.blocks[r][c] = True
                 elif ch != ".":
                     puzzle.letters[r][c] = ch.upper()
+
+        # Validated the same way xfill's own Grid::FromSpec (grid.cpp)
+        # validates this exact same trailing section -- both sides read
+        # the same wire format, so a file either accepts on both or
+        # neither, rather than Python silently corrupting a slot's real
+        # content (or crashing with a raw IndexError/ValueError) on
+        # something the C++ side would cleanly reject.
         for line in rebus_lines:
-            coords, _, content = line.partition(":")
-            r_s, _, c_s = coords.partition(",")
-            puzzle.letters[int(r_s)][int(c_s)] = content.strip().upper()
+            coords, sep, content = line.partition(":")
+            if not sep:
+                raise ValueError(f'malformed rebus entry (expected "row,col:CONTENT"): {line!r}')
+            r_s, csep, c_s = coords.partition(",")
+            if not csep:
+                raise ValueError(f'malformed rebus entry (expected "row,col:CONTENT"): {line!r}')
+            try:
+                r, c = int(r_s), int(c_s)
+            except ValueError as e:
+                raise ValueError(f"malformed rebus entry (row/col not integers): {line!r}") from e
+            if not (0 <= r < len(rows) and 0 <= c < width):
+                raise ValueError(f"rebus entry out of bounds: {r},{c}")
+            if puzzle.blocks[r][c]:
+                raise ValueError(f"rebus entry at a blocked cell: {r},{c}")
+            content = content.strip().upper()
+            if not content:
+                raise ValueError(f"rebus entry has empty content: {r},{c}")
+            if not content.isalpha() or not content.isascii():
+                raise ValueError(f"rebus content must be A-Z after uppercasing: {content!r}")
+            if content[0] != puzzle.letters[r][c]:
+                raise ValueError(
+                    f"rebus content's first letter must match the grid row's character at row {r}, col {c}"
+                )
+            puzzle.letters[r][c] = content
         return puzzle
 
     def stats(self) -> dict:
         slots = self.compute_slots()
         word_count = len(slots)
-        lengths = [s.length for s in slots]
+        # len(slot_pattern(s)), not s.length (physical cell count) -- a
+        # rebus cell can make a slot's real spelled-out word longer than
+        # its cell count (see slot_pattern's own doc comment), and this
+        # feeds avg_length/length_breakdown below, which should report the
+        # real word-length distribution, matching letter_freq/scrabble_avg
+        # just below (already correctly rebus-aware) rather than
+        # contradicting them.
+        lengths = [len(self.slot_pattern(s)) for s in slots]
         avg_length = sum(lengths) / word_count if word_count else 0.0
         total_cells = self.width * self.height
         block_count = sum(1 for row in self.blocks for b in row if b)
