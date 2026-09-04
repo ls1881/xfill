@@ -16,6 +16,10 @@ below is backed by a measurement, not an assumption: see
 [`docs/design.md`](docs/design.md) for the full development log and
 [`docs/bibliography.md`](docs/bibliography.md) for sources.
 
+If this is useful to you, a ⭐ on the repo is a real signal that keeps
+this kind of measurement-driven, no-fluff development worth doing — it
+costs nothing and genuinely helps.
+
 ## Quickstart
 
 Just want to build or fill in a crossword, no interest in the solver
@@ -57,11 +61,17 @@ your own word list instead, one `WORD;score` pair per line (see
 [Dictionary format](#dictionary-format)).
 
 **6. Build or open a puzzle.**
-- **New** starts a blank grid at whatever size you choose.
+- **New** starts a blank grid at whatever size you choose (type the size
+  once, both dimensions come from that one dialog).
 - **Import** opens a `.puz`, `.ipuz`, or `.cfp` file from another program.
 - Click a cell to select its across/down slot; type letters directly, or
   pick a word from the **Options** tab's suggestions.
 - **Fill** auto-completes the whole grid using the word list you loaded.
+- Type a title in the box above the grid — you'll need one before you can
+  export (step 7 explains why), so it's easiest to set it early.
+- Once the grid is filled, switch to the **Clues** tab and write a clue
+  for each numbered entry — a live counter (e.g. "12 of 78 words clued")
+  tracks how many you have left.
 
 **7. Save or export your work.**
 - **Save** keeps a named copy inside the app, to reopen later from the
@@ -69,7 +79,10 @@ your own word list instead, one `WORD;score` pair per line (see
   this does and doesn't mean).
 - **Export** writes a real file to your computer instead: `.puz`/`.ipuz`
   for other crossword software, or a printable PDF (via the **Print**
-  options) for a paper copy or a submission packet.
+  options) for a paper copy or a submission packet. Every export is named
+  after the puzzle's title, so if you haven't set one yet, a small prompt
+  asks for it the first time you export or print — nothing is ever
+  written as a nameless or "Untitled" file.
 
 ### Where your puzzles are stored
 
@@ -125,6 +138,7 @@ copies of the app by default:
 - [Python CLI](#python-cli)
 - [GUI](#gui)
 - [Benchmarking](#benchmarking)
+- [Contributing](#contributing)
 - [License](#license)
 
 ## Status
@@ -482,6 +496,15 @@ python3 benchmarks/bench_subset.py --n 20 --seed 42 --save before.csv
 # ...make a change...
 python3 benchmarks/bench_subset.py --n 20 --seed 42 --compare before.csv
 ```
+
+## Contributing
+
+Bug reports, feature ideas, and pull requests are all welcome — see
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for what a good bug report includes,
+what CI actually checks, and the style this codebase holds itself to
+(reasoning in comments, measurements over assumptions for anything
+solver-related). If you're not sure whether something's worth an issue,
+open one anyway.
 
 ## License
 
