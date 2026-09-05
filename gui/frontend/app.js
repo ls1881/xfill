@@ -44,6 +44,7 @@ let optionsRequestSeq = 0; // same, for /api/options
 let lastClick = { row: null, col: null, time: 0 }; // same-cell click timing, used to detect a double-click ourselves
 const DOUBLE_CLICK_MS = 350;
 let undoStack = []; // {puzzle, saveName} entries (see pushUndo), most recent last
+let redoStack = []; // same shape as undoStack -- see redo()'s own comment for how the two interact
 const MAX_UNDO = 100;
 let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; cleared on the next edit
 // "r,c" keys of a successful Fill's letters that had no real alternative
@@ -51,6 +52,15 @@ let fillFailedCells = new Set(); // "r,c" keys highlighted after a failed Fill; 
 // the solver was actually free to choose among several valid words for.
 // Cleared on the next edit, same lifecycle as fillFailedCells.
 let forcedCells = new Set();
+// The exact pre-Fill puzzle state and scope a successful, non-maximize
+// Fill actually solved from -- set so "Try Another Fill" can re-solve
+// from the SAME starting point with a different attempt_offset, instead
+// of the current (already fully-filled) puzzle, which the solver would
+// just re-confirm unchanged (see runFill/tryAnotherFill). null whenever
+// there's nothing valid to retry -- see clearTryAnotherFillState's own
+// call sites for exactly when that is.
+let lastFillBaseState = null;
+let lastFillScopeCells = null;
 
 // Word lengths / letters currently toggled on in the Summary tab -- every
 // grid cell belonging to a slot of a highlighted length, or currently
@@ -272,7 +282,7 @@ function setFillSpinner(visible) {
 // Undo
 // ---------------------------------------------------------------------------
 
-// Every undoStack entry pairs a puzzle snapshot with whatever
+// Every undoStack/redoStack entry pairs a puzzle snapshot with whatever
 // currentSaveName was true of it AT THAT MOMENT -- not just the puzzle
 // content. Load/New/Import all change currentSaveName as part of the very
 // same action that also pushes the pre-change puzzle here, so without
@@ -280,9 +290,29 @@ function setFillSpinner(visible) {
 // (and the Load dropdown showing it) permanently out of sync with the
 // puzzle content that was just restored -- Save would then prefill the
 // wrong name, and the dropdown wouldn't reflect the reloaded puzzle.
-function pushUndo(snapshot) {
+//
+// Raw push, no redo-stack side effect -- shared by pushUndo (below) and
+// by undo()/redo() themselves, which each push the state they're about
+// to leave onto the *other* stack without disturbing it (see redo()'s
+// own comment for why using pushUndo there instead would be wrong).
+function pushUndoStackEntry(snapshot) {
   undoStack.push({ puzzle: snapshot, saveName: currentSaveName });
   if (undoStack.length > MAX_UNDO) undoStack.shift();
+}
+
+// Same raw-push shape as pushUndoStackEntry, for the other stack.
+function pushRedoStackEntry(snapshot) {
+  redoStack.push({ puzzle: snapshot, saveName: currentSaveName });
+  if (redoStack.length > MAX_UNDO) redoStack.shift();
+}
+
+// The public "a real edit just happened" entry point -- every call site
+// below except undo()/redo() themselves. Clears redoStack: once a new
+// edit is made, whatever future an earlier undo() had set aside is no
+// longer reachable, same as any other undo/redo implementation.
+function pushUndo(snapshot) {
+  pushUndoStackEntry(snapshot);
+  redoStack = [];
 }
 
 // Call before any in-place mutation of `puzzle` -- captures the
@@ -294,6 +324,7 @@ function snapshotForUndo() {
   pushUndo(JSON.parse(JSON.stringify(puzzle)));
   clearFillFailedHighlight();
   clearForcedCells();
+  clearTryAnotherFillState();
   clearPreview();
   invalidateVerificationCache();
 }
@@ -304,6 +335,22 @@ function clearFillFailedHighlight() {
 
 function clearForcedCells() {
   if (forcedCells.size) forcedCells = new Set();
+}
+
+// "Try Another Fill" is only ever valid immediately after the plain Fill
+// it would retry -- called everywhere something makes lastFillBaseState
+// stale: a real edit (snapshotForUndo), a whole new puzzle (newPuzzle,
+// Import, Load), and undo/redo (applyHistoryEntry), all for the same
+// reason clearForcedCells is called in those same places.
+function clearTryAnotherFillState() {
+  lastFillBaseState = null;
+  lastFillScopeCells = null;
+  updateTryAnotherButtonVisibility();
+}
+
+function updateTryAnotherButtonVisibility() {
+  const btn = document.getElementById("btn-try-another-fill");
+  if (btn) btn.hidden = lastFillBaseState === null;
 }
 
 // A previewed candidate's grid is only meaningful relative to the exact
@@ -359,36 +406,56 @@ function updateAcceptFillButton() {
   if (btn) btn.hidden = previewGrid === null || !previewIsVerified;
 }
 
+// Shared by undo()/redo(): drops selection (bounds/direction could be
+// stale if the step crossed a New/Import with a different grid size),
+// clears fill-related highlighting and the verification cache (a cached
+// result reflects the grid state at the time it was checked, and this
+// just changed that state out from under it -- neither undo nor redo
+// goes through snapshotForUndo()'s own identical clears, since that
+// would push a fresh undo entry for the undo/redo itself), and restores
+// whichever save the target entry actually belonged to (see pushUndo) so
+// currentSaveName/the Load dropdown don't end up mismatched with the
+// puzzle content just restored.
+function applyHistoryEntry(entry) {
+  puzzle = entry.puzzle;
+  currentSaveName = entry.saveName;
+  const loadSelect = document.getElementById("load-select");
+  if (loadSelect) loadSelect.value = currentSaveName || "";
+  selected = null;
+  clearFillFailedHighlight();
+  clearForcedCells();
+  clearTryAnotherFillState();
+  invalidateVerificationCache();
+  renderAll();
+}
+
 function undo() {
   if (!undoStack.length) {
     setStatus("Nothing to undo", "error");
     return;
   }
   const entry = undoStack.pop();
-  puzzle = entry.puzzle;
-  // Restores whichever save (if any) this snapshot actually belonged to
-  // (see pushUndo) -- otherwise undoing back across a Load/New/Import
-  // would leave currentSaveName and the Load dropdown showing whatever
-  // they were AFTER that action, not matching the puzzle content this
-  // just reverted to.
-  currentSaveName = entry.saveName;
-  const loadSelect = document.getElementById("load-select");
-  if (loadSelect) loadSelect.value = currentSaveName || "";
-  // Bounds/direction could be stale if the undone step crossed a New or
-  // Import (different grid size) -- drop selection rather than risk it
-  // pointing outside the restored grid.
-  selected = null;
-  clearFillFailedHighlight();
-  clearForcedCells();
-  // This is a real grid-state change (reverting to an earlier one) that
-  // doesn't go through snapshotForUndo() -- doing so would push a new
-  // undo entry for the undo itself -- so it needs its own call to the
-  // same cache invalidation for the same reason: a cached verification
-  // result reflects the grid state at the time it was checked, and undo
-  // just changed that state out from under it.
-  invalidateVerificationCache();
-  renderAll();
+  // The state being left behind goes onto redoStack directly (not via
+  // pushUndo, which would immediately clear the redoStack entry this IS)
+  // -- redo() undoes this exact pop, so what it needs back is precisely
+  // "what undo() just moved away from."
+  pushRedoStackEntry(JSON.parse(JSON.stringify(puzzle)));
+  applyHistoryEntry(entry);
   setStatus("Undid last change", "ok");
+}
+
+function redo() {
+  if (!redoStack.length) {
+    setStatus("Nothing to redo", "error");
+    return;
+  }
+  const entry = redoStack.pop();
+  // Mirrors undo()'s own reasoning: push what's being left behind onto
+  // the OTHER stack directly, not through pushUndo -- that would wipe
+  // any further redoStack entries still waiting behind this one.
+  pushUndoStackEntry(JSON.parse(JSON.stringify(puzzle)));
+  applyHistoryEntry(entry);
+  setStatus("Redid last change", "ok");
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +532,7 @@ async function newPuzzle(width, height) {
   clearCurrentSave();
   clearFillFailedHighlight();
   clearForcedCells();
+  clearTryAnotherFillState();
   clearVerificationCache();
   renderAll();
 }
@@ -911,14 +979,19 @@ document.addEventListener(
 
     const tag = (document.activeElement && document.activeElement.tagName) || "";
     const inTextField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-    // Undo inside a text field should undo the *text edit* (native browser
-    // behavior), not the grid -- Fill has no such field-local meaning, so
-    // it stays global regardless of focus.
+    // Undo/redo inside a text field should act on the *text edit* (native
+    // browser behavior), not the grid -- Fill has no such field-local
+    // meaning, so it stays global regardless of focus.
     if (key === "z" && inTextField) return;
 
     e.preventDefault();
     e.stopPropagation();
     if (key === "f") runFill();
+    // Shift+Z, not a separate key: e.key is already "Z" (uppercase) with
+    // Shift held, and .toLowerCase() above folds that back to plain "z" --
+    // e.shiftKey is what actually distinguishes Ctrl/Cmd+Z (undo) from
+    // Ctrl/Cmd+Shift+Z (redo) here.
+    else if (e.shiftKey) redo();
     else undo();
   },
   true
@@ -2584,6 +2657,7 @@ function wireToolbar() {
       clearCurrentSave();
       clearFillFailedHighlight();
       clearForcedCells();
+      clearTryAnotherFillState();
       clearVerificationCache();
       renderAll();
       setStatus(`Imported "${file.name}"`, "ok");
@@ -2713,10 +2787,19 @@ function wireToolbar() {
     });
   });
 
-  document.getElementById("btn-fill").addEventListener("click", runFill);
+  // Wrapped in arrow functions, not passed directly: addEventListener
+  // would otherwise call these WITH the click event as their first
+  // argument -- harmless for undo/redo/cancelFill (they take no
+  // arguments), but runFill's first argument is now an options object
+  // (see its own doc comment), and a raw MouseEvent has none of
+  // baseState/scopeCells/attemptOffset's exact names, so it happens to
+  // behave like {} either way -- this avoids relying on that coincidence.
+  document.getElementById("btn-fill").addEventListener("click", () => runFill());
   document.getElementById("btn-cancel-fill").addEventListener("click", cancelFill);
+  document.getElementById("btn-try-another-fill").addEventListener("click", tryAnotherFill);
 
   document.getElementById("btn-undo").addEventListener("click", undo);
+  document.getElementById("btn-redo").addEventListener("click", redo);
 
   document.getElementById("btn-clear").addEventListener("click", () => {
     if (!puzzle) return;
@@ -2812,6 +2895,7 @@ function wireSaveLoad() {
       selected = null;
       clearFillFailedHighlight();
       clearForcedCells();
+      clearTryAnotherFillState();
       clearVerificationCache();
       renderAll();
       setStatus(`Loaded "${data.name}"`, "ok");
@@ -2910,7 +2994,12 @@ function applyScopedResultLetters(resultLetters, scopeCells) {
 // that endpoint) instead of awaiting one parsed response: a plain
 // await-the-whole-response call can't show live progress at all, since
 // nothing arrives until the request finishes.
-async function runFill() {
+// `options.baseState`/`options.scopeCells`/`options.attemptOffset`: used
+// only by tryAnotherFill (below) to re-solve from the ORIGINAL pre-fill
+// state with a different random search path, instead of the current
+// (already fully-filled) puzzle, which the solver would just re-confirm
+// unchanged. Omitted, this is today's exact plain-Fill behavior.
+async function runFill(options = {}) {
   if (!puzzle || filling) return;
   if (!dictSelections.across.path || !dictSelections.down.path) {
     setStatus("Select across/down dictionaries first (Dictionaries tab)", "error");
@@ -2921,12 +3010,16 @@ async function runFill() {
   // a cell is selected; null ("no scope", the whole grid) if not -- see
   // connectedFillScope's own doc comment for exactly what "connected"
   // means here and why blocking everything outside it in the REQUEST is
-  // safe (never changes any in-scope slot's own shape).
-  const scopeCells = connectedFillScope();
+  // safe (never changes any in-scope slot's own shape). tryAnotherFill
+  // passes the ORIGINAL fill's own scope explicitly, rather than
+  // whatever's currently selected, so a scoped retry stays scoped to the
+  // same region regardless of where the cursor has moved since.
+  const scopeCells = options.scopeCells !== undefined ? options.scopeCells : connectedFillScope();
 
   filling = true;
   clearFillFailedHighlight();
   clearForcedCells();
+  clearTryAnotherFillState();
   // A leftover preview (from clicking a verified option earlier without
   // committing or navigating away -- see setPreview/clearPreview) is only
   // ever a full, real solved grid, so it always spells out complete
@@ -2959,15 +3052,26 @@ async function runFill() {
   // from an actual progress event, never guessed at here.
   const tickInterval = setInterval(showProgress, 200);
 
-  const beforeFill = JSON.parse(JSON.stringify(puzzle));
+  // Two different things this used to conflate into one "beforeFill"
+  // value: `undoSnapshot` is what Undo should restore (the state about to
+  // be replaced -- always the CURRENT puzzle, whether this is a fresh
+  // Fill or a retry); `solveBase` is what the solver actually searches
+  // from. For a fresh Fill they're the same clone. For tryAnotherFill
+  // they differ on purpose: `puzzle` is already the PREVIOUS fill's full
+  // answer (nothing left to search), so `options.baseState` -- the
+  // original pre-fill state -- is what actually gets sent to the solver,
+  // while `undoSnapshot` still correctly points Undo at the previous
+  // answer, not all the way back past both fills at once.
+  const undoSnapshot = JSON.parse(JSON.stringify(puzzle));
+  const solveBase = options.baseState ? JSON.parse(JSON.stringify(options.baseState)) : undoSnapshot;
   // Everything outside the scope is blocked in THIS request only -- the
-  // real puzzle (and beforeFill, captured above) is untouched. Every
+  // real puzzle (and solveBase, captured above) is untouched. Every
   // in-scope slot's own cells are unaffected: scopeCells is closed under
   // crossings by construction, so no in-scope slot shares a cell with
   // anything now being blocked.
-  let requestPuzzle = puzzle;
+  let requestPuzzle = solveBase;
   if (scopeCells) {
-    requestPuzzle = JSON.parse(JSON.stringify(puzzle));
+    requestPuzzle = JSON.parse(JSON.stringify(solveBase));
     for (let r = 0; r < requestPuzzle.height; r++) {
       for (let c = 0; c < requestPuzzle.width; c++) {
         if (!scopeCells.has(`${r},${c}`)) requestPuzzle.blocks[r][c] = true;
@@ -2988,6 +3092,7 @@ async function runFill() {
         down_min_overrides: dictSelections.down.lengthOverrides,
         threads: 0,
         maximize,
+        attempt_offset: options.attemptOffset || 0,
       }),
     });
     if (!resp.ok) {
@@ -3032,7 +3137,7 @@ async function runFill() {
           // matter which of those terminates the stream -- including the
           // "connection closed early" and thrown-error paths, which don't
           // have their own branch below to duplicate this in.
-          if (bestScore === null) pushUndo(beforeFill);
+          if (bestScore === null) pushUndo(undoSnapshot);
           bestScore = event.score;
           applyScopedResultLetters(event.puzzle.letters, scopeCells);
           renderGrid(); // cheap, local; also autosaves (see renderGrid's scheduleSave call) -- the "and save it" half of this feature
@@ -3048,20 +3153,31 @@ async function runFill() {
     } else if (finalEvent.type === "done") {
       const st = finalEvent.stats;
       if (finalEvent.solved) {
-        if (!maximize) pushUndo(beforeFill); // maximize: already pushed above, on the first "improved" event
+        if (!maximize) pushUndo(undoSnapshot); // maximize: already pushed above, on the first "improved" event
         applyScopedResultLetters(finalEvent.puzzle.letters, scopeCells);
         // Absent (defaults to []) in maximize mode -- see app.py's /api/fill
         // docstring -- where "forced" isn't a meaningful concept. Also
         // excludes any cell that already had a letter before this Fill ran
-        // (beforeFill, captured pre-request): "forced" is only meaningful
-        // for a letter Fill itself just determined -- a cell the user typed
-        // in beforehand isn't newly forced by this solve just because its
-        // slot's pattern happens to admit only that one dictionary word.
+        // (solveBase, captured pre-request -- NOT undoSnapshot, which for a
+        // tryAnotherFill retry is the previous fill's fully-filled answer,
+        // not what was actually given to the solver this time): "forced"
+        // is only meaningful for a letter Fill itself just determined -- a
+        // cell that was already fixed beforehand isn't newly forced by
+        // this solve just because its slot's pattern happens to admit only
+        // that one dictionary word.
         forcedCells = new Set(
           (finalEvent.forced_cells || [])
-            .filter(([r, c]) => beforeFill.letters[r][c] === EMPTY)
+            .filter(([r, c]) => solveBase.letters[r][c] === EMPTY)
             .map(([r, c]) => `${r},${c}`)
         );
+        // Only for a plain (non-maximize) success -- see the scoping
+        // decision in tryAnotherFill's own comment for why Maximize mode
+        // doesn't offer this at all.
+        if (!maximize) {
+          lastFillBaseState = JSON.parse(JSON.stringify(solveBase));
+          lastFillScopeCells = scopeCells;
+          updateTryAnotherButtonVisibility();
+        }
         await refreshSlotsAndStats();
         renderGrid();
         const scopeNote = scopeCells ? " (connected region only)" : "";
@@ -3104,6 +3220,28 @@ async function runFill() {
     setCancelButtonVisible(false);
     filling = false;
   }
+}
+
+// Re-solves the region a successful, non-maximize Fill just completed,
+// from the SAME original pre-fill starting point (lastFillBaseState/
+// lastFillScopeCells, see runFill) but with a different random search
+// path -- the solver is fully deterministic given the same inputs (see
+// Solver::SolveParallel's doc comment), so simply calling runFill() again
+// on an already-fully-filled grid would just re-confirm the identical
+// answer; a fresh random attemptOffset is what actually gets a different
+// one. Maximize-mode fills never set lastFillBaseState in the first
+// place (that mode's whole point is the provably OPTIMAL fill -- "try
+// another" would only ever find something equally good via a different
+// path, or worse, never a meaningfully different good option the way it
+// is for an ordinary multi-solution grid), so this is unreachable then;
+// the button stays hidden instead of calling this.
+async function tryAnotherFill() {
+  if (!lastFillBaseState || blockedByActiveFill()) return;
+  await runFill({
+    baseState: lastFillBaseState,
+    scopeCells: lastFillScopeCells,
+    attemptOffset: Math.floor(Math.random() * 2 ** 31),
+  });
 }
 
 async function cancelFill() {

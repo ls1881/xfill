@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <mutex>
+#include <set>
 #include <vector>
 
 #include "test_helpers.hpp"
@@ -136,6 +137,47 @@ TEST_CASE("SolveParallel with 1 thread finds the same solution as Solve()") {
   REQUIRE(result.solution->assignment.at(1) == "NO");
   REQUIRE(result.solution->assignment.at(2) == "AN");
   REQUIRE(result.solution->assignment.at(3) == "TO");
+}
+
+TEST_CASE("SolveParallel's attempt_offset_base defaults to 0, reproducing today's exact sequence") {
+  // Regression guard for the new attempt_offset_base parameter (added for
+  // the GUI's "try another fill"): omitting it, or passing 0 explicitly,
+  // must both still reach the exact same deterministic answer this
+  // fixture already pins down above.
+  auto grid = xfill::Grid::FromSpec({"..", ".."});
+  auto dict = WriteAndLoadDict("test_attempt_offset_default.dict",
+                                {"AT;10", "NO;10", "AN;10", "TO;10"});
+
+  auto omitted = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/1);
+  auto explicit_zero = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/1, nullptr, /*attempt_offset_base=*/0);
+  REQUIRE(omitted.solution.has_value());
+  REQUIRE(explicit_zero.solution.has_value());
+  REQUIRE(omitted.solution->assignment == explicit_zero.solution->assignment);
+  REQUIRE(omitted.solution->assignment.at(0) == "AT");
+}
+
+TEST_CASE("Different attempt_offset_base values retarget the search to different valid fills") {
+  // A single 5-letter slot with several equally-valid, equally-scored
+  // words -- the simplest possible "try another fill" fixture. Threads
+  // pinned to 1 so the result depends only on attempt_offset_base, not on
+  // which worker happens to win a race (see this project's own documented
+  // multi-threaded non-determinism elsewhere).
+  auto grid = xfill::Grid::FromSpec({"....."});
+  auto dict = WriteAndLoadDict(
+      "test_attempt_offset_variety.dict",
+      {"APPLE;50", "GRAPE;50", "MANGO;50", "LEMON;50", "BERRY;50", "MELON;50"});
+
+  std::set<std::string> seen_words;
+  for (uint64_t offset : {uint64_t{0}, uint64_t{1}, uint64_t{2}, uint64_t{3}, uint64_t{4}, uint64_t{5}}) {
+    auto result = xfill::Solver::SolveParallel(grid, dict, /*num_threads=*/1, nullptr, offset);
+    REQUIRE(result.solution.has_value());
+    seen_words.insert(result.solution->assignment.at(0));
+  }
+  // Six different offsets over a six-word dictionary: not guaranteed to
+  // hit all six (a random-restart shuffle can repeat), but must produce
+  // more than just the one offset-0 answer, or attempt_offset_base isn't
+  // actually doing anything.
+  REQUIRE(seen_words.size() > 1);
 }
 
 TEST_CASE("SolveParallel with several threads finds a valid solution") {

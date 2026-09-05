@@ -39,6 +39,7 @@
         </div>
       </div>
       <button id="btn-undo" title="⌘Z / Ctrl+Z">Undo</button>
+      <button id="btn-redo" title="⌘⇧Z / Ctrl+Shift+Z">Redo</button>
       <button id="btn-clear" title="Clear all letters, keep the grid shape">Clear</button>
     </div>
 
@@ -68,6 +69,7 @@
     <div class="toolbar-group">
       <button id="btn-fill" class="primary" title="⌘F / Ctrl+F — fills just the region connected to the selected cell; the whole grid if nothing's selected">Fill ▶</button>
       <button id="btn-cancel-fill" class="danger" title="Esc" hidden>Cancel</button>
+      <button id="btn-try-another-fill" title="Re-fills the same region with a different valid answer" hidden>Try Another</button>
       <label id="maximize-toggle-label" title="Instead of stopping at the first valid fill, keep searching for higher-scoring ones and show the best found so far. Slower, and usually needs Cancel to stop it.">
         <input type="checkbox" id="maximize-toggle" />
         Maximize score

@@ -246,9 +246,20 @@ class Solver {
   // when unused" pattern) and the monitor thread does the reporting, so a
   // slow or blocking callback only ever delays progress updates, never
   // the search.
+  // `attempt_offset_base` shifts every worker's own attempt_offset (see
+  // Solve() above) by the same fixed amount -- 0, the default, reproduces
+  // today's exact deterministic sequence (same grid/dict/thread count
+  // always finds the same fill). A nonzero base retargets the whole
+  // portfolio at a different slice of the search space, e.g. so a GUI's
+  // "try another fill" can get a genuinely different valid answer instead
+  // of re-deriving the identical one. Safe at any value that fits in a
+  // uint64_t: kAttemptStride (1<<40, see solver.cpp) is astronomically
+  // larger than any realistic offset, so shifting can never make one
+  // worker's range collide with another's.
   static ParallelSolveResult SolveParallel(const Grid& grid, const Dictionary& dict,
                                             unsigned num_threads = 0,
-                                            std::function<void(uint64_t)> on_progress = nullptr);
+                                            std::function<void(uint64_t)> on_progress = nullptr,
+                                            uint64_t attempt_offset_base = 0);
 
   // Searches for the crossword fill that maximizes the sum of every
   // slot's word score -- a genuinely different search from Solve() /

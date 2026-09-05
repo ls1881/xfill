@@ -456,6 +456,12 @@ class FillRequest(BaseModel):
     down_min_overrides: dict[int, int] = {}
     threads: int = 0
     maximize: bool = False
+    # 0 (the default) is today's exact deterministic search. A nonzero
+    # value retargets it at a different slice of the search space -- see
+    # solver_bridge.solve_stream's doc comment -- for the frontend's "try
+    # another fill" to get a genuinely different valid answer instead of
+    # reproducing the one just shown.
+    attempt_offset: int = 0
 
 
 @app.post("/api/fill")
@@ -494,6 +500,7 @@ def fill(req: FillRequest):
                 maximize=req.maximize,
                 across_min_overrides=req.across_min_overrides,
                 down_min_overrides=req.down_min_overrides,
+                attempt_offset=req.attempt_offset,
             ):
                 if event["type"] == "improved":
                     # Not a real Solution-shaped dict (no "solved" key --

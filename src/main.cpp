@@ -209,6 +209,11 @@ struct Args {
   bool json = false;
   bool progress = false;
   bool maximize = false;
+  // Shifts every worker's random search path by the same fixed amount --
+  // 0, the default, is today's exact deterministic behavior. See
+  // SolveParallel's doc comment (solver.hpp) for why a nonzero value here
+  // can never collide with a worker's own dedicated attempt range.
+  uint64_t attempt_offset = 0;
 };
 
 // Parses "<length>:<score>,<length>:<score>,..." (e.g. "3:25,5:60") into a
@@ -244,12 +249,22 @@ unsigned ParseThreadCount(const std::string& s) {
   return static_cast<unsigned>(std::stoul(s));
 }
 
+// Same non-negative-integer validation as ParseThreadCount above, for the
+// same reason (std::stoull silently wraps a leading '-' instead of
+// throwing).
+uint64_t ParseAttemptOffset(const std::string& s) {
+  if (s.empty() || s.find('-') != std::string::npos) {
+    throw std::runtime_error("invalid attempt offset: " + s + " (must be a non-negative integer)");
+  }
+  return std::stoull(s);
+}
+
 // New flag-based invocation, used by the GUI backend so across/down can
 // have independent dictionaries and min scores:
 //   xfill_cli <grid_file> --dict <path> [--min-score <n>]
 //   xfill_cli <grid_file> --across-dict <path> --across-min <n>
 //                         --down-dict <path> --down-min <n>
-//             [--threads <n>] [--json]
+//             [--threads <n>] [--attempt-offset <n>] [--json]
 // --dict/--min-score set both directions at once; --across-*/--down-*
 // override per direction. At least one of --dict or both --across-dict and
 // --down-dict must be given.
@@ -283,6 +298,8 @@ Args ParseFlagArgs(int argc, char** argv) {
       args.down_min_overrides = ParseLengthScoreMap(next());
     } else if (flag == "--threads") {
       args.num_threads = ParseThreadCount(next());
+    } else if (flag == "--attempt-offset") {
+      args.attempt_offset = ParseAttemptOffset(next());
     } else if (flag == "--json") {
       args.json = true;
     } else if (flag == "--progress") {
@@ -460,7 +477,7 @@ int main(int argc, char** argv) {
 
     auto start = std::chrono::steady_clock::now();
     xfill::ParallelSolveResult result =
-        xfill::Solver::SolveParallel(grid, dict, args.num_threads, on_progress);
+        xfill::Solver::SolveParallel(grid, dict, args.num_threads, on_progress, args.attempt_offset);
     auto end = std::chrono::steady_clock::now();
     double seconds = std::chrono::duration<double>(end - start).count();
 

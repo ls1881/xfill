@@ -291,7 +291,8 @@ std::optional<Solution> Solver::Solve(uint64_t attempt_offset,
 
 ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& dict,
                                            unsigned num_threads,
-                                           std::function<void(uint64_t)> on_progress) {
+                                           std::function<void(uint64_t)> on_progress,
+                                           uint64_t attempt_offset_base) {
   if (num_threads == 0) {
     num_threads = std::thread::hardware_concurrency();
     if (num_threads == 0) num_threads = 1;
@@ -410,7 +411,7 @@ ParallelSolveResult Solver::SolveParallel(const Grid& grid, const Dictionary& di
     // test), rather than silently changing its meaning.
     bool unlimited_budget = num_threads > 1 && i == num_threads - 1;
     threads.emplace_back([&, i, unlimited_budget]() {
-      auto solution = solvers[i]->Solve(static_cast<uint64_t>(i) * kAttemptStride,
+      auto solution = solvers[i]->Solve(attempt_offset_base + static_cast<uint64_t>(i) * kAttemptStride,
                                          &cancel, unlimited_budget);
       bool expected = false;
       if (solution) {

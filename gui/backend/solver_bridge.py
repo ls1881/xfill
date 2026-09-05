@@ -183,6 +183,7 @@ def solve_stream(
     maximize: bool = False,
     across_min_overrides: dict[int, int] | None = None,
     down_min_overrides: dict[int, int] | None = None,
+    attempt_offset: int = 0,
 ) -> Iterator[dict]:
     """Yields {"type": "progress", "nodes": N} dicts as xfill_cli reports
     them (see main.cpp's --progress), then exactly one final dict:
@@ -239,6 +240,15 @@ def solve_stream(
     else that gap doesn't cover), confirmed necessary directly: multiple
     xfill_cli processes were found still running with the app not even
     open, from exactly this gap before both fixes existed.
+
+    `attempt_offset`: passed straight through as xfill_cli's own
+    --attempt-offset (see main.cpp/Solver::SolveParallel). 0, the
+    default, is today's exact deterministic search -- the same grid,
+    dictionaries, and thread count always find the same fill. A nonzero
+    value retargets the whole search at a different slice of the search
+    space, for the GUI's "try another fill": re-solving the identical
+    request with a different offset can find a genuinely different valid
+    answer instead of reproducing the one just shown.
     """
     if not XFILL_CLI.exists():
         raise SolveError(
@@ -276,6 +286,7 @@ def solve_stream(
             "--down-dict", down_path,
             "--down-min", str(down_min_score),
             "--threads", str(threads),
+            "--attempt-offset", str(attempt_offset),
             "--json",
             "--progress",
         ]
@@ -394,6 +405,7 @@ def solve_blocking(
     maximize: bool = False,
     across_min_overrides: dict[int, int] | None = None,
     down_min_overrides: dict[int, int] | None = None,
+    attempt_offset: int = 0,
 ) -> dict:
     """Runs solve_stream to completion and returns just its final "done"/
     "cancelled"/"error" event, discarding "progress" and (if `maximize`)
@@ -405,6 +417,7 @@ def solve_blocking(
         puzzle, across_dict_path, across_min_score, down_dict_path, down_min_score,
         threads=threads, kind=kind, timeout_seconds=timeout_seconds, maximize=maximize,
         across_min_overrides=across_min_overrides, down_min_overrides=down_min_overrides,
+        attempt_offset=attempt_offset,
     ):
         if event["type"] not in ("progress", "improved"):
             final = event
