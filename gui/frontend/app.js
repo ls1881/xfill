@@ -430,6 +430,16 @@ function applyHistoryEntry(entry) {
 }
 
 function undo() {
+  // Same hazard blockedByActiveFill's own doc comment describes for New/
+  // Import/Load: an in-flight Fill's async stream loop still holds a
+  // reference to the CURRENT `puzzle` object and keeps calling
+  // applyScopedResultLetters(event.puzzle.letters, scopeCells) against
+  // it (a direct mutation of the global, not some captured snapshot)
+  // until it finishes or is cancelled -- swapping `puzzle` out from
+  // under it here would silently write that stream's results into
+  // whichever (undone) grid this just switched to, or throw if the
+  // sizes differ.
+  if (blockedByActiveFill()) return;
   if (!undoStack.length) {
     setStatus("Nothing to undo", "error");
     return;
@@ -445,6 +455,8 @@ function undo() {
 }
 
 function redo() {
+  // Same reasoning as undo()'s own identical guard, just above.
+  if (blockedByActiveFill()) return;
   if (!redoStack.length) {
     setStatus("Nothing to redo", "error");
     return;
