@@ -1,4 +1,5 @@
 \documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{url}
@@ -20,6 +21,8 @@ Princeton University\\
 Princeton, NJ, USA\\
 ls1881@princeton.edu}
 }
+
+\IEEEpubid{979-8-3195-2794-3/26/\$31.00~\copyright2026~IEEE}
 
 \maketitle
 
@@ -46,6 +49,7 @@ A CSP assigns values to variables from finite domains subject to constraints; sy
 
 Two dominant parallel strategies exist. \textit{Portfolio} approaches run independent searches over the whole problem concurrently; SAT portfolios such as ManySAT \cite{hamadi2009} additionally share \textit{learned clauses} (facts inferred from a worker's own failed attempts) between workers without partitioning. \textit{Partitioning} approaches divide the search space so each worker explores a disjoint region, giving non-overlapping coverage useful for proving unsatisfiability (that no solution exists, UNSAT).
 
+\IEEEpubidadjcol
 Three prior CSP results sit near, but not on, the point in this design space described here. Grimes and Wallace \cite{grimes2007} accumulate dom/wdeg-style weights from short restarted probes of a \textit{single sequential} solver, never concurrent. Ehlers and Stuckey \cite{ehlers2016} parallelize a lazy-clause-generation solver, concurrently sharing learnt clauses and objective bounds between workers -- \textit{hard} facts, unlike this paper's soft weights -- and requiring clause-learning machinery most CSP solvers lack. Yun and Epstein's SPREAD \cite{yun2012hybrid} is the closest: a manager races workers under a plain dom/wdeg solver, then \textit{averages} their reported weights once each exhausts a budget, using the average to \textit{partition} the problem for a subsequent phase. The authors state this directly: ``the primary purpose of SPREAD's portfolio phase is to glean information to support search space splitting, not to solve $P$'' \cite{yun2012hybrid}. A comprehensive 2018 survey \cite{gent2018} documents concurrent, non-partitioning multi-agent search sharing hard facts (learned clauses, as in ManySAT) or concrete candidate-value hints, but no work sharing continuously updated soft heuristic weights among such workers.
 
 The mechanism in Section~\ref{sec:arch} occupies the gap these leave: concurrent, unlike Grimes and Wallace; soft, unlike Ehlers and Stuckey; and never used to partition, unlike Yun and Epstein.
@@ -159,9 +163,7 @@ This paper's contribution is the mechanism in Section~\ref{sec:arch}: concurrent
 Future work could test that extension directly, in a non-crossword CSP domain such as graph coloring, Sudoku, or job-shop scheduling (assigning factory jobs to machines and time slots without conflicts), where a wdeg-style solver already exists and only the shared-weight array would need to be added. This could significantly accelerate resource-constrained scheduling tasks without requiring heavy synchronization overhead. It could also broaden the architectural comparison to other partition-based solvers, and re-run the ablation on a genuinely independent machine and dictionary, to separate what is specific to this setup from what generalizes.
 
 \section*{Acknowledgment}
-The author thanks the Department of Computer Science at Princeton University for funding travel to present this paper at IEEE MIT URTC.
-
-The author used Claude Code (Anthropic), an AI coding assistant, to help build this project. The author takes full responsibility for all code, experimental results, and conclusions in this paper.
+The author thanks the Department of Computer Science at Princeton University for funding that made possible the presentation of this paper at IEEE MIT URTC. The author used Claude Code (Anthropic), an AI coding assistant, to help build this project. The author takes full responsibility for all code, experimental results, and conclusions in this paper.
 
 \begin{thebibliography}{10}
 
