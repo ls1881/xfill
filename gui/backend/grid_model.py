@@ -58,6 +58,34 @@ class Puzzle:
     copyright: str = ""
     notes: str = ""
     clues: dict[str, str] = field(default_factory=dict)  # slot id -> clue text
+    # Per-cell markup, same [r][c] shape as `blocks`: a circle drawn in the
+    # square, and a shaded (gray) background. Purely presentational --
+    # never seen by the solver or pattern matching -- and only meaningful
+    # on open cells (a blocked cell's flags are ignored everywhere). Left
+    # empty by a caller that doesn't care, and filled in as all-False by
+    # __post_init__, so every Puzzle always has full-size grids here.
+    circles: list[list[bool]] = field(default_factory=list)
+    shaded: list[list[bool]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.circles:
+            self.circles = [[False] * self.width for _ in range(self.height)]
+        if not self.shaded:
+            self.shaded = [[False] * self.width for _ in range(self.height)]
+
+    def has_circles(self) -> bool:
+        return any(
+            self.circles[r][c] and not self.blocks[r][c]
+            for r in range(self.height)
+            for c in range(self.width)
+        )
+
+    def has_shading(self) -> bool:
+        return any(
+            self.shaded[r][c] and not self.blocks[r][c]
+            for r in range(self.height)
+            for c in range(self.width)
+        )
 
     @staticmethod
     def blank(width: int, height: int) -> "Puzzle":

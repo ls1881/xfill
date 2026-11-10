@@ -12,6 +12,9 @@
   --cell-selected: #ffe89a;
   --cell-word: #3a4a6b;
   --cell-text: #1a1a1a;
+  --cell-shaded: #c9c5b9;
+  --cell-shaded-word: #59678a;
+  --cell-circle: #3a3a3a;
   --good: #4caf82;
   --warn: #e0a94c;
   --issue-red: #e0393e;
@@ -343,7 +346,28 @@ button.danger:hover { background: var(--issue-red); color: var(--text); }
   user-select: none;
 }
 .cell.block { background: var(--cell-block); cursor: pointer; }
+/* Shaded square (Shade button / Cmd+Shift+O) -- a gray fill, with a
+   lighter variant inside the active word so it stays visible there. */
+.cell.shaded { background: var(--cell-shaded); }
 .cell.in-word { background: var(--cell-word); }
+.cell.shaded.in-word { background: var(--cell-shaded-word); }
+/* Circled square (Circle button / Cmd+O) -- drawn as a pseudo-element so
+   it sits under the letter and number without changing layout. ::before
+   is already the rebus corner marker, so this uses ::after. */
+.cell.circled::after {
+  content: "";
+  position: absolute;
+  inset: 1px;
+  border: 1.5px solid var(--cell-circle);
+  border-radius: 50%;
+  pointer-events: none;
+}
+/* On the dark active-word and failed-fill backgrounds a dark ring would
+   vanish, so it lightens there (the yellow selected cell keeps it dark). */
+.cell.circled.in-word:not(.selected)::after,
+.cell.circled.fill-failed:not(.selected)::after {
+  border-color: #d8deec;
+}
 /* A selected OPEN cell fills solid yellow. A selected BLOCK cell must stay
    visibly black -- filling it yellow (an earlier bug here) made a freshly
    placed block look unplaced until you clicked elsewhere. So the block

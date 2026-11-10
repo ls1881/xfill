@@ -57,6 +57,11 @@ class PuzzleModel(BaseModel):
     copyright: str = ""
     notes: str = ""
     clues: dict[str, str] = {}
+    # Optional so a payload from before circles/shading existed (an old
+    # in-app save, an older frontend's autosave) still validates; missing
+    # means "no markup anywhere" -- see Puzzle.__post_init__.
+    circles: list[list[bool]] | None = None
+    shaded: list[list[bool]] | None = None
 
     @model_validator(mode="after")
     def _check_dimensions(self) -> "PuzzleModel":
@@ -77,6 +82,15 @@ class PuzzleModel(BaseModel):
         for r, row in enumerate(self.letters):
             if len(row) != self.width:
                 raise ValueError(f"letters[{r}] has {len(row)} columns, expected width={self.width}")
+        for name in ("circles", "shaded"):
+            grid = getattr(self, name)
+            if grid is None:
+                continue
+            if len(grid) != self.height:
+                raise ValueError(f"{name} has {len(grid)} rows, expected height={self.height}")
+            for r, row in enumerate(grid):
+                if len(row) != self.width:
+                    raise ValueError(f"{name}[{r}] has {len(row)} columns, expected width={self.width}")
         return self
 
     def to_puzzle(self) -> Puzzle:
@@ -90,6 +104,8 @@ class PuzzleModel(BaseModel):
             copyright=self.copyright,
             notes=self.notes,
             clues=dict(self.clues),
+            circles=[row[:] for row in self.circles] if self.circles is not None else [],
+            shaded=[row[:] for row in self.shaded] if self.shaded is not None else [],
         )
 
     @staticmethod
@@ -104,6 +120,8 @@ class PuzzleModel(BaseModel):
             copyright=p.copyright,
             notes=p.notes,
             clues=p.clues,
+            circles=p.circles,
+            shaded=p.shaded,
         )
 
 

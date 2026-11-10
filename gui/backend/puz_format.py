@@ -39,9 +39,13 @@ real, full multi-character answer. These two sections are appended after
 the notes only when the puzzle actually has a rebus square -- an ordinary
 puzzle's file layout is completely unchanged.
 
-Timer (LTIM) and markup (GEXT) extension sections are still not written,
-and are ignored on read: nothing in this GUI has a concept of a solve
-timer or per-cell markup (circles/shading) to round-trip.
+Circled squares use the standard GEXT extra section: one byte per cell,
+bit 0x80 = circled (also verified against puzpy). It's written only when
+the puzzle actually has a circle. .puz has no standard way to store a
+shaded square, so shading is not written (the GUI warns on export), and
+GEXT's other bits (solver state: incorrect/revealed marks) are ignored on
+read. The timer (LTIM) section is likewise not written and ignored on
+read.
 
 Extra-section layout (GRBS, RTBL, and any other, following the main
 notes field): 4-byte ASCII title, uint16 LE data length, uint16 LE
@@ -179,6 +183,23 @@ def _rebus_sections(puzzle: Puzzle) -> bytes:
     return _extra_section(b"GRBS", bytes(grbs)) + _extra_section(b"RTBL", rtbl)
 
 
+GEXT_CIRCLED = 0x80
+
+
+def _markup_section(puzzle: Puzzle) -> bytes:
+    """GEXT (one byte per cell, 0x80 = circled) -- omitted entirely when
+    no open cell is circled, so a plain puzzle's bytes stay unchanged."""
+    if not puzzle.has_circles():
+        return b""
+    w, h = puzzle.width, puzzle.height
+    gext = bytearray(w * h)
+    for r in range(h):
+        for c in range(w):
+            if puzzle.circles[r][c] and not puzzle.blocks[r][c]:
+                gext[r * w + c] = GEXT_CIRCLED
+    return _extra_section(b"GEXT", bytes(gext))
+
+
 def to_puz_bytes(puzzle: Puzzle) -> bytes:
     w, h = puzzle.width, puzzle.height
     solution = _grid_bytes(puzzle)
@@ -277,6 +298,7 @@ def to_puz_bytes(puzzle: Puzzle) -> bytes:
     # checksum contribution is.
     out += _zstring(puzzle.notes)
     out += _rebus_sections(puzzle)
+    out += _markup_section(puzzle)
     return bytes(out)
 
 
@@ -374,6 +396,14 @@ def from_puz_bytes(data: bytes) -> Puzzle:
                 word = rebus_table.get(grbs[idx] - 1)
                 if word:
                     puzzle.letters[r][c] = word.upper()
+
+    gext = extra_sections.get(b"GEXT")
+    if gext:
+        for r in range(h):
+            for c in range(w):
+                idx = r * w + c
+                if idx < len(gext) and gext[idx] & GEXT_CIRCLED and not puzzle.blocks[r][c]:
+                    puzzle.circles[r][c] = True
 
     clue_pairs = _clue_order(puzzle)
     for (slot_id, _), text in zip(clue_pairs, clue_strings):

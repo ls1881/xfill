@@ -453,7 +453,8 @@ that shorthand for their own direction specifically.
 ## GUI
 
 A browser-based constructor tool — grid editing, dictionary-driven Fill
-(this same solver, with live progress), a rebus editor, .puz/.ipuz/.cfp
+(this same solver, with live progress), a rebus editor, circled and
+shaded squares (⌘O / Ctrl+O and ⌘⇧O / Ctrl+Shift+O), .puz/.ipuz/.cfp
 import/export, NYT-submission and one-page print layouts, and more — sits
 in `gui/`. Unlike the CLI above, it does need its own dependencies
 (FastAPI/uvicorn); `gui/run.sh` handles all of it — first run creates a

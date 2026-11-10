@@ -4,7 +4,7 @@
 // State
 // ---------------------------------------------------------------------------
 
-let puzzle = null;      // {width,height,blocks,letters,title,author,copyright,notes,clues}
+let puzzle = null;      // {width,height,blocks,letters,circles,shaded,title,author,copyright,notes,clues}
 let slots = [];         // server-computed slot list
 let stats = {};
 let selected = null;    // {row, col}
@@ -239,7 +239,25 @@ function loadSavedState() {
   ) {
     return null;
   }
+  ensureMarkupGrids(p);
   return data;
+}
+
+// circles[r][c] / shaded[r][c]: per-cell markup, same shape as blocks --
+// purely presentational (never sent to the solver as anything but
+// passthrough). A puzzle saved before this feature existed has neither
+// key, and a malformed one may have the wrong shape; either way this
+// replaces it with an all-false grid so every reader can index it freely.
+function ensureMarkupGrids(p) {
+  for (const key of ["circles", "shaded"]) {
+    const grid = p[key];
+    const ok =
+      Array.isArray(grid) &&
+      grid.length === p.height &&
+      grid.every((row) => Array.isArray(row) && row.length === p.width);
+    if (!ok) p[key] = Array.from({ length: p.height }, () => Array(p.width).fill(false));
+  }
+  return p;
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +556,7 @@ async function newPuzzle(width, height) {
   const previous = puzzle;
   const data = await apiJson(`/api/puzzle/new?width=${width}&height=${height}`, {});
   if (previous) pushUndo(previous);
-  puzzle = data.puzzle;
+  puzzle = ensureMarkupGrids(data.puzzle);
   slots = data.slots;
   selected = null;
   clearCurrentSave();
@@ -592,11 +610,17 @@ function toggleBlockAt(r, c) {
   const newState = !puzzle.blocks[r][c];
   puzzle.blocks[r][c] = newState;
   puzzle.letters[r][c] = EMPTY;
+  // A block can't be circled or shaded, and a square that was blocked and
+  // reopened shouldn't resurface markup from before it was blocked.
+  puzzle.circles[r][c] = false;
+  puzzle.shaded[r][c] = false;
   const mirror = symmetryMirror(r, c);
   if (mirror) {
     const [mr, mc] = mirror;
     puzzle.blocks[mr][mc] = newState;
     puzzle.letters[mr][mc] = EMPTY;
+    puzzle.circles[mr][mc] = false;
+    puzzle.shaded[mr][mc] = false;
   }
   // Render immediately with the local mutation -- don't wait on the
   // slots/stats round trip just to show the block that was just placed
@@ -604,6 +628,31 @@ function toggleBlockAt(r, c) {
   // nothing until the network response landed a beat later).
   renderGrid();
   refreshSlotsAndStats();
+}
+
+// Toggles a circle (kind "circles") or shading (kind "shaded") on the
+// selected square. Pushes a plain undo entry rather than going through
+// snapshotForUndo: markup never changes letters or slots, so none of the
+// fill-related state snapshotForUndo resets (verification results, the
+// preview, Try Another's base state, forced/failed highlights) goes stale
+// -- and a Fill's results only ever write letters (see
+// applyScopedResultLetters), so markup survives a Fill or Try Another.
+function toggleMarkupAtSelected(kind) {
+  const label = kind === "circles" ? "circle" : "shading";
+  if (!selected) {
+    setStatus(`Select a square to toggle its ${label}`, "error");
+    return;
+  }
+  const { row, col } = selected;
+  if (puzzle.blocks[row][col]) {
+    setStatus(`A block can't have ${kind === "circles" ? "a circle" : "shading"}`, "error");
+    return;
+  }
+  pushUndo(JSON.parse(JSON.stringify(puzzle)));
+  const on = !puzzle[kind][row][col];
+  puzzle[kind][row][col] = on;
+  renderGrid();
+  setStatus(`${on ? "Added" : "Removed"} ${label} at row ${row + 1}, column ${col + 1}`, "ok");
 }
 
 function setLetterAt(r, c, ch) {
@@ -794,6 +843,8 @@ function renderGrid() {
       const blocked = puzzle.blocks[r][c];
       const key = `${r},${c}`;
       if (blocked) cell.classList.add("block");
+      if (!blocked && puzzle.circles[r][c]) cell.classList.add("circled");
+      if (!blocked && puzzle.shaded[r][c]) cell.classList.add("shaded");
       if (activeCells.has(key)) cell.classList.add("in-word");
       if (selected && selected.row === r && selected.col === c) cell.classList.add("selected");
       if (styleIssues.has(key) || symmetryIssues.has(key)) cell.classList.add("style-issue");
@@ -962,8 +1013,10 @@ function backspaceStepBackOntoOpenCell() {
   highlightActiveClue();
 }
 
-// Cmd+F/Ctrl+F (fill), Cmd+Z/Ctrl+Z (undo), and Escape (cancel an
-// in-progress fill) are registered on their own CAPTURE-phase listener,
+// Cmd+F/Ctrl+F (fill), Cmd+Z/Ctrl+Z (undo), Cmd+Shift+Z/Ctrl+Shift+Z
+// (redo), Cmd+O/Ctrl+O (toggle a circle in the selected square),
+// Cmd+Shift+O/Ctrl+Shift+O (toggle shading in the selected square), and
+// Escape (cancel an in-progress fill) are registered on their own CAPTURE-phase listener,
 // ahead of everything else including the browser's own handling: a
 // bubble-phase listener plus preventDefault() was not enough to reliably
 // stop the browser's native "Find in page" from also opening in every
@@ -987,18 +1040,20 @@ document.addEventListener(
     }
 
     const key = e.key.toLowerCase();
-    if (!(e.metaKey || e.ctrlKey) || (key !== "f" && key !== "z")) return;
+    if (!(e.metaKey || e.ctrlKey) || (key !== "f" && key !== "z" && key !== "o")) return;
 
     const tag = (document.activeElement && document.activeElement.tagName) || "";
     const inTextField = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     // Undo/redo inside a text field should act on the *text edit* (native
     // browser behavior), not the grid -- Fill has no such field-local
-    // meaning, so it stays global regardless of focus.
-    if (key === "z" && inTextField) return;
+    // meaning, so it stays global regardless of focus. Circle/shade only
+    // make sense while working in the grid, not mid-clue.
+    if ((key === "z" || key === "o") && inTextField) return;
 
     e.preventDefault();
     e.stopPropagation();
-    if (key === "f") runFill();
+    if (key === "o") toggleMarkupAtSelected(e.shiftKey ? "shaded" : "circles");
+    else if (key === "f") runFill();
     // Shift+Z, not a separate key: e.key is already "Z" (uppercase) with
     // Shift held, and .toLowerCase() above folds that back to plain "z" --
     // e.shiftKey is what actually distinguishes Ctrl/Cmd+Z (undo) from
@@ -2302,7 +2357,8 @@ function buildPrintGridTable(classPrefix, { showNumbers, showLetters }) {
       }
       const num = numbers.get(`${r},${c}`);
       const letter = showLetters && puzzle.letters[r][c] !== EMPTY ? puzzle.letters[r][c] : "";
-      html += `<td class="${classPrefix}-cell">`;
+      html += `<td class="${classPrefix}-cell${puzzle.shaded[r][c] ? " shaded" : ""}">`;
+      if (puzzle.circles[r][c]) html += `<span class="${classPrefix}-circle"></span>`;
       if (num) html += `<span class="${classPrefix}-num">${num}</span>`;
       if (letter) {
         html += `<span class="${classPrefix}-letter${letter.length > 1 ? " rebus" : ""}">${escapeAttr(letter)}</span>`;
@@ -2358,6 +2414,8 @@ function buildNytSubmissionHtml() {
   table.nyt-grid { border-collapse: collapse; margin: 0 auto; }
   table.nyt-grid td { width: 26px; height: 26px; border: 1px solid #000; position: relative; padding: 0; }
   td.nyt-grid-block { background: #000; }
+  td.nyt-grid-cell.shaded { background: #c8c8c8; }
+  .nyt-grid-circle { position: absolute; inset: 1px; border: 0.75px solid #000; border-radius: 50%; }
   .nyt-grid-num { position: absolute; top: 1px; left: 2px; font-size: 6.5pt; }
   .nyt-grid-letter { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14pt; font-weight: 600; }
   .nyt-grid-letter.rebus { font-size: 8pt; }
@@ -2416,6 +2474,8 @@ function buildOnePagePuzzleHtml() {
   table.op-grid { border-collapse: collapse; flex: 0 0 auto; }
   table.op-grid td { width: 17px; height: 17px; border: 0.5px solid #000; position: relative; padding: 0; }
   td.op-grid-block { background: #000; }
+  td.op-grid-cell.shaded { background: #c8c8c8; }
+  .op-grid-circle { position: absolute; inset: 1px; border: 0.75px solid #000; border-radius: 50%; }
   .op-grid-num { position: absolute; top: 0; left: 1px; font-size: 5pt; }
   .op-grid-letter { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 9pt; font-weight: 600; }
   .op-grid-letter.rebus { font-size: 5pt; }
@@ -2472,7 +2532,9 @@ function buildImageCellData(kind) {
       const blocked = puzzle.blocks[r][c];
       const number = !blocked ? numbers.get(`${r},${c}`) || null : null;
       const letter = !blocked && kind === "solution" && puzzle.letters[r][c] !== EMPTY ? puzzle.letters[r][c] : null;
-      cells.push({ row: r, col: c, blocked, number, letter });
+      const circled = !blocked && puzzle.circles[r][c];
+      const shaded = !blocked && puzzle.shaded[r][c];
+      cells.push({ row: r, col: c, blocked, number, letter, circled, shaded });
     }
   }
   return cells;
@@ -2499,11 +2561,16 @@ function drawPuzzleCanvas(cells, width, height, cellSize = 40) {
       ctx.fillRect(x, y, cellSize, cellSize);
       continue;
     }
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = cell.shaded ? "#c8c8c8" : "#ffffff";
     ctx.fillRect(x, y, cellSize, cellSize);
     ctx.strokeStyle = "#000000";
     ctx.lineWidth = 1;
     ctx.strokeRect(x, y, cellSize, cellSize);
+    if (cell.circled) {
+      ctx.beginPath();
+      ctx.arc(x + cellSize / 2, y + cellSize / 2, cellSize / 2 - 1.5, 0, 2 * Math.PI);
+      ctx.stroke();
+    }
     if (cell.number) {
       ctx.fillStyle = "#000000";
       ctx.font = "9px sans-serif";
@@ -2663,7 +2730,7 @@ function wireToolbar() {
     try {
       const data = await api("/api/puzzle/import", { method: "POST", body: formData });
       if (puzzle) pushUndo(puzzle);
-      puzzle = data.puzzle;
+      puzzle = ensureMarkupGrids(data.puzzle);
       slots = data.slots;
       selected = null;
       clearCurrentSave();
@@ -2788,9 +2855,17 @@ function wireToolbar() {
           // when it's actually true, not a blanket caveat on every cfp
           // export regardless of content.
           const hasRebus = format === "cfp" && puzzle.letters.some((row) => row.some((ch) => ch && ch !== EMPTY && ch.length > 1));
+          // Same idea for markup: .ipuz keeps both circles and shading,
+          // .puz keeps circles only (GEXT has no shading bit), and .cfp
+          // keeps neither -- see puz_format.py/cfp_format.py.
+          const anyMarked = (grid) => grid.some((row, r) => row.some((on, c) => on && !puzzle.blocks[r][c]));
+          const lost = [];
+          if (hasRebus) lost.push("rebus squares are reduced to their first letter");
+          if (format === "cfp" && anyMarked(puzzle.circles)) lost.push("circles aren't saved");
+          if ((format === "cfp" || format === "puz") && anyMarked(puzzle.shaded)) lost.push("shading isn't saved");
           setStatus(
-            hasRebus ? `Exported ${filename} — rebus squares are reduced to their first letter (.cfp has no rebus support)` : `Exported ${filename}`,
-            hasRebus ? "error" : "ok"
+            lost.length ? `Exported ${filename} — ${lost.join("; ")} (.${format} doesn't support ${lost.length > 1 ? "them" : "it"}; use .ipuz to keep everything)` : `Exported ${filename}`,
+            lost.length ? "error" : "ok"
           );
         } catch (err) {
           setStatus(`Export failed: ${err.message}`, "error");
@@ -2807,6 +2882,8 @@ function wireToolbar() {
   // baseState/scopeCells/attemptOffset's exact names, so it happens to
   // behave like {} either way -- this avoids relying on that coincidence.
   document.getElementById("btn-fill").addEventListener("click", () => runFill());
+  document.getElementById("btn-circle").addEventListener("click", () => puzzle && toggleMarkupAtSelected("circles"));
+  document.getElementById("btn-shade").addEventListener("click", () => puzzle && toggleMarkupAtSelected("shaded"));
   document.getElementById("btn-cancel-fill").addEventListener("click", cancelFill);
   document.getElementById("btn-try-another-fill").addEventListener("click", tryAnotherFill);
 
@@ -2902,7 +2979,7 @@ function wireSaveLoad() {
       const data = await apiJson("/api/puzzle/load", { name });
       if (puzzle) pushUndo(puzzle);
       currentSaveName = data.name;
-      puzzle = data.puzzle;
+      puzzle = ensureMarkupGrids(data.puzzle);
       slots = data.slots;
       selected = null;
       clearFillFailedHighlight();

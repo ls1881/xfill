@@ -11,6 +11,13 @@ reconstructed from memory:
     multi-character answer, e.g. "STAR"; the spec allows a solution
     value of any length, no separate rebus section needed (unlike .puz).
   - "clues.Across" / "clues.Down": arrays of [number, "clue text"] pairs.
+  - Per-cell markup: a "puzzle" grid cell may instead be an object,
+    {"cell": <number or 0>, "style": {...}} -- "shapebg": "circle" draws a
+    circle in the square, and "color" (an RGB hex string, no "#") sets
+    its background. This writer uses "color": "C0C0C0" for a shaded
+    square; on read, any background "color" or "highlight": true counts
+    as shaded. "style" may also be the name of an entry in the document's
+    top-level "styles" map, which is resolved on read.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ from grid_model import EMPTY, Puzzle
 
 KIND = ["http://ipuz.org/crossword#1"]
 VERSION = "http://ipuz.org/v2"
+SHADE_COLOR = "C0C0C0"
 
 
 def to_ipuz_dict(puzzle: Puzzle) -> dict:
@@ -38,7 +46,13 @@ def to_ipuz_dict(puzzle: Puzzle) -> dict:
                 prow.append("#")
                 srow.append("#")
             else:
-                prow.append(number_at.get((r, c), 0))
+                number = number_at.get((r, c), 0)
+                style = {}
+                if puzzle.circles[r][c]:
+                    style["shapebg"] = "circle"
+                if puzzle.shaded[r][c]:
+                    style["color"] = SHADE_COLOR
+                prow.append({"cell": number, "style": style} if style else number)
                 ch = puzzle.letters[r][c]
                 srow.append(ch if ch != EMPTY else "")
         puzzle_grid.append(prow)
@@ -70,6 +84,17 @@ def to_ipuz_bytes(puzzle: Puzzle) -> bytes:
     return json.dumps(to_ipuz_dict(puzzle), ensure_ascii=False, indent=2).encode("utf-8")
 
 
+def _cell_style(cell, named_styles: dict) -> dict:
+    """A "puzzle" grid cell's style dict, or {} -- resolving a style given
+    by name through the document's top-level "styles" map."""
+    if not isinstance(cell, dict):
+        return {}
+    style = cell.get("style")
+    if isinstance(style, str):
+        style = named_styles.get(style)
+    return style if isinstance(style, dict) else {}
+
+
 def from_ipuz_bytes(data: bytes) -> Puzzle:
     doc = json.loads(data.decode("utf-8"))
     dims = doc["dimensions"]
@@ -79,14 +104,25 @@ def from_ipuz_bytes(data: bytes) -> Puzzle:
     solution = doc.get("solution")
     grid = doc.get("puzzle")
     block_marker = doc.get("block", "#")
+    named_styles = doc.get("styles") if isinstance(doc.get("styles"), dict) else {}
 
     for r in range(height):
         for c in range(width):
             src_row = solution[r] if solution is not None else grid[r]
             cell = src_row[c]
+            # Either grid may wrap a cell's value in an object ({"cell": ...}
+            # in "puzzle", {"value": ...} in "solution") to attach a style.
+            if isinstance(cell, dict):
+                cell = cell.get("value", cell.get("cell"))
             if cell == block_marker or cell == "#":
                 puzzle.blocks[r][c] = True
                 continue
+            if grid is not None:
+                style = _cell_style(grid[r][c], named_styles)
+                if style.get("shapebg") == "circle":
+                    puzzle.circles[r][c] = True
+                if style.get("color") or style.get("highlight") is True:
+                    puzzle.shaded[r][c] = True
             if solution is not None:
                 # Kept whole, not truncated to one character: the ipuz spec
                 # allows a solution cell's value to be more than one
